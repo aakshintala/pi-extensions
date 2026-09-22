@@ -1,7 +1,10 @@
-// Display bundle surface (issue #9): registered lifecycle behavior plus
+// Display extension surface (issue #9): registered lifecycle behavior plus
 // the derived-state shapes behind every condensed display.
 import { describe, it } from "node:test";
 import assert from "node:assert";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import factory, {
   buildStatusLine,
   compactCount,
@@ -12,6 +15,7 @@ import factory, {
   formatQuota,
   formatStamp,
   formatToolCall,
+  readGitBranch,
   summarizeUsage,
 } from "../extensions/display/index.ts";
 
@@ -34,7 +38,19 @@ function makePi() {
 }
 
 function assistant(input, output, cost) {
-  return { type: "message", message: { role: "assistant", usage: { input, output, cost: { total: cost } } } };
+  return {
+    type: "message",
+    timestamp: "2026-09-22T20:00:00.000Z",
+    message: { role: "assistant", usage: { input, output, cost: { total: cost } } },
+  };
+}
+
+function costless(input, output) {
+  return {
+    type: "message",
+    timestamp: "2026-09-22T20:00:00.000Z",
+    message: { role: "assistant", usage: { input, output } },
+  };
 }
 
 function makeCtx(overrides = {}) {
@@ -54,8 +70,8 @@ function makeCtx(overrides = {}) {
   };
 }
 
-async function fire(pi, event, ctx) {
-  for (const fn of pi.handlers[event] ?? []) await fn({}, ctx);
+async function fire(pi, event, ctx, payload = {}) {
+  for (const fn of pi.handlers[event] ?? []) await fn(payload, ctx);
 }
 
 describe("display surface", () => {
@@ -65,13 +81,23 @@ describe("display surface", () => {
     assert.ok(!(returned instanceof Promise), "factory must be synchronous");
     assert.deepEqual(pi.registered.commands, [], "display adds no commands");
     assert.deepEqual(pi.registered.tools, [], "display adds no tools");
-    assert.ok(pi.handlers["session_start"], "handles session_start");
-    assert.ok(pi.handlers["model_select"], "handles model_select");
-    assert.ok(pi.handlers["turn_end"], "handles turn_end");
-    assert.ok(pi.handlers["session_shutdown"], "handles session_shutdown");
+    for (const event of [
+      "session_start",
+      "model_select",
+      "turn_end",
+      "message_end",
+      "tool_call",
+      "tool_execution_start",
+      "tool_execution_end",
+      "session_compact",
+      "session_compact_failed",
+      "session_shutdown",
+    ]) {
+      assert.ok(pi.handlers[event], `handles ${event}`);
+    }
   });
 
-  it("session_start renders measured model, context, and usage", async () => {
+  it("session_start renders measured model, context, quota, usage, and stamp", async () => {
     const pi = makePi();
     factory(pi);
     const ctx = makeCtx();
@@ -79,7 +105,9 @@ describe("display surface", () => {
     const line = ctx.status.get("display");
     assert.match(line, /anthropic\/claude-opus/);
     assert.match(line, /12.5k tokens \(6%\)/);
+    assert.match(line, /quota 188k\/200k/);
     assert.match(line, /↑3k ↓1.5k \$0\.05/);
+    assert.match(line, /message/);
   });
 
   it("model_select and turn_end refresh from current ctx reads", async () => {
@@ -95,16 +123,44 @@ describe("display surface", () => {
     assert.match(ctx.status.get("display"), /↑2k/);
   });
 
-  it("omits unmeasured segments instead of inventing state", async () => {
+  it("tool hooks render a transient tool segment from the event payload", async () => {
     const pi = makePi();
     factory(pi);
-    const ctx = makeCtx({
-      model: undefined,
-      getContextUsage: () => undefined,
-      sessionManager: { getBranch: () => [] },
-    });
+    const ctx = makeCtx();
     await fire(pi, "session_start", ctx);
-    assert.ok(!ctx.status.has("display"), "empty measurement leaves the slot untouched");
+    assert.ok(!ctx.status.get("display").includes("read a.ts"));
+    await fire(pi, "tool_execution_start", ctx, { toolName: "read", args: { path: "a.ts" } });
+    assert.match(ctx.status.get("display"), /read a\.ts/);
+    await fire(pi, "tool_call", ctx, { toolName: "bash", input: { command: "ls" } });
+    assert.match(ctx.status.get("display"), /\$ ls/);
+    await fire(pi, "turn_end", ctx);
+    assert.ok(!ctx.status.get("display").includes("$ ls"), "tool segment is transient");
+  });
+
+  it("compaction refresh keeps the footer on the post-compaction context", async () => {
+    const pi = makePi();
+    factory(pi);
+    const ctx = makeCtx();
+    await fire(pi, "session_start", ctx);
+    ctx.getContextUsage = () => ({ tokens: null, contextWindow: 200000, percent: null });
+    await fire(pi, "session_compact", ctx);
+    assert.ok(!ctx.status.get("display").includes("tokens"), "unmeasured context drops out");
+    assert.match(ctx.status.get("display"), /anthropic\/claude-opus/);
+    await fire(pi, "session_compact_failed", ctx);
+    assert.match(ctx.status.get("display"), /anthropic\/claude-opus/);
+  });
+
+  it("clears the slot when values become unmeasured, never locking stale state", async () => {
+    const pi = makePi();
+    factory(pi);
+    const ctx = makeCtx();
+    await fire(pi, "session_start", ctx);
+    assert.ok(ctx.status.has("display"));
+    ctx.model = undefined;
+    ctx.getContextUsage = () => undefined;
+    ctx.sessionManager = { getBranch: () => [] };
+    await fire(pi, "turn_end", ctx);
+    assert.ok(!ctx.status.has("display"), "fully-unmeasured refresh clears the slot");
   });
 
   it("survives hostile ctx reads without breaking the session", async () => {
@@ -142,7 +198,7 @@ describe("display surface", () => {
 });
 
 describe("display derived state", () => {
-  it("summarizeUsage totals assistant usage, skipping noise", () => {
+  it("summarizeUsage totals assistant usage, skipping noise; cost stays undefined until measured", () => {
     assert.deepEqual(summarizeUsage([assistant(100, 50, 0.5), assistant(200, 100, 0.25)]), {
       input: 300,
       output: 150,
@@ -150,7 +206,14 @@ describe("display derived state", () => {
       turns: 2,
     });
     assert.deepEqual(summarizeUsage([{ type: "message", message: { role: "user" } }, null, "x"]).turns, 0);
-    assert.deepEqual(summarizeUsage(undefined), { input: 0, output: 0, cost: 0, turns: 0 });
+    assert.deepEqual(summarizeUsage(undefined), { input: 0, output: 0, cost: undefined, turns: 0 });
+    assert.equal(summarizeUsage([costless(100, 50)]).cost, undefined);
+  });
+
+  it("usage omits the dollar segment until a cost is measured", () => {
+    const line = deriveStatus(makeCtx({ sessionManager: { getBranch: () => [costless(3000, 1500)] } }));
+    assert.match(line, /↑3k ↓1\.5k/);
+    assert.ok(!line.includes("$"), "no invented $0.00");
   });
 
   it("compactCount formats at the k boundary", () => {
@@ -159,29 +222,69 @@ describe("display derived state", () => {
     assert.equal(compactCount(NaN), undefined);
   });
 
-  it("formatModel / formatContextUsage return undefined when unmeasured", () => {
+  it("formatModel / formatContextUsage return undefined when unmeasured; percent rounds", () => {
     assert.equal(formatModel({ provider: "a", id: "b" }), "a/b");
     assert.equal(formatModel(undefined), undefined);
     assert.equal(formatContextUsage({ tokens: null }), undefined);
     assert.equal(formatContextUsage({ tokens: 500, percent: null }), "500 tokens");
+    assert.equal(formatContextUsage({ tokens: 12500, percent: 6.7 }), "12.5k tokens (7%)");
   });
 
-  it("formatQuota renders measured headroom, labels the missing source", () => {
+  it("formatQuota renders measured headroom, undefined otherwise", () => {
     assert.equal(formatQuota({ remaining: 3000, limit: 10000 }), "quota 3k/10k");
+    assert.equal(formatQuota({ remaining: 3000 }), "quota 3k");
     assert.equal(formatQuota(undefined), undefined);
-    assert.equal(formatQuota({}), "quota: not yet implemented");
+    assert.equal(formatQuota(null), undefined);
+    assert.equal(formatQuota({}), undefined);
+    assert.equal(formatQuota({ limit: 10000 }), undefined);
+  });
+
+  it("readGitBranch measures the branch, following worktree pointers", () => {
+    const root = mkdtempSync(join(tmpdir(), "display-git-"));
+    assert.equal(readGitBranch(join(root, "missing")), undefined);
+    const repo = join(root, "repo");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/feat/9-display\n");
+    assert.equal(readGitBranch(repo), "feat/9-display");
+    writeFileSync(join(repo, ".git", "HEAD"), "d34db33fd34db33fd34db33fd34db33fd34db33f\n");
+    assert.equal(readGitBranch(repo), "detached");
+    const real = join(root, "real");
+    mkdirSync(join(real, ".git"), { recursive: true });
+    writeFileSync(join(real, ".git", "HEAD"), "ref: refs/heads/main\n");
+    const wt = join(root, "wt");
+    mkdirSync(wt, { recursive: true });
+    writeFileSync(join(wt, ".git"), `gitdir: ${join(real, ".git")}\n`);
+    assert.equal(readGitBranch(wt), "main");
+    assert.equal(readGitBranch(undefined), undefined);
   });
 
   it("formatGitBranch renders only a measured branch", () => {
     assert.equal(formatGitBranch("main"), "(main)");
-    assert.equal(formatGitBranch(null), "");
-    assert.equal(formatGitBranch(undefined), "");
+    assert.equal(formatGitBranch(null), undefined);
+    assert.equal(formatGitBranch(undefined), undefined);
+    assert.equal(formatGitBranch(""), undefined);
   });
 
-  it("formatStamp condenses entries, labels unknown shapes", () => {
+  it("deriveStatus wires the git read into the live line", () => {
+    const root = mkdtempSync(join(tmpdir(), "display-status-"));
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+    const line = deriveStatus(makeCtx({ cwd: root }));
+    assert.match(line, /\(main\)/);
+    assert.ok(!deriveStatus(makeCtx()).includes("(main)"));
+  });
+
+  it("formatStamp condenses entries, labels unknown shapes, reads ISO timestamps", () => {
     assert.equal(formatStamp({ type: "tool_call" }), "tool_call");
     assert.match(formatStamp({ type: "message", timestamp: 0 }), /^message · /);
+    assert.match(formatStamp({ type: "message", timestamp: "2026-09-22T20:00:00.000Z" }), /^message · /);
     assert.equal(formatStamp({}), "unknown entry");
+  });
+
+  it("deriveStatus stamps the latest branch entry, omits when the branch is empty", () => {
+    assert.match(deriveStatus(makeCtx()), /message/);
+    const line = deriveStatus(makeCtx({ sessionManager: { getBranch: () => [] } }));
+    assert.ok(line === undefined || !line.includes("unknown entry"));
   });
 
   it("formatToolCall condenses known tools, names unknown ones", () => {
