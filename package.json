@@ -1,0 +1,15 @@
+{
+  "name": "@aakshintala/pi-extensions",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Locally rebuilt Pi extension package. Upstream source is never loaded by Pi.",
+  "keywords": ["pi-package"],
+  "scripts": {
+    "test": "node --test tests/",
+    "audit": "node audit/index.mjs",
+    "provenance": "node tests/provenance.mjs"
+  },
+  "pi": {
+    "extensions": ["./extensions/*/index.ts", "./extensions/*.ts"]
+  }
+}
