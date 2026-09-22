@@ -1,11 +1,13 @@
 {
   "piVersion": "0.87.1",
-  "capturedAt": "2026-09-22T22:32:45.787Z",
+  "capturedAt": "2026-09-22T22:44:01.943Z",
   "activeTools": [
     "read",
     "bash",
     "edit",
-    "write"
+    "write",
+    "jobs",
+    "structured_return"
   ],
   "allTools": [
     {
@@ -43,12 +45,9 @@
     },
     {
       "name": "bash",
-      "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+      "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds. With run_in_background, launches into the session job table and returns a job id for jobs instead of waiting.",
       "parameters": {
         "type": "object",
-        "required": [
-          "command"
-        ],
         "properties": {
           "command": {
             "type": "string",
@@ -57,17 +56,26 @@
           "timeout": {
             "type": "number",
             "description": "Timeout in seconds (optional, no default timeout)"
+          },
+          "run_in_background": {
+            "type": "boolean",
+            "description": "Launch in the background and return a job id for jobs instead of waiting"
           }
-        }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false
       },
       "promptGuidelines": [
         "You can inspect PI_* environment variables for current model and session details."
       ],
       "sourceInfo": {
-        "path": "<builtin:bash>",
-        "source": "builtin",
-        "scope": "temporary",
-        "origin": "top-level"
+        "path": "/private/tmp/pi-extensions-11-background/extensions/background/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
+        "scope": "user",
+        "origin": "package",
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -277,6 +285,84 @@
         "scope": "temporary",
         "origin": "top-level"
       }
+    },
+    {
+      "name": "jobs",
+      "description": "Manage background processes started by bash run_in_background. Actions: list jobs, output (tail of a job log), wait (until a job exits), kill. One lifecycle with bash; no separate background tools.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "output",
+              "wait",
+              "kill"
+            ],
+            "description": "Job action"
+          },
+          "jobId": {
+            "type": "string",
+            "description": "Job id from bash run_in_background (not needed for list)"
+          },
+          "timeout": {
+            "type": "number",
+            "description": "Seconds for wait to report still-running instead of exiting"
+          },
+          "maxLines": {
+            "type": "number",
+            "description": "Tail lines for output (default 200)"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "sourceInfo": {
+        "path": "/private/tmp/pi-extensions-11-background/extensions/background/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
+        "scope": "user",
+        "origin": "package",
+        "baseDir": "/private/tmp/pi-extensions-11-background"
+      }
+    },
+    {
+      "name": "structured_return",
+      "description": "Run a command to completion and return compact output plus the full-log path. Always stores the full log; resolves a named parser (tap) or falls back to tail. Separate from bash: parser behavior never complicates bash.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Shell command to run to completion"
+          },
+          "timeout": {
+            "type": "number",
+            "description": "Timeout in seconds (optional, no default timeout)"
+          },
+          "parseAs": {
+            "type": "string",
+            "description": "Named parser for the full log (tap); anything else uses tail"
+          },
+          "maxLines": {
+            "type": "number",
+            "description": "Tail window for the default parser (default 2000)"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false
+      },
+      "sourceInfo": {
+        "path": "/private/tmp/pi-extensions-11-background/extensions/background/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
+        "scope": "user",
+        "origin": "package",
+        "baseDir": "/private/tmp/pi-extensions-11-background"
+      }
     }
   ],
   "commands": [
@@ -285,11 +371,11 @@
       "description": "Start a new session with familiar terminology",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -297,11 +383,11 @@
       "description": "Switch themes interactively",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -309,11 +395,11 @@
       "description": "Manage subagent sessions",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -321,11 +407,11 @@
       "description": "Track session tasks",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -333,11 +419,11 @@
       "description": "Manage background processes",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -345,11 +431,11 @@
       "description": "Manage background jobs",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -357,11 +443,11 @@
       "description": "Coordinate with peer sessions",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -369,11 +455,11 @@
       "description": "Manage skills",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -381,11 +467,11 @@
       "description": "Inspect cost and prompt composition",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -393,11 +479,11 @@
       "description": "Inspect context composition",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -405,11 +491,11 @@
       "description": "Show or set Ponytail mode (lite, full, ultra)",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -417,11 +503,11 @@
       "description": "Infrequent administration for search, display, and diagnostics",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -429,11 +515,11 @@
       "description": "On-demand Ponytail complexity audit",
       "source": "extension",
       "sourceInfo": {
-        "path": "/private/tmp/pi-extensions-9-display/extensions/commands/index.ts",
-        "source": "/private/tmp/pi-extensions-9-display",
+        "path": "/private/tmp/pi-extensions-11-background/extensions/commands/index.ts",
+        "source": "/private/tmp/pi-extensions-11-background",
         "scope": "user",
         "origin": "package",
-        "baseDir": "/private/tmp/pi-extensions-9-display"
+        "baseDir": "/private/tmp/pi-extensions-11-background"
       }
     },
     {
@@ -450,5 +536,5 @@
   ],
   "skills": [],
   "models": [],
-  "systemPrompt": "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.\n\n<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n</tools>\n\n<rules>\n- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Use edit for precise changes (edits[].oldText must match exactly)\n- When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls\n- Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.\n- Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/README.md\n- Additional docs: /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs\n- Examples: /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)\n- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing\n- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)\n</docs>\n\n<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/private/tmp/pi-extensions-9-display/AGENTS.md\">\n# pi-extensions\n\nCustomized Pi extensions maintained as a lightweight monorepo.\n\n## Agent skills\n\n### Issue tracker\n\nIssues live in GitHub Issues via the `gh` CLI. See `docs/agents/issue-tracker.md`.\n\n### Triage labels\n\nDefault five canonical labels used as-is. See `docs/agents/triage-labels.md`.\n\n### Domain docs\n\nSingle-context layout (one `CONTEXT.md` + `docs/adr/` at root, created lazily). See `docs/agents/domain.md`.\n\n</project_instructions>\n</project_context>\n\n<cwd>\n/private/tmp/pi-extensions-9-display\n</cwd>"
+  "systemPrompt": "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.\n\n<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n\nIn addition to the tools above, you may have access to other custom tools depending on the project.\n</tools>\n\n<rules>\n- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Use edit for precise changes (edits[].oldText must match exactly)\n- When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls\n- Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.\n- Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/README.md\n- Additional docs: /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs\n- Examples: /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), pi packages (docs/packages.md), environment variables (docs/environment-variables.md)\n- When working on pi topics, read the docs and examples, and follow .md cross-references before implementing\n- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)\n</docs>\n\n<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/private/tmp/pi-extensions-11-background/AGENTS.md\">\n# pi-extensions\n\nCustomized Pi extensions maintained as a lightweight monorepo.\n\n## Agent skills\n\n### Issue tracker\n\nIssues live in GitHub Issues via the `gh` CLI. See `docs/agents/issue-tracker.md`.\n\n### Triage labels\n\nDefault five canonical labels used as-is. See `docs/agents/triage-labels.md`.\n\n### Domain docs\n\nSingle-context layout (one `CONTEXT.md` + `docs/adr/` at root, created lazily). See `docs/agents/domain.md`.\n\n</project_instructions>\n</project_context>\n\n<cwd>\n/private/tmp/pi-extensions-11-background\n</cwd>"
 }
