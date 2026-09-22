@@ -146,37 +146,43 @@ describe("commands surface", () => {
     assert.match(last(unknown).message, /unknown/);
   });
 
-  it("/ponytail shows and sets a validated mode", async () => {
+  it("/ponytail shows a default, sets a validated mode, and isolates sessions", async () => {
     const pi = makePi();
     factory(pi);
-    const ctx = makeCtx();
-    await pi.commands.get("ponytail").handler("", ctx);
-    assert.match(last(ctx).message, /full/);
-    await pi.commands.get("ponytail").handler("ultra", ctx);
-    assert.match(last(ctx).message, /ultra/);
-    await pi.commands.get("ponytail").handler("bogus", ctx);
-    assert.equal(last(ctx).type, "error");
-    await pi.commands.get("ponytail").handler("", ctx);
-    assert.match(last(ctx).message, /ultra/);
+    // Fresh session starts at the default regardless of execution order.
+    const first = makeCtx();
+    await pi.commands.get("ponytail").handler("", first);
+    assert.match(last(first).message, /full/);
+    await pi.commands.get("ponytail").handler("ultra", first);
+    assert.match(last(first).message, /ultra/);
+    await pi.commands.get("ponytail").handler("bogus", first);
+    assert.equal(last(first).type, "error");
+    await pi.commands.get("ponytail").handler("", first);
+    assert.match(last(first).message, /ultra/);
+    // A second session is unaffected by the first.
+    const second = makeCtx();
+    await pi.commands.get("ponytail").handler("", second);
+    assert.match(last(second).message, /full/);
   });
 
-  it("/kit lists topics and resolves known/unknown topics", async () => {
+  it("/kit lists unimplemented topics and resolves known/unknown topics", async () => {
     const pi = makePi();
     factory(pi);
     const ctx = makeCtx();
     await pi.commands.get("kit").handler("", ctx);
+    assert.match(last(ctx).message, /not yet implemented/);
     assert.match(last(ctx).message, /diagnostics/);
     await pi.commands.get("kit").handler("diagnostics", ctx);
-    assert.match(last(ctx).message, /ok/);
+    assert.match(last(ctx).message, /not yet implemented/);
     await pi.commands.get("kit").handler("nope", ctx);
     assert.equal(last(ctx).type, "error");
   });
 
-  it("/skill:ponytail-review notifies a review line", async () => {
+  it("/skill:ponytail-review is labeled unimplemented", async () => {
     const pi = makePi();
     factory(pi);
     const ctx = makeCtx();
     await pi.commands.get("skill:ponytail-review").handler("", ctx);
-    assert.match(last(ctx).message, /Ponytail review/);
+    assert.match(last(ctx).message, /not yet implemented/);
   });
 });

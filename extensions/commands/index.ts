@@ -4,18 +4,28 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // registered handlers with observable UI effects, no model-facing tools,
 // no background resources, no dependencies. Full backing behavior for
 // agents/tasks/jobs/skills/intercom lands in later migration steps; until
-// then list-type commands report this package's (empty) state honestly.
+// then empty-state commands say so via one shared table, and staged
+// placeholders (kit topics, ponytail-review) are labeled as unimplemented,
+// never presented as measured fact.
 
-// ponytail: module-level mode flag; per-session store if modes ever diverge.
-let ponytailMode = "full";
+const MODES = ["lite", "full", "ultra"] as const;
+const DEFAULT_MODE = "full";
 
-const KIT_TOPICS: Record<string, string> = {
-  search: "Search administration: grep/find override status.",
-  "structured-return": "Structured-return statistics: no runs recorded.",
-  stamps: "Stamp display: event stamps only, no per-event records.",
-  "tool-display": "Tool display: compact rendering, errors expand.",
-  diagnostics: "Extension diagnostics: commands package ok.",
+// Per-session Ponytail mode, keyed by session identity. No module-global
+// mode value: sessions never share state, and a missing entry is the default.
+const sessionModes = new WeakMap<object, string>();
+
+// Staged empty states: backing trackers land in later migration steps.
+const EMPTY_STATES: Record<string, { description: string; message: string }> = {
+  agents: { description: "Manage subagent sessions", message: "No active subagents" },
+  tasks: { description: "Track session tasks", message: "No active tasks" },
+  bg: { description: "Manage background processes", message: "No background processes" },
+  jobs: { description: "Manage background jobs", message: "No background jobs" },
+  intercom: { description: "Coordinate with peer sessions", message: "No intercom peers" },
 };
+
+// Staged admin topics: detail views land with their owning migration steps.
+const KIT_TOPICS = ["search", "structured-return", "stamps", "tool-display", "diagnostics"];
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("clear", {
@@ -28,6 +38,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("theme", {
     description: "Switch themes interactively",
     handler: async (args, ctx) => {
+      // Placeholder (owning later step): interactive theme picker; direct set only.
       const name = args.trim();
       if (!name) {
         ctx.ui.notify("Usage: /theme <name>", "info");
@@ -41,37 +52,20 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("agents", {
-    description: "Manage subagent sessions",
-    handler: async (_args, ctx) => {
-      ctx.ui.notify("No active subagents", "info");
-    },
-  });
-
-  pi.registerCommand("tasks", {
-    description: "Track session tasks",
-    handler: async (_args, ctx) => {
-      ctx.ui.notify("No active tasks", "info");
-    },
-  });
-
-  pi.registerCommand("bg", {
-    description: "Manage background processes",
-    handler: async (_args, ctx) => {
-      ctx.ui.notify("No background processes", "info");
-    },
-  });
-
-  pi.registerCommand("jobs", {
-    description: "Manage background jobs",
-    handler: async (_args, ctx) => {
-      ctx.ui.notify("No background jobs", "info");
-    },
-  });
+  for (const [name, { description, message }] of Object.entries(EMPTY_STATES)) {
+    pi.registerCommand(name, {
+      description,
+      handler: async (_args, ctx) => {
+        ctx.ui.notify(message, "info");
+      },
+    });
+  }
 
   pi.registerCommand("skills", {
     description: "Manage skills",
     handler: async (_args, ctx) => {
+      // Placeholder (owning later step): verified against fakes only;
+      // real-pi skills-source verification belongs to the skills step.
       const names = pi
         .getCommands()
         .filter((c) => c.source === "skill")
@@ -80,16 +74,10 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("intercom", {
-    description: "Coordinate with peer sessions",
-    handler: async (_args, ctx) => {
-      ctx.ui.notify("No intercom peers", "info");
-    },
-  });
-
   pi.registerCommand("usage", {
     description: "Inspect cost and prompt composition",
     handler: async (_args, ctx) => {
+      // Placeholder (owning later step): cost detail; context tokens only.
       const usage = ctx.getContextUsage();
       ctx.ui.notify(
         usage?.tokens != null
@@ -110,19 +98,19 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("ponytail", {
-    description: "Show or set Ponytail mode (lite, full, ultra)",
+    description: `Show or set Ponytail mode (${MODES.join(", ")})`,
     handler: async (args, ctx) => {
       const mode = args.trim();
       if (!mode) {
-        ctx.ui.notify(`Ponytail mode: ${ponytailMode}`, "info");
+        ctx.ui.notify(`Ponytail mode: ${sessionModes.get(ctx.sessionManager) ?? DEFAULT_MODE}`, "info");
         return;
       }
-      if (!["lite", "full", "ultra"].includes(mode)) {
-        ctx.ui.notify(`Unknown Ponytail mode: ${mode} (lite, full, ultra)`, "error");
+      if (!(MODES as readonly string[]).includes(mode)) {
+        ctx.ui.notify(`Unknown Ponytail mode: ${mode} (${MODES.join(", ")})`, "error");
         return;
       }
-      ponytailMode = mode;
-      ctx.ui.notify(`Ponytail mode: ${ponytailMode}`, "info");
+      sessionModes.set(ctx.sessionManager, mode);
+      ctx.ui.notify(`Ponytail mode: ${mode}`, "info");
     },
   });
 
@@ -131,11 +119,13 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const topic = args.trim();
       if (!topic) {
-        ctx.ui.notify(`kit topics: ${Object.keys(KIT_TOPICS).join(", ")}`, "info");
+        ctx.ui.notify(`kit topics (not yet implemented): ${KIT_TOPICS.join(", ")}`, "info");
         return;
       }
-      const detail = KIT_TOPICS[topic];
-      ctx.ui.notify(detail ?? `Unknown kit topic: ${topic}`, detail ? "info" : "error");
+      ctx.ui.notify(
+        KIT_TOPICS.includes(topic) ? `kit ${topic}: not yet implemented` : `Unknown kit topic: ${topic}`,
+        KIT_TOPICS.includes(topic) ? "info" : "error",
+      );
     },
   });
 
@@ -143,7 +133,10 @@ export default function (pi: ExtensionAPI) {
     description: "On-demand Ponytail complexity audit",
     handler: async (_args, ctx) => {
       const entries = ctx.sessionManager.getEntries().length;
-      ctx.ui.notify(`Ponytail review: ${entries} session entries, no complexity findings recorded`, "info");
+      ctx.ui.notify(
+        `Ponytail review not yet implemented (${entries} session entries in scope)`,
+        "info",
+      );
     },
   });
 }
