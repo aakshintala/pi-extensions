@@ -61,20 +61,26 @@ export function checkTools(snapshot, baseline) {
   return `tools ok (${active.length} active)`;
 }
 
-export function checkSkills(snapshot, baseline) {
+export function checkSkills(snapshot, baseline, budgets) {
   if (!Array.isArray(snapshot.skills)) {
     throw new Error("skills section missing from snapshot (pi API change?)");
   }
-  const got = names(snapshot.skills).sort();
+  const got = names(snapshot.skills);
+  const dupes = [...new Set(got.filter((n, i) => got.indexOf(n) !== i))].sort();
+  if (dupes.length > 0) throw new Error(`duplicate skills: [${dupes}]`);
+  if (got.length > budgets.maxSkills) {
+    throw new Error(`skills footprint exceeded: ${got.length} > ${budgets.maxSkills} skills`);
+  }
+  const sorted = [...got].sort();
   const want = names(baseline.skills ?? []).sort();
-  if (JSON.stringify(got) !== JSON.stringify(want)) {
-    const added = got.filter((n) => !want.includes(n));
-    const removed = want.filter((n) => !got.includes(n));
+  if (JSON.stringify(sorted) !== JSON.stringify(want)) {
+    const added = sorted.filter((n) => !want.includes(n));
+    const removed = want.filter((n) => !sorted.includes(n));
     throw new Error(
       `skills changed: added [${added}] removed [${removed}]`,
     );
   }
-  return `skills ok (${got.length})`;
+  return `skills ok (${sorted.length} <= ${budgets.maxSkills})`;
 }
 
 export function checkCommands(snapshot, baseline) {
@@ -158,7 +164,7 @@ const CHECKS = {
 export function runAll(snapshot, baseline, budgets, repoRoot) {
   const results = {};
   const failures = [];
-  const args = { version: [budgets], tools: [baseline], commands: [baseline], skills: [baseline], promptBudget: [budgets], duplicates: [], intercom: [], upstream: [repoRoot] };
+  const args = { version: [budgets], tools: [baseline], commands: [baseline], skills: [baseline, budgets], promptBudget: [budgets], duplicates: [], intercom: [], upstream: [repoRoot] };
   for (const [name, fn] of Object.entries(CHECKS)) {
     try {
       results[name] = { ok: true, detail: fn(snapshot, ...(args[name] ?? [])) };

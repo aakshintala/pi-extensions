@@ -38,7 +38,7 @@ describe("audit budgets on committed baseline", () => {
     assert.doesNotThrow(() => checkCommands(live, baseline));
   });
   it("no unexpected skills", () => {
-    assert.doesNotThrow(() => checkSkills(live, baseline));
+    assert.doesNotThrow(() => checkSkills(live, baseline, budgets));
   });
   it("parses skills from prompt XML", () => {
     const prompt =
@@ -80,14 +80,22 @@ describe("audit budget violations fail", () => {
   });
   it("unexpected skill fails", () => {
     const s = { ...live, skills: [...(live.skills ?? []), { name: "evil-skill", location: "/s/evil/SKILL.md" }] };
-    assert.throws(() => checkSkills(s, baseline), /added \[evil-skill\]/);
+    assert.throws(() => checkSkills(s, baseline, budgets), /added \[evil-skill\]/);
   });
   it("removed skill fails", () => {
-    assert.throws(() => checkSkills({ skills: [] }, { skills: [{ name: "s1" }] }), /removed/);
+    assert.throws(() => checkSkills({ skills: [] }, { skills: [{ name: "s1" }] }, budgets), /removed/);
   });
   it("missing skills section fails", () => {
     const { skills, ...rest } = live;
-    assert.throws(() => checkSkills(rest, baseline), /skills section missing/);
+    assert.throws(() => checkSkills(rest, baseline, budgets), /skills section missing/);
+  });
+  it("duplicate skill names fail named", () => {
+    const d = { skills: [{ name: "dup" }, { name: "dup" }, { name: "dup" }] };
+    assert.throws(() => checkSkills(d, { skills: [] }, budgets), /duplicate skills: \[dup\]/);
+  });
+  it("skills over ceiling fail", () => {
+    const many = { skills: Array.from({ length: budgets.maxSkills + 1 }, (_, i) => ({ name: `s${i}` })) };
+    assert.throws(() => checkSkills(many, many, budgets), /footprint exceeded/);
   });
   it("removed command fails", () => {
     assert.throws(() => checkCommands({ ...live, commands: [] }, baseline), /removed/);
