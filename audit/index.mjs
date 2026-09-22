@@ -130,6 +130,7 @@ if (updateBaseline) {
     activeTools: snapshot.activeTools,
     allTools: snapshot.allTools,
     commands: snapshot.commands,
+    skills: snapshot.skills,
     models: snapshot.models,
     systemPrompt: snapshot.systemPrompt,
   };
