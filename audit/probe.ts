@@ -1,73 +1,41 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { parseSkillsFromPrompt } from "./checks.mjs";
 
-// Audit probe: records externally observable registration state at startup.
-// Loaded via `pi -e` alongside the monorepo package (never part of the
-// package surface itself). Each section is best-effort so a pi API change
-// shows up as a missing section, not a crashed run.
+// Audit probe: records externally observable registration state at
+// session_start. Loaded via `pi -e`, never part of the package surface.
+// Each section is best-effort so a pi API change shows up as a missing
+// section, not a crashed run. PI_AUDIT_EXIT stops pi right after the
+// snapshot so a live (credentialed) run never reaches a model call.
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     const fs = await import("node:fs");
     const snap: Record<string, unknown> = {};
-
-    try {
-      snap.activeTools = pi.getActiveTools();
-    } catch (e) {
-      snap.activeToolsError = String(e);
-    }
-    try {
-      snap.allTools = (pi.getAllTools() as unknown[]).map((t) => {
-        const tool = t as Record<string, unknown>;
-        return {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.parameters,
-          promptGuidelines: tool.promptGuidelines,
-          sourceInfo: tool.sourceInfo,
-        };
-      });
-    } catch (e) {
-      snap.allToolsError = String(e);
-    }
-    try {
-      snap.commands = pi.getCommands();
-    } catch (e) {
-      snap.commandsError = String(e);
-    }
-    try {
-      snap.models = ctx.modelRegistry
-        .getAvailable()
-        .map((m) => ({ provider: m.provider, id: m.id }));
-    } catch (e) {
-      snap.modelsError = String(e);
-    }
-    try {
-      snap.systemPrompt = ctx.getSystemPrompt();
-    } catch (e) {
-      snap.systemPromptError = String(e);
-    }
-    // No skill-inventory API on pi/ctx as of 0.87.1 (resources_discover is
-    // implemented by extensions, not queried). Skills surface observably as
-    // <available_skills> XML in the system prompt.
-    try {
-      if (typeof snap.systemPrompt === "string") {
-        snap.skills = parseSkillsFromPrompt(snap.systemPrompt);
-      } else {
-        snap.skillsError = "no system prompt to parse skills from";
+    const grab = (key: string, fn: () => unknown) => {
+      try {
+        snap[key] = fn();
+      } catch (e) {
+        snap[`${key}Error`] = String(e);
       }
-    } catch (e) {
-      snap.skillsError = String(e);
-    }
+    };
+    grab("activeTools", () => pi.getActiveTools());
+    grab("allTools", () =>
+      pi.getAllTools().map((t) => ({
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+        promptGuidelines: t.promptGuidelines,
+        sourceInfo: t.sourceInfo,
+      })),
+    );
+    grab("commands", () => pi.getCommands().map((c) => ({ name: c.name, source: c.source })));
+    grab("models", () => ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id })));
+    grab("systemPrompt", () => ctx.getSystemPrompt());
 
-    const snapPath = process.env.PI_AUDIT_SNAP;
-    if (snapPath) fs.writeFileSync(snapPath, JSON.stringify(snap));
+    fs.writeFileSync(process.env.PI_AUDIT_SNAP!, JSON.stringify(snap));
+    if (process.env.PI_AUDIT_EXIT) process.exit(0);
   });
 
   pi.on("session_shutdown", async () => {
     const marker = process.env.PI_AUDIT_SHUTDOWN_MARKER;
-    if (marker) {
-      const fs = await import("node:fs");
-      fs.writeFileSync(marker, "shutdown-ok");
-    }
+    if (marker) (await import("node:fs")).writeFileSync(marker, "shutdown-ok");
   });
 }

@@ -1,125 +1,42 @@
-// Budget tests for the runtime audit: every check in audit/checks.mjs is
-// exercised against the committed baseline (must pass) and against fixtures
-// (must fail, except intercom which is informational in both states).
-// No pi binary, no network, no credentials needed.
-import { describe, it } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert";
-import { readFileSync } from "node:fs";
-import {
-  runAll,
-  checkTools,
-  checkCommands,
-  checkSkills,
-  checkPromptBudget,
-  checkDuplicates,
-  checkIntercom,
-  checkUpstream,
-  estimatePromptTokens,
-  parseSkillsFromPrompt,
-} from "../audit/checks.mjs";
+import { gate, parseSkillsFromPrompt, report, sourceLabel } from "../audit/checks.mjs";
 
-const dir = new URL("../audit/", import.meta.url);
-const baseline = JSON.parse(readFileSync(new URL("baseline.json", dir), "utf8"));
-const budgets = JSON.parse(readFileSync(new URL("budgets.json", dir), "utf8"));
-const REPO_ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
-
-const live = { ...baseline, piVersion: budgets.piVersion };
-
-describe("audit budgets on committed baseline", () => {
-  it("active-tool snapshot matches", () => {
-    assert.doesNotThrow(() => checkTools(live, baseline));
-  });
-  it("prompt tokens within ceiling", () => {
-    const tokens = estimatePromptTokens(live);
-    assert.ok(tokens > 0, "estimate must be non-trivial");
-    assert.doesNotThrow(() => checkPromptBudget(live, budgets));
-  });
-  it("no unexpected commands", () => {
-    assert.doesNotThrow(() => checkCommands(live, baseline));
-  });
-  it("no unexpected skills", () => {
-    assert.doesNotThrow(() => checkSkills(live, baseline, budgets));
-  });
-  it("parses skills from prompt XML", () => {
-    const prompt =
-      "pre <available_skills>\n" +
-      "  <skill>\n    <name>alpha</name>\n    <description>does a</description>\n    <location>/s/alpha/SKILL.md</location>\n  </skill>\n" +
-      "</available_skills> post";
-    assert.deepEqual(parseSkillsFromPrompt(prompt), [
-      { name: "alpha", description: "does a", location: "/s/alpha/SKILL.md" },
-    ]);
-    assert.deepEqual(parseSkillsFromPrompt("no skills here"), []);
-  });
-  it("no duplicate provider-model pairs", () => {
-    assert.doesNotThrow(() => checkDuplicates(live));
-  });
-  it("intercom passes whether on or off", () => {
-    assert.match(checkIntercom({ activeTools: ["read", "intercom"] }), /on/);
-    assert.match(checkIntercom({ activeTools: ["read"] }), /off/);
-  });
-  it("no upstream path loaded as a Pi resource", () => {
-    assert.doesNotThrow(() => checkUpstream(live, REPO_ROOT));
-  });
-  it("runAll reports zero failures", () => {
-    const { failures } = runAll(live, baseline, budgets, REPO_ROOT);
-    assert.deepEqual(failures, []);
-  });
+const ok = { timedOut: false, shutdownObserved: true };
+const snap = (extra = {}) => ({
+  activeTools: ["t"],
+  allTools: [{ name: "t", description: "x".repeat(40) }, { name: "inactive", description: "x".repeat(4000) }],
+  commands: [],
+  systemPrompt: "y".repeat(400),
+  ...extra,
 });
 
-describe("audit budget violations fail", () => {
-  it("changed active tools fail", () => {
-    assert.throws(() => checkTools({ ...live, activeTools: ["read"] }, baseline), /active tools changed/);
-  });
-  it("unknown tool fails", () => {
-    const t = { ...live, allTools: [...live.allTools, { name: "evil", sourceInfo: { path: "x" } }] };
-    assert.throws(() => checkTools(t, baseline), /unknown tools/);
-  });
-  it("unexpected command fails", () => {
-    const c = { ...live, commands: [...live.commands, { name: "evil-cmd", source: "extension" }] };
-    assert.throws(() => checkCommands(c, baseline), /added \[evil-cmd\]/);
-  });
-  it("unexpected skill fails", () => {
-    const s = { ...live, skills: [...(live.skills ?? []), { name: "evil-skill", location: "/s/evil/SKILL.md" }] };
-    assert.throws(() => checkSkills(s, baseline, budgets), /added \[evil-skill\]/);
-  });
-  it("removed skill fails", () => {
-    assert.throws(() => checkSkills({ skills: [] }, { skills: [{ name: "s1" }] }, budgets), /removed/);
-  });
-  it("missing skills section fails", () => {
-    const { skills, ...rest } = live;
-    assert.throws(() => checkSkills(rest, baseline, budgets), /skills section missing/);
-  });
-  it("duplicate skill names fail named", () => {
-    const d = { skills: [{ name: "dup" }, { name: "dup" }, { name: "dup" }] };
-    assert.throws(() => checkSkills(d, { skills: [] }, budgets), /duplicate skills: \[dup\]/);
-  });
-  it("skills over ceiling fail", () => {
-    const many = { skills: Array.from({ length: budgets.maxSkills + 1 }, (_, i) => ({ name: `s${i}` })) };
-    assert.throws(() => checkSkills(many, many, budgets), /footprint exceeded/);
-  });
-  it("removed command fails", () => {
-    assert.throws(() => checkCommands({ ...live, commands: [] }, baseline), /removed/);
-  });
-  it("prompt over ceiling fails", () => {
-    const big = { ...live, systemPrompt: "x".repeat(budgets.maxPromptTokens * 4 + 1) };
-    assert.throws(() => checkPromptBudget(big, budgets), /budget exceeded/);
-  });
-  it("duplicate provider-model pairs fail", () => {
-    const d = { models: [{ provider: "p", id: "m" }, { provider: "p", id: "m" }] };
-    assert.throws(() => checkDuplicates(d), /duplicate provider-model/);
-  });
-  it("upstream path loaded fails", () => {
-    const u = {
-      ...live,
-      commands: [...live.commands, { name: "x", sourceInfo: { path: `${REPO_ROOT}/upstream/evil/index.ts` } }],
-    };
-    assert.throws(() => checkUpstream(u, REPO_ROOT), /upstream paths/);
-  });
-  it("upstream skill location fails", () => {
-    const u = {
-      ...live,
-      skills: [...(live.skills ?? []), { name: "x", location: `${REPO_ROOT}/upstream/evil/SKILL.md` }],
-    };
-    assert.throws(() => checkUpstream(u, REPO_ROOT), /upstream paths/);
-  });
+test("report counts system prompt plus active tools only", () => {
+  const r = report(snap());
+  assert.equal(r.systemPromptTokens, 100);
+  assert.equal(r.toolTokens, 11); // 40 chars + "{}"
+  assert.equal(r.totalTokens, 111);
+});
+
+test("gate passes a clean run and names each failure", () => {
+  assert.deepEqual(gate(snap(), ok, { maxPromptTokens: 200 }), []);
+  const fails = gate(
+    snap({ commands: undefined, models: [{ provider: "p", id: "m" }, { provider: "p", id: "m" }] }),
+    { timedOut: true, shutdownObserved: false },
+    { maxPromptTokens: 50 },
+  );
+  assert.equal(fails.length, 5);
+  assert.match(fails.join("\n"), /missing commands[\s\S]*timed out[\s\S]*shutdown[\s\S]*budget exceeded[\s\S]*p\/m/);
+});
+
+test("skills parse from the prompt block", () => {
+  const p = "<available_skills><skill>\n<name>a</name></skill><skill><name>b</name></skill></available_skills>";
+  assert.deepEqual(parseSkillsFromPrompt(p), ["a", "b"]);
+  assert.deepEqual(parseSkillsFromPrompt("none"), []);
+});
+
+test("source labels", () => {
+  assert.equal(sourceLabel("<builtin:read>"), "builtin");
+  assert.equal(sourceLabel("/h/.pi/agent/npm/node_modules/@ff-labs/pi-fff/src/index.ts"), "@ff-labs/pi-fff");
+  assert.equal(sourceLabel("/h/.pi/agent/local/pi-stamp/index.ts"), "pi-stamp");
 });

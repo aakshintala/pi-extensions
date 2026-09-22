@@ -25,7 +25,3 @@ Every entry point default-exports a factory function receiving pi's
   only. (`pi install` uses `--omit=dev`, so anything a distributed
   package needs at runtime must be in `dependencies` — this package
   ships none.)
-
-`sample-status.ts` (+ colocated `sample-status.test.mjs`) is the minimal
-proof: sets a footer status on `session_start`, clears it idempotently on
-`session_shutdown`.
