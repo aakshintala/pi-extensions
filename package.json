@@ -5,7 +5,7 @@
   "description": "Locally rebuilt Pi extension package. Upstream source is never loaded by Pi.",
   "keywords": ["pi-package"],
   "scripts": {
-    "test": "node --test tests/",
+    "test": "node --test tests/ extensions/ shared/",
     "audit": "node audit/index.mjs",
     "provenance": "node tests/provenance.mjs"
   },
