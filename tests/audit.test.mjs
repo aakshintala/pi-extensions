@@ -9,11 +9,13 @@ import {
   runAll,
   checkTools,
   checkCommands,
+  checkSkills,
   checkPromptBudget,
   checkDuplicates,
   checkIntercom,
   checkUpstream,
   estimatePromptTokens,
+  parseSkillsFromPrompt,
 } from "../audit/checks.mjs";
 
 const dir = new URL("../audit/", import.meta.url);
@@ -34,6 +36,19 @@ describe("audit budgets on committed baseline", () => {
   });
   it("no unexpected commands", () => {
     assert.doesNotThrow(() => checkCommands(live, baseline));
+  });
+  it("no unexpected skills", () => {
+    assert.doesNotThrow(() => checkSkills(live, baseline, budgets));
+  });
+  it("parses skills from prompt XML", () => {
+    const prompt =
+      "pre <available_skills>\n" +
+      "  <skill>\n    <name>alpha</name>\n    <description>does a</description>\n    <location>/s/alpha/SKILL.md</location>\n  </skill>\n" +
+      "</available_skills> post";
+    assert.deepEqual(parseSkillsFromPrompt(prompt), [
+      { name: "alpha", description: "does a", location: "/s/alpha/SKILL.md" },
+    ]);
+    assert.deepEqual(parseSkillsFromPrompt("no skills here"), []);
   });
   it("no duplicate provider-model pairs", () => {
     assert.doesNotThrow(() => checkDuplicates(live));
@@ -63,6 +78,25 @@ describe("audit budget violations fail", () => {
     const c = { ...live, commands: [...live.commands, { name: "evil-cmd", source: "extension" }] };
     assert.throws(() => checkCommands(c, baseline), /added \[evil-cmd\]/);
   });
+  it("unexpected skill fails", () => {
+    const s = { ...live, skills: [...(live.skills ?? []), { name: "evil-skill", location: "/s/evil/SKILL.md" }] };
+    assert.throws(() => checkSkills(s, baseline, budgets), /added \[evil-skill\]/);
+  });
+  it("removed skill fails", () => {
+    assert.throws(() => checkSkills({ skills: [] }, { skills: [{ name: "s1" }] }, budgets), /removed/);
+  });
+  it("missing skills section fails", () => {
+    const { skills, ...rest } = live;
+    assert.throws(() => checkSkills(rest, baseline, budgets), /skills section missing/);
+  });
+  it("duplicate skill names fail named", () => {
+    const d = { skills: [{ name: "dup" }, { name: "dup" }, { name: "dup" }] };
+    assert.throws(() => checkSkills(d, { skills: [] }, budgets), /duplicate skills: \[dup\]/);
+  });
+  it("skills over ceiling fail", () => {
+    const many = { skills: Array.from({ length: budgets.maxSkills + 1 }, (_, i) => ({ name: `s${i}` })) };
+    assert.throws(() => checkSkills(many, many, budgets), /footprint exceeded/);
+  });
   it("removed command fails", () => {
     assert.throws(() => checkCommands({ ...live, commands: [] }, baseline), /removed/);
   });
@@ -78,6 +112,13 @@ describe("audit budget violations fail", () => {
     const u = {
       ...live,
       commands: [...live.commands, { name: "x", sourceInfo: { path: `${REPO_ROOT}/upstream/evil/index.ts` } }],
+    };
+    assert.throws(() => checkUpstream(u, REPO_ROOT), /upstream paths/);
+  });
+  it("upstream skill location fails", () => {
+    const u = {
+      ...live,
+      skills: [...(live.skills ?? []), { name: "x", location: `${REPO_ROOT}/upstream/evil/SKILL.md` }],
     };
     assert.throws(() => checkUpstream(u, REPO_ROOT), /upstream paths/);
   });

@@ -25,6 +25,25 @@ function names(list, key = "name") {
   return (list ?? []).map((e) => e?.[key]).filter((n) => typeof n === "string");
 }
 
+// Extracts the <available_skills> inventory pi renders into the system
+// prompt (see formatSkillsForPrompt upstream). The probe keeps an inline
+// copy; this one is the testable canonical version.
+export function parseSkillsFromPrompt(prompt) {
+  const unescape = (s) =>
+    s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+  const block = /<available_skills>([\s\S]*?)<\/available_skills>/.exec(prompt ?? "")?.[1] ?? "";
+  const skills = [];
+  for (const m of block.matchAll(/<skill>([\s\S]*?)<\/skill>/g)) {
+    const body = m[1];
+    const field = (tag) => {
+      const v = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`).exec(body)?.[1];
+      return v === undefined ? undefined : unescape(v);
+    };
+    skills.push({ name: field("name"), description: field("description"), location: field("location") });
+  }
+  return skills;
+}
+
 export function checkTools(snapshot, baseline) {
   if (!Array.isArray(snapshot.activeTools) || !Array.isArray(snapshot.allTools)) {
     throw new Error("tools section missing from snapshot (pi API change?)");
@@ -40,6 +59,28 @@ export function checkTools(snapshot, baseline) {
   const unknown = names(snapshot.allTools).filter((n) => !known.has(n));
   if (unknown.length > 0) throw new Error(`unknown tools: [${unknown}]`);
   return `tools ok (${active.length} active)`;
+}
+
+export function checkSkills(snapshot, baseline, budgets) {
+  if (!Array.isArray(snapshot.skills)) {
+    throw new Error("skills section missing from snapshot (pi API change?)");
+  }
+  const got = names(snapshot.skills);
+  const dupes = [...new Set(got.filter((n, i) => got.indexOf(n) !== i))].sort();
+  if (dupes.length > 0) throw new Error(`duplicate skills: [${dupes}]`);
+  if (got.length > budgets.maxSkills) {
+    throw new Error(`skills footprint exceeded: ${got.length} > ${budgets.maxSkills} skills`);
+  }
+  const sorted = [...got].sort();
+  const want = names(baseline.skills ?? []).sort();
+  if (JSON.stringify(sorted) !== JSON.stringify(want)) {
+    const added = sorted.filter((n) => !want.includes(n));
+    const removed = want.filter((n) => !sorted.includes(n));
+    throw new Error(
+      `skills changed: added [${added}] removed [${removed}]`,
+    );
+  }
+  return `skills ok (${sorted.length} <= ${budgets.maxSkills})`;
 }
 
 export function checkCommands(snapshot, baseline) {
@@ -92,6 +133,7 @@ export function checkUpstream(snapshot, repoRoot) {
   const paths = [
     ...(snapshot.allTools ?? []).map((t) => t?.sourceInfo?.path),
     ...(snapshot.commands ?? []).map((c) => c?.sourceInfo?.path),
+    ...(snapshot.skills ?? []).map((s) => s?.location ?? s?.filePath),
   ].filter((p) => typeof p === "string");
   const bad = paths.filter(
     (p) => p === `${repoRoot}/upstream` || p.startsWith(`${repoRoot}/upstream/`) || p.includes("/upstream/"),
@@ -111,6 +153,7 @@ const CHECKS = {
   version: checkVersion,
   tools: checkTools,
   commands: checkCommands,
+  skills: checkSkills,
   promptBudget: checkPromptBudget,
   duplicates: checkDuplicates,
   intercom: checkIntercom,
@@ -121,7 +164,7 @@ const CHECKS = {
 export function runAll(snapshot, baseline, budgets, repoRoot) {
   const results = {};
   const failures = [];
-  const args = { version: [budgets], tools: [baseline], commands: [baseline], promptBudget: [budgets], duplicates: [], intercom: [], upstream: [repoRoot] };
+  const args = { version: [budgets], tools: [baseline], commands: [baseline], skills: [baseline, budgets], promptBudget: [budgets], duplicates: [], intercom: [], upstream: [repoRoot] };
   for (const [name, fn] of Object.entries(CHECKS)) {
     try {
       results[name] = { ok: true, detail: fn(snapshot, ...(args[name] ?? [])) };

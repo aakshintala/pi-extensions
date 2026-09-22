@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { parseSkillsFromPrompt } from "./checks.mjs";
 
 // Audit probe: records externally observable registration state at startup.
 // Loaded via `pi -e` alongside the monorepo package (never part of the
@@ -44,6 +45,18 @@ export default function (pi: ExtensionAPI) {
       snap.systemPrompt = ctx.getSystemPrompt();
     } catch (e) {
       snap.systemPromptError = String(e);
+    }
+    // No skill-inventory API on pi/ctx as of 0.87.1 (resources_discover is
+    // implemented by extensions, not queried). Skills surface observably as
+    // <available_skills> XML in the system prompt.
+    try {
+      if (typeof snap.systemPrompt === "string") {
+        snap.skills = parseSkillsFromPrompt(snap.systemPrompt);
+      } else {
+        snap.skillsError = "no system prompt to parse skills from";
+      }
+    } catch (e) {
+      snap.skillsError = String(e);
     }
 
     const snapPath = process.env.PI_AUDIT_SNAP;
