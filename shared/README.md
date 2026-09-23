@@ -203,4 +203,4 @@ if (pastOutputCap(log)) { /* stop it */ }
 
 `isChild(ctx)` says whether a session is a subagent's: it holds the custom entry
 `MARKER` (`rig.subagent`), which `extensions/subagents` writes first in every
-child session. Used by `extensions/subagents` and `extensions/todo`.
+child session. Used by `extensions/subagents`, `extensions/todo` and `extensions/ask-user`.
