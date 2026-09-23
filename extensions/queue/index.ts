@@ -35,7 +35,6 @@ export default function (pi: ExtensionAPI) {
   let modes: Record<Lane, Mode> = { steer: "one-at-a-time", followUp: "one-at-a-time" };
   let ctx: ExtensionContext | undefined;
   let tui: any; // from the widget factory
-  let mainEditor: any; // Pi's main editor component, once identified
   let reloadRow: Row | undefined; // a /reload row waiting for Pi's main editor
   let reloadDraft: string | undefined; // editor text saved while a queued /reload runs
   let unsubscribeKeys: (() => void) | undefined;
@@ -174,7 +173,7 @@ export default function (pi: ExtensionAPI) {
       reloadDraft = ctx.ui.getEditorText(); // Pi clears the editor; restored after the reload
       rows = rows.filter((r) => r !== row);
       draw();
-      mainEditor.onSubmit("/reload");
+      tui.getFocusedComponent().onSubmit("/reload");
     });
   }
 
@@ -212,18 +211,15 @@ export default function (pi: ExtensionAPI) {
   // Keys are read here rather than through registerShortcut: overriding Pi's Option+Up
   // that way prints an "[Extension issues]" warning at every start. Only while Pi's editor
   // has focus, so pickers keep their own Option+Up/Down.
-  // Pi's main editor is the focused component that ctx.ui's editor text writes to. The
-  // one-time probe restores the text (the cursor moves to its end).
+  // Pi's main editor, looked up (never written to) on each check so an editor swapped in
+  // by setEditorComponent is found: the only child of Pi's editor container, the root's
+  // fifth child in Pi 0.87 (interactive-mode.js mountInteractiveTui). Pi wires its submit
+  // handler onto every editor it mounts there; pickers and the reload box that take the
+  // slot have none. Anything else there, or in focus, means "cannot tell": the caller waits.
   const editorFocused = () => {
-    const focused = tui?.getFocusedComponent?.();
-    if (!focused || typeof focused.onSubmit !== "function" || typeof focused.getText !== "function") return false;
-    if (mainEditor) return focused === mainEditor;
-    const text = ctx!.ui.getEditorText();
-    ctx!.ui.setEditorText(`${text}\u200b`);
-    const main = focused.getText() === `${text}\u200b`;
-    ctx!.ui.setEditorText(text);
-    if (main) mainEditor = focused;
-    return main;
+    const editor = tui?.children?.[4]?.children?.[0];
+    const isEditor = ["onSubmit", "getText", "handleInput"].every((k) => typeof editor?.[k] === "function");
+    return isEditor && tui.getFocusedComponent?.() === editor;
   };
 
   const extensionCommand = (text: string) => {
@@ -294,7 +290,7 @@ export default function (pi: ExtensionAPI) {
     edit = undefined;
     paused = false;
     running = undefined;
-    ctx = tui = mainEditor = reloadRow = reloadDraft = unsubscribeKeys = undefined;
+    ctx = tui = reloadRow = reloadDraft = unsubscribeKeys = undefined;
   });
 
   pi.on("input", (event, c) => {

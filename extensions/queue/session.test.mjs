@@ -19,15 +19,22 @@ const tool = () => fauxAssistantMessage(fauxToolCall("ls", { path: "." }), { sto
 
 // A TUI-mode UI with an editor, key listeners, notices and rendered widget rows.
 function fakeUi(session) {
-  // Pi's /reload handler clears the editor, then reloads.
-  const editor = { getText: () => state.editor, onSubmit: (text) => text === "/reload" && ((state.editor = ""), session.reload()) };
-  const state = { editor: "", notices: [], widget: [], keys: [], focus: editor };
-  const tui = { getFocusedComponent: () => state.focus };
+  // Pi's editor: /reload clears it, then reloads; like Editor.setText, setEditorText
+  // drops paste markers.
+  const editor = {
+    getText: () => state.editor,
+    handleInput() {},
+    onSubmit: (text) => text === "/reload" && ((state.editor = ""), session.reload()),
+  };
+  const state = { editor: "", pastes: [], notices: [], widget: [], keys: [], focus: editor, mounted: editor };
+  // Pi 0.87's layout: the editor container is the root's fifth child.
+  const container = { get children() { return [state.mounted]; } };
+  const tui = { children: [{}, {}, {}, {}, container], getFocusedComponent: () => state.focus };
   const theme = { fg: (_c, s) => s };
   const target = {
     setWidget: (_k, w) => (state.widget = w ? w(tui, theme).render(80) : []),
     getEditorText: () => state.editor,
-    setEditorText: (t) => (state.editor = t),
+    setEditorText: (t) => ((state.editor = t), (state.pastes = [])),
     notify: (m, type = "info") => state.notices.push(`${type}: ${m}`),
     onTerminalInput: (h) => (state.keys.push(h), () => state.keys.splice(state.keys.indexOf(h), 1)),
     setEditorComponent: () => (state.editorReplaced = true),
@@ -380,4 +387,43 @@ test("editing a row into an extension command saves it in place; the command run
   await run;
   await session.agent.waitForIdle();
   assert.deepEqual(ran, ["arg"]);
+});
+
+test("finding Pi's editor never writes to it: a draft's paste markers survive", async (t) => {
+  const g = gate();
+  const { session, state, press } = await start(t, [async () => (await g.wait(), say("before"))]);
+  const main = state.focus;
+  const run = session.prompt("go");
+  await g.waiting;
+  await session.prompt("/reload", { streamingBehavior: "followUp" });
+  state.editor = "see [paste #1 +40 lines]";
+  state.pastes = ["forty pasted lines"];
+  state.focus = { getText: () => "a label", handleInput() {}, onSubmit() {} }; // the label editor
+  g.open();
+  await run;
+  await session.agent.waitForIdle();
+  press("escape");
+  press("alt+up");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.editor, "see [paste #1 +40 lines]");
+  assert.deepEqual(state.pastes, ["forty pasted lines"]);
+  state.focus = main;
+});
+
+test("a queued /reload finds an editor swapped in by setEditorComponent", { timeout: 15_000 }, async (t) => {
+  const g = gate();
+  const r = reloads();
+  const { session, state, press } = await start(t, [async () => (await g.wait(), say("before"))], [r.ext]);
+  const run = session.prompt("go");
+  await g.waiting;
+  await session.prompt("/reload", { streamingBehavior: "followUp" });
+  press("escape"); // the queue sees Pi's first editor
+  // Another extension swaps the editor; Pi wires its submit handler onto the new one.
+  const swapped = { getText: () => state.editor, handleInput() {}, onSubmit: state.mounted.onSubmit };
+  state.mounted = state.focus = swapped;
+  const reloaded = r.next();
+  g.open();
+  await run;
+  await reloaded;
+  assert.equal(r.seen.length, 1);
 });
