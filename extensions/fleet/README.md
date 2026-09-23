@@ -85,7 +85,8 @@ fleet().register({
   label: "npm test",
   parentId: "agent-1",            // optional: shows the row under that item
   activity: () => lastLine,       // required: the row's latest activity, read on every render
-  view: { log: logPath },         // required: a log file, or { transcript: (tui, ui) => component, showsSteers? }
+  view: { log: logPath },         // required: a log file, or { transcript: (tui, ui) => component, showsSteers? };
+                                  // a transcript is built on each open, and its dispose(), if any, runs on close
   stop: () => child.kill(),       // required
   steer: undefined,               // optional, agents only
 });

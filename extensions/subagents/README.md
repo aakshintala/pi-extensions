@@ -136,11 +136,19 @@ Opening an agent in FleetView shows its conversation in the viewer, drawn like
 the main chat:
 
 - Pi's own user, assistant and tool components. Each call is drawn with its
-  tool's definition from the agent's session, so built-ins such as `bash` look
-  as they do in Pi. A call to a tool Pi does not know shows its raw arguments.
+  tool's definition from the agent's session. Without a live session, it uses
+  the definitions of the child sessions this process has run, the rig's
+  renderers included, then Pi's built-ins. A call to a tool none of them knows
+  shows its raw arguments.
 - Tool calls group into one line as in the main chat, and Ctrl+O or a click
   opens a group. Thinking is hidden when Pi's `hideThinkingBlock` is on, read
-  when the transcript is first opened.
+  on each open.
+- Opening draws the last 200 messages, with a `… N earlier messages` line for
+  the rest. After that, only new entries are added.
+- Messages from extensions, such as notices, show as plain muted text with
+  control sequences removed.
+- The transcript reads the agent's session in memory and never opens or
+  writes its file. Closing the viewer releases it.
 - A running agent is followed live: new messages, streaming replies and
   running tool output. The viewer stays open when the agent finishes.
 - A finished agent opens from its saved session. If its parent resumes it

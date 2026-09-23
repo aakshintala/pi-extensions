@@ -15,7 +15,8 @@ export type FinalStatus = "completed" | "failed" | "stopped";
 
 /**
  * What the viewer (#45) shows for an item: a transcript component or a log file read in increments.
- * `transcript` gets the viewer's TUI and UI context. With `showsSteers`, the transcript shows
+ * `transcript` gets the viewer's TUI and UI context, and is called on each open; the viewer calls
+ * the component's `dispose()`, if it has one, on close. With `showsSteers`, the transcript shows
  * steers itself and the viewer does not echo them.
  */
 export type ItemView = { transcript(tui: unknown, ui: unknown): unknown; showsSteers?: boolean } | { log: string };
