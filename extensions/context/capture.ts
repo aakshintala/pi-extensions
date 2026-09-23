@@ -26,6 +26,16 @@ import {
 } from "./model.ts";
 import { createProbeToken, type ProbeToken } from "./probe-token.ts";
 
+/** Usage of a blanked probe reply: it billed nothing the user asked for. */
+const NO_USAGE = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
 /** Session custom-entry type persisting probe message identities across extension runtimes. */
 export const PROBE_IDENTITIES_CUSTOM_TYPE = "pi-context-view:probe-identities";
 
@@ -322,7 +332,8 @@ export class SilentProbeState {
 	): ContextEvent["messages"][number] | undefined {
 		const failed = message.stopReason === "aborted" || message.stopReason === "error";
 		if (!failed || !this.ownsMessage(message)) return undefined;
-		return { ...message, content: [], stopReason: "stop", errorMessage: undefined };
+		// Zero the usage too: the probe must leave no billable row for /usage to count.
+		return { ...message, content: [], stopReason: "stop", errorMessage: undefined, usage: NO_USAGE };
 	}
 
 	/** Whether this exact role and timestamp was recorded for the probe. */

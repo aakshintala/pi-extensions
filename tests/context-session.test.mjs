@@ -73,6 +73,16 @@ test("the silent probe leaves no rows in the transcript and never reaches the mo
   assert.deepEqual(transcript(session), ["user: hello", "assistant: hi"]);
 });
 
+test("the probe's aborted reply keeps no usage, so /usage bills nothing for it", async (t) => {
+  const { session } = await scriptedSession(t, { extensions: [root("tests/fixtures/context/billing.ts"), CONTEXT] });
+  attachUi(session);
+  await session.prompt("/context");
+  const replies = session.sessionManager.getEntries().filter((e) => e.type === "message" && e.message.role === "assistant");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].message.usage.input, 0);
+  assert.equal(replies[0].message.usage.cost.total, 0);
+});
+
 test("injections include a system message another extension adds to the request", async (t) => {
   const { session } = await scriptedSession(t, {
     extensions: [root("tests/fixtures/context/inject.ts"), CONTEXT],
