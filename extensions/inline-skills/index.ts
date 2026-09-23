@@ -165,41 +165,72 @@ export function skillProvider(skills: () => Skill[], current: any) {
   };
 }
 
-const PATCHED = Symbol.for("pi-rig.inline-skills.patched");
+// Marks an editor wrapped by a live install, so two installs never stack.
+const INSTALL = Symbol.for("pi-rig.inline-skills.install");
 
 /**
- * Guarded Pi patch (#1): wraps Pi's main editor instance so a mid-line `/` plus two
- * word characters opens the list. Pi's editor refuses `/` as a provider trigger
- * character and opens the list on typed letters only when the message starts with `/`.
- * Returns whether the editor is patched; any mismatch leaves Tab-only completion.
+ * Pi's main editor: the default editor or one set by setEditorComponent. Pi gives
+ * either its app actions; a CustomEditor mounted by ui.custom() has none.
  */
-export function patchEditor(tui: any, version = VERSION): boolean {
-  const editor = tui?.children?.[4]?.children?.[0];
-  if (
-    !version.startsWith("0.87.") ||
-    !(editor instanceof CustomEditor) ||
-    typeof (editor as any).tryTriggerAutocomplete !== "function" ||
-    typeof (editor as any).isShowingAutocomplete !== "function" ||
-    !Array.isArray((editor as any).state?.lines)
-  )
-    return false;
-  const e = editor as any;
-  if (e[PATCHED]) return true;
-  const handleInput = e.handleInput;
-  e.handleInput = function (data: string) {
-    handleInput.call(this, data);
-    if (e.isShowingAutocomplete() || !/^[a-z0-9-]$/i.test(data)) return;
-    const { lines, cursorLine, cursorCol } = e.state;
-    if ((midLineQuery(lines, cursorLine, cursorCol)?.length ?? 0) >= 2) e.tryTriggerAutocomplete();
+function isMainEditor(editor: any, version: string): boolean {
+  return (
+    version.startsWith("0.87.") &&
+    editor instanceof CustomEditor &&
+    typeof (editor as any).tryTriggerAutocomplete === "function" &&
+    typeof (editor as any).isShowingAutocomplete === "function" &&
+    Array.isArray((editor as any).state?.lines) &&
+    (editor as any).actionHandlers?.has?.("app.clear") === true
+  );
+}
+
+/**
+ * Guarded Pi patch (#1): wraps the handleInput of Pi's main editor instance so a
+ * mid-message `/` plus two name characters opens the list. Pi's editor refuses `/`
+ * as a provider trigger character and opens the list on typed letters only when
+ * the message starts with `/`. `ensure` wraps whatever main editor sits in Pi's
+ * editor slot now (moving the wrap when the editor was replaced) and skips any
+ * mismatch, leaving Tab-only completion; `restore` undoes it.
+ */
+export function editorPatch(version = VERSION) {
+  let target: any;
+  let original: any;
+  let hadOwn = false;
+  const token = {};
+  const wrapped = function (this: any, data: string) {
+    original.call(this, data);
+    if (this.isShowingAutocomplete() || !/^[a-z0-9-]$/i.test(data)) return;
+    const { lines, cursorLine, cursorCol } = this.state;
+    if ((midLineQuery(lines, cursorLine, cursorCol)?.length ?? 0) >= 2) this.tryTriggerAutocomplete();
   };
-  e[PATCHED] = true;
-  return true;
+  const restore = () => {
+    if (target?.[INSTALL] === token && target.handleInput === wrapped) {
+      if (hadOwn) target.handleInput = original;
+      else delete target.handleInput;
+      delete target[INSTALL];
+    }
+    target = undefined;
+  };
+  const ensure = (tui: any): boolean => {
+    const editor = tui?.children?.[4]?.children?.[0];
+    if (editor && editor === target) return true;
+    if (!isMainEditor(editor, version) || editor[INSTALL]) return false;
+    restore();
+    hadOwn = Object.hasOwn(editor, "handleInput");
+    original = editor.handleInput;
+    editor.handleInput = wrapped;
+    editor[INSTALL] = token;
+    target = editor;
+    return true;
+  };
+  return { ensure, restore };
 }
 
 export default function (pi: ExtensionAPI) {
   let loaded = new Set<string>();
   // Named by the prompt being started; loaded once its message is delivered.
   let starting = new Set<string>();
+  const patch = editorPatch();
+  let unsubscribe: (() => void) | undefined;
   const skills = () => listSkills(pi);
   const commands = () => pi.getCommands().filter((c) => c.source !== "skill").map((c) => c.name.toLowerCase());
   const toLoad = (text: string) => (blockNames(text) ? [] : namedSkills(text, skills, new Set([...loaded, ...starting]), commands));
@@ -229,11 +260,23 @@ export default function (pi: ExtensionAPI) {
     if (!ctx.hasUI) return;
     ctx.ui.addAutocompleteProvider((current) => skillProvider(skills, current));
     // The widget factory is called synchronously with Pi's TUI; drop the widget at once.
-    ctx.ui.setWidget("inline-skills", (tui) => {
-      patchEditor(tui);
+    let tui: any;
+    ctx.ui.setWidget("inline-skills", (t) => {
+      tui = t;
       return new Container();
     });
     ctx.ui.setWidget("inline-skills", undefined);
+    // Pi's editor slot changes: /reload shows a notice there during session_start,
+    // setEditorComponent swaps editors, panels take it over. Check again on each key.
+    patch.ensure(tui);
+    unsubscribe?.();
+    unsubscribe = ctx.ui.onTerminalInput(() => void patch.ensure(tui));
+  });
+
+  pi.on("session_shutdown", () => {
+    unsubscribe?.();
+    unsubscribe = undefined;
+    patch.restore();
   });
 
   pi.on("session_tree", (_e, ctx) => {

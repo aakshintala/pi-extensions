@@ -32,5 +32,8 @@ It registers no tools, no commands and no settings.
 
 The list opens on typing through a guarded patch of Pi's main editor instance
 (one of the rig's three, see [#1](https://github.com/aakshintala/pi-rig/issues/1)).
-It is applied at each session start and skipped when the Pi version is not
-0.87 or the editor's shape differs, leaving `Tab`-only completion.
+It wraps whichever main editor sits in Pi's editor slot, checked at session
+start and on each key, so it follows `/reload` and editors set by other
+extensions; panels in that slot are left alone. It is undone at session
+shutdown, and skipped when the Pi version is not 0.87 or the editor's shape
+differs, leaving `Tab`-only completion.

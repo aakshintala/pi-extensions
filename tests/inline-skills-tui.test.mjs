@@ -1,12 +1,17 @@
 // tmux TUI tests for inline-skills (ADR 0001: event-synchronised, full-screen asserts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { liveGroup, startTui } from "./helpers/tui.mjs";
 
 const EXT = new URL("../extensions/inline-skills/index.ts", import.meta.url).pathname;
 const PLAIN_EDITOR = new URL("./fixtures/inline-skills/plain-editor.ts", import.meta.url).pathname;
 const FOOTER = new URL("./fixtures/inline-skills/footer.ts", import.meta.url).pathname;
 const SKILLS = new URL("./fixtures/inline-skills/skills", import.meta.url).pathname;
+const RELOAD_GATE = new URL("./fixtures/inline-skills/reload-gate.ts", import.meta.url).pathname;
+const SWAP_EDITOR = new URL("./fixtures/inline-skills/swap-editor.ts", import.meta.url).pathname;
+const ASK_USER = new URL("../extensions/ask-user/index.ts", import.meta.url).pathname;
 
 async function start(t, { extensions = [EXT], replies = [], args = [] } = {}) {
   const tui = await startTui(t, { extensions: [FOOTER, ...extensions], replies, args: ["--skill", SKILLS, ...args] });
@@ -116,4 +121,46 @@ test("on an editor shape mismatch the patch is skipped and Tab still completes",
     ["", " please /grill-with-docs", "", "", "", " [skill] grill-with-docs (ctrl+o to expand)", "", "", " ok", ""],
     "",
   ));
+});
+
+test("enabled through /reload, the wrap is installed once the editor is back", async (t) => {
+  const tui = await start(t, { extensions: [RELOAD_GATE] });
+  writeFileSync(join(tui.cwd, "enable-inline-skills"), "");
+  tui.type("/reload");
+  tui.keys("Enter");
+  await tui.waitForEvent("session_start", 2);
+  const notice = [" Reloaded keybindings, extensions, skills, prompts, themes, and context files", ""];
+  await tui.waitForScreen(screen(["", ...notice], ""));
+  tui.type("please /gr");
+  await tui.waitForScreen(screen(["", ...notice], "please /gr", GRI));
+});
+
+test("an editor swapped in after start gets the wrap", async (t) => {
+  const tui = await start(t, { extensions: [SWAP_EDITOR, EXT] });
+  tui.type("/swap");
+  tui.keys("Enter");
+  await tui.waitForScreen(screen(["", " swapped", ""], ""));
+  tui.type("please /gr");
+  await tui.waitForScreen(screen(["", " swapped", ""], "please /gr", GRI));
+});
+
+test("the ask_user panel in the editor slot is left alone", async (t) => {
+  const questions = [{ question: "Which db?", header: "db", options: [{ label: "Alpha" }, { label: "Beta" }] }];
+  const call = [{ type: "toolCall", id: "c1", name: "ask_user", arguments: { questions } }];
+  const tui = await start(t, { extensions: [ASK_USER, EXT], replies: [call, "done"] });
+  tui.type("ask");
+  tui.keys("Enter");
+  const above = ["", " ask", "", "", "", " ask_user", "", ""];
+  const panel = (first, last) =>
+    "\n" + [...above, "Which db?", "", first, "  2. Beta", last, "", "  ↑↓ move · Enter choose · Esc cancel", "(footer)", ...Array(8).fill("")].join("\n");
+  await tui.waitForScreen(panel("→ 1. Alpha", "  3. Type your own answer"));
+  tui.keys("Up");
+  tui.type("x /ab");
+  await tui.waitForScreen(panel("  1. Alpha", "→ 3. x /ab"));
+  tui.keys("Enter");
+  await tui.waitForEvent("agent_end");
+  const done = ["", " ask", "", "", "", " ask_user", ' db: "x /ab"', "", "", " done", ""];
+  await tui.waitForScreen(screen(done, ""));
+  tui.type("please /gr");
+  await tui.waitForScreen(screen(done, "please /gr", GRI));
 });

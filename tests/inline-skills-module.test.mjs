@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import "./fixtures/tool-display/pi-tui.mjs";
 const ext = await import("../extensions/inline-skills/index.ts");
-const { namedSkills, patchEditor, skillMessage, skillProvider, stripFrontmatter } = ext;
+const { namedSkills, editorPatch, skillMessage, skillProvider, stripFrontmatter } = ext;
 
 const skill = (name) => ({ name, description: `${name} skill`, path: `/s/${name}/SKILL.md` });
 const SKILLS = ["grilling", "grill-with-docs", "setup-grill", "tdd"].map(skill);
@@ -105,10 +105,12 @@ test("a skill counts as loaded only once its message is delivered", async () => 
   assert.equal(await handlers.before_agent_start({ prompt: "use /tdd" }, ctx), undefined);
 });
 
-// A real CustomEditor mounted where Pi mounts it; counts autocomplete triggers.
+// A real CustomEditor mounted where Pi mounts it, with Pi's app actions (as Pi's main
+// editor has); counts autocomplete triggers.
 const { CustomEditor } = await import("@earendil-works/pi-coding-agent");
-function mounted() {
+function mounted({ main = true } = {}) {
   const editor = new CustomEditor({ requestRender() {} }, { borderColor: (s) => s, selectList: {} }, { matches: () => false });
+  if (main) editor.onAction("app.clear", () => {});
   let triggers = 0;
   editor.tryTriggerAutocomplete = () => void triggers++;
   const type = (text) => {
@@ -120,10 +122,9 @@ function mounted() {
   return { editor, type, tui: { children: [0, 0, 0, 0, { children: [editor] }] } };
 }
 
-test("the editor patch opens the list on a mid-message / plus two word characters", () => {
+test("the editor patch opens the list on a mid-message / plus two name characters", () => {
   const { tui, type } = mounted();
-  assert.equal(patchEditor(tui), true);
-  assert.equal(patchEditor(tui), true, "patching twice wraps once");
+  assert.equal(editorPatch().ensure(tui), true);
   assert.equal(type("please /g"), 0);
   assert.equal(type("r"), 1);
   assert.equal(type("i"), 1);
@@ -133,13 +134,71 @@ test("the editor patch opens the list on a mid-message / plus two word character
   assert.equal(type("r/lo"), 1, "only /usr, before the second slash");
 });
 
+test("restore undoes the wrap; a later install (a /reload) wraps exactly once", () => {
+  const { editor, tui, type } = mounted();
+  const first = editorPatch();
+  first.ensure(tui);
+  assert.equal(editorPatch().ensure(tui), false, "a second live install stays out");
+  assert.equal(type("a /gr"), 1);
+  first.restore();
+  first.restore(); // twice is a no-op
+  assert.equal(Object.hasOwn(editor, "handleInput"), false, "the prototype method is back");
+  assert.equal(type(" /gr"), 0);
+  const second = editorPatch();
+  assert.equal(second.ensure(tui), true);
+  assert.equal(second.ensure(tui), true);
+  assert.equal(type(" /gr"), 1, "wrapped once");
+  second.restore();
+});
+
+test("the extension wraps at session start, on keys, and restores at shutdown", async () => {
+  const handlers = {};
+  ext.default({ on: (name, h) => (handlers[name] = h), registerMessageRenderer: () => {}, getCommands: () => [] });
+  const { editor, tui, type } = mounted();
+  const slot = tui.children[4].children;
+  const main = slot[0];
+  slot[0] = { render: () => [] }; // the /reload notice holds the slot during session_start
+  let onKey;
+  const ui = {
+    addAutocompleteProvider() {},
+    setWidget: (_key, factory) => factory?.(tui),
+    onTerminalInput: (h) => ((onKey = h), () => (onKey = undefined)),
+  };
+  await handlers.session_start({}, { hasUI: true, ui, sessionManager: { getBranch: () => [] } });
+  assert.equal(Object.hasOwn(editor, "handleInput"), false);
+  slot[0] = main;
+  onKey("a");
+  assert.equal(type("a /gr"), 1);
+  await handlers.session_shutdown({});
+  await handlers.session_shutdown({});
+  assert.equal(Object.hasOwn(editor, "handleInput"), false, "restored");
+  assert.equal(onKey, undefined, "key listener removed");
+});
+
+test("the wrap follows the editor in Pi's slot", () => {
+  const a = mounted();
+  const b = mounted();
+  const tui = a.tui;
+  const patch = editorPatch();
+  patch.ensure(tui);
+  tui.children[4].children[0] = { render: () => [] }; // a panel or the /reload notice
+  assert.equal(patch.ensure(tui), false);
+  assert.equal(a.type("x /gr"), 1, "the hidden main editor keeps its wrap");
+  tui.children[4].children[0] = b.editor; // setEditorComponent
+  assert.equal(patch.ensure(tui), true);
+  assert.equal(b.type("x /gr"), 1);
+  assert.equal(a.type(" /gr"), 0, "the replaced editor is unwrapped");
+  patch.restore();
+});
+
 test("the editor patch skips any shape mismatch without throwing", () => {
   for (const tui of [undefined, {}, { children: [] }, { children: [0, 0, 0, 0, { children: [{ handleInput() {} }] }] }]) {
-    assert.equal(patchEditor(tui), false);
+    assert.equal(editorPatch().ensure(tui), false);
   }
   const { tui, type } = mounted();
-  assert.equal(patchEditor(tui, "0.88.0"), false, "another Pi version");
+  assert.equal(editorPatch("0.88.0").ensure(tui), false, "another Pi version");
   assert.equal(type("please /gr"), 0);
+  assert.equal(editorPatch().ensure(mounted({ main: false }).tui), false, "a CustomEditor without Pi's app actions (a ui.custom panel)");
   delete tui.children[4].children[0].state;
-  assert.equal(patchEditor(tui), false, "no editor state");
+  assert.equal(editorPatch().ensure(tui), false, "no editor state");
 });
