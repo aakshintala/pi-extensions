@@ -167,7 +167,7 @@ routing does not depend on load order.
 call once it ends or is backgrounded. The owner's detach (its session
 shutting down) drops its commands. The fleet extension binds Ctrl+B and calls
 `backgroundAll()`, which runs each `background` once and drops one that throws;
-`foregrounds()` counts them, and the hint shows while it is above 0. The queue
+`foregrounds()` counts them, and Ctrl+B is bound while it is above 0. The queue
 calls `backgroundAll(owner)` on a steer, which moves only that session's.
 
 ### `git/`
@@ -197,7 +197,8 @@ anything else in that slot or in focus, it returns false. Used by
 
 `ctrlBFree()` says whether Ctrl+B is free of Pi's default cursor-left binding,
 so it can background commands (#29). Read it on each use: `/reload` re-reads
-`keybindings.json`. Used by `extensions/jobs` for its hint.
+`keybindings.json`. Used by `extensions/fleet` to bind Ctrl+B and by
+`extensions/jobs` for its hint.
 
 ### `process-groups/`
 

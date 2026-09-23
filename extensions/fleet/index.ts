@@ -4,11 +4,11 @@
 // (#45, viewer.ts). It also delivers the session's notices (#46) and
 // keeps a run without the UI alive until the work it started returns.
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { duration, fleet, isFinished, viewerTakes, type Item, type Notice } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
-import { editorFocused } from "../../shared/tui/index.ts";
+import { ctrlBFree, editorFocused } from "../../shared/tui/index.ts";
 import { createViewer, type Viewer } from "./viewer.ts";
 
 /** Most lines FleetView takes, including the "… N more" line. */
@@ -18,12 +18,6 @@ const MAIN = "main";
 const KEYS = " Enter to view · x to stop · ctrl+x ctrl+k to stop all agents";
 const NOTICE = "rig.notice";
 const BLOCKED = Symbol.for("pi-rig.fleet.ctrlBBlocked");
-
-/**
- * Ctrl+B backgrounds only once the user frees it from Pi's default cursor-left binding (#29).
- * Read live: /reload re-reads keybindings.json after session_start.
- */
-const ctrlBFree = () => !getKeybindings().getKeys("tui.editor.cursorLeft").includes("ctrl+b");
 
 /**
  * Warns when Ctrl+B becomes blocked, never twice in a row. Checked at session start and on
@@ -205,12 +199,13 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
 
   const current = () => rows(registry.items());
 
-  const hint = () => registry.foregrounds() > 0 && ctrlBFree();
+  // Ctrl+B can move a foreground command to the background. Its hint is on the running call (#139).
+  const canBackground = () => registry.foregrounds() > 0 && ctrlBFree();
 
-  // Rows shown, as indices into current(), plus the hidden count. The keys line and the Ctrl+B hint each take one line of the budget.
+  // Rows shown, as indices into current(), plus the hidden count. The keys line takes one line of the budget.
   function window(all: Row[]) {
     selected = Math.min(selected, all.length - 1);
-    const budget = MAX_LINES - (focused ? 1 : 0) - (hint() ? 1 : 0);
+    const budget = MAX_LINES - (focused ? 1 : 0);
     if (all.length <= budget) return { start: 0, end: all.length, hidden: 0 };
     const size = budget - 1;
     top = Math.max(0, Math.min(Math.max(top, selected - size + 1), selected, all.length - size));
@@ -261,8 +256,6 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
         if (hidden) out.push(theme.fg("dim", `   … ${hidden} more`));
         if (focused) out.push(theme.fg("dim", KEYS));
       }
-      // Last, so a click's row index still counts from the first row.
-      if (hint()) out.push(theme.fg("dim", " ctrl+b to run in background"));
       return out.map((l) => truncateToWidth(l, width));
     },
     invalidate() {},
@@ -270,7 +263,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   const region = new MouseRegion(view, (event) => {
     if (event.type !== "click" || event.button !== "left") return undefined;
     const all = current();
-    if (all.length === 1) return undefined; // only the Ctrl+B hint is showing
+    if (all.length === 1) return undefined; // nothing is drawn
     const { start, end } = window(all);
     const index = start + event.y;
     if (index >= end) return undefined;
@@ -339,7 +332,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     if (viewer.overlay()) focused = false; // the overlay covers FleetView and takes the keys
     // Esc in FleetView only returns to the editor, with the viewer still open; a second Esc there closes it.
     if (!focused && viewer.handleKey(data)) return { consume: true };
-    if (matchesKey(data, "ctrl+b") && hint() && editorFocused(tui)) {
+    if (matchesKey(data, "ctrl+b") && canBackground() && editorFocused(tui)) {
       registry.backgroundAll();
       return { consume: true };
     }

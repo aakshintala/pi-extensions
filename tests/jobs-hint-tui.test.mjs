@@ -52,20 +52,43 @@ const screen = (chat, top, below, usage) => {
   return "\n" + [...lines, ...Array(ROWS - lines.length).fill("")].join("\n");
 };
 const GO = ["", " go", "", ""];
-// FleetView's own hint: removed by the fleet lane, then this row goes.
-const FLEET_HINT = [" ctrl+b to run in background"];
+
+/**
+ * Samples the rows between the editor's bottom border and the footer until the returned
+ * function is called, which gives each distinct set seen. Nothing under the editor may
+ * change height while a tool starts or stops (#139).
+ */
+function watchUnderEditor(tui) {
+  const seen = new Set();
+  let on = true;
+  const sample = async () => {
+    while (on) {
+      const rows = tui.screen().split("\n");
+      seen.add(JSON.stringify(rows.slice(rows.lastIndexOf(BORDER) + 1, rows.indexOf("~/cwd"))));
+      await delay(10); // sampling interval, not a sync point
+    }
+  };
+  const done = sample();
+  return async () => {
+    on = false;
+    await done;
+    return [...seen].map((s) => JSON.parse(s));
+  };
+}
 const RUNNING = screen(
   [...GO, " ⠋ Ran 1 shell command", ` ⠋ Bash(${LONG})`, "   ⎿  ctrl+b to run in background", ""],
-  WORKING, FLEET_HINT, "↑2 ↓19 W2 CH0.0% 0.0%/128k (auto)",
+  WORKING, [], "↑2 ↓19 W2 CH0.0% 0.0%/128k (auto)",
 );
 
-test("while a long command runs, its call shows outside the summary with the hint; once it ends it folds back in", async (t) => {
+test("while a long command runs, its call shows outside the summary with the hint; once it ends it folds back in; the rows under the editor never change", async (t) => {
   const tui = await start(t, [bash(LONG), "finished"]);
+  const under = watchUnderEditor(tui);
   await started(t, tui);
   await tui.waitForScreen(RUNNING);
   writeFileSync(join(tui.cwd, "done"), "");
   await tui.waitForEvent("agent_end");
   await tui.waitForScreen(screen([...GO, " ⏺ Ran 1 shell command", "", " finished", ""], BORDER, [], "↑31 ↓21 R2 W31 CH3.3% 0.0%/128k (auto)"));
+  assert.deepEqual(await under(), [[]], "no rows under the editor at any point");
 });
 
 test("after Ctrl+B the call folds into its summary and the job is listed in FleetView", async (t) => {
@@ -91,8 +114,10 @@ test("Esc during a hinted run kills the command and leaves no hint", async (t) =
 
 test("a fast command leaves no hint row", async (t) => {
   const tui = await start(t, [bash("echo hi"), "finished"]);
+  const under = watchUnderEditor(tui);
   await tui.waitForEvent("agent_end");
   await tui.waitForScreen(screen([...GO, " ⏺ Ran 1 shell command", "", " finished", ""], BORDER, [], "↑17 ↓9 R2 W17 CH6.3% 0.0%/128k (auto)"));
+  assert.deepEqual(await under(), [[]], "no rows under the editor at any point");
 });
 
 test("while Ctrl+B still moves the cursor left, a running call shows no hint", async (t) => {

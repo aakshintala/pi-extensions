@@ -51,7 +51,7 @@ Only the session that started a job can see, wait on or stop it.
   hold it. If the shell left processes running in its group, the notice, `wait`
   and `list` say so.
 - Each job is a `shell` row in FleetView. Opening it shows the live log, and
-  Ctrl+Q stops it.
+  `x` on its row in FleetView stops it.
 - Each job ends with exactly one notice: status, exit code, running time and
   log path. A failed job's notice carries its last 20 lines, cut to 2,000
   characters. A `wait` or `stop` that returned the final state replaces the
