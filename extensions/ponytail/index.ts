@@ -14,6 +14,6 @@ Keep, however small the change: validation at trust boundaries, error handling t
 
 export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", (event) => {
-    event.systemPromptOptions.sections.ponytail = PONYTAIL;
+    (event.systemPromptOptions.sections ??= {}).ponytail = PONYTAIL;
   });
 }

@@ -24,3 +24,9 @@ test("adds exactly one section and returns no systemPrompt, idempotently", () =>
   }
   assert.equal(e.systemPromptOptions.forceSystemPrompt, undefined);
 });
+
+test("creates sections when an earlier handler left none", () => {
+  const e = { type: "before_agent_start", prompt: "hi", systemPrompt: "", systemPromptOptions: {} };
+  assert.equal(handlerFor()(e)?.systemPrompt, undefined);
+  assert.deepEqual(e.systemPromptOptions.sections, { ponytail: PONYTAIL });
+});
