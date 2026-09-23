@@ -185,7 +185,7 @@ test("two declares of a section share values and listeners, and a change through
   assert.deepEqual(readFile(d), { subagents: { verbose: true } });
 });
 
-test("a redeclare with a changed schema keeps listeners and re-validates the values", () => {
+test("a redeclare with a changed schema keeps listeners, re-validates the values and announces added and removed keys", () => {
   const d = dir({ subagents: { maxConcurrent: 20, mode: "slow" } });
   const rig = createRigSettings(d);
   const old = rig.declare("subagents", DECL);
@@ -204,7 +204,7 @@ test("a redeclare with a changed schema keeps listeners and re-validates the val
   assert.deepEqual(old.values(), { maxConcurrent: 2, mode: "slow", depth: 1 });
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /subagents\.maxConcurrent must be between 1 and 8; using default 2/);
-  assert.deepEqual(heard, [["maxConcurrent", 2]]);
+  assert.deepEqual(heard, [["maxConcurrent", 2], ["depth", 1], ["verbose", undefined]]);
   assert.throws(() => old.get("verbose"), /unknown rig setting/);
   old.set("depth", 3);
   assert.deepEqual(heard.at(-1), ["depth", 3]);

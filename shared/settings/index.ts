@@ -28,7 +28,8 @@ export interface Section {
   /** `set` for several keys in one write; all are validated before anything is written. */
   setMany(values: Record<string, Value>): void;
   reset(key: string): void;
-  onChange(listener: (key: string, value: Value) => void): () => void;
+  /** Hears every change, including a redeclare's added keys and removed ones (value `undefined`). */
+  onChange(listener: (key: string, value: Value | undefined) => void): () => void;
 }
 
 export interface RigSettings {
@@ -94,7 +95,7 @@ export function createRigSettings(agentDir: string): RigSettings {
 
   // One live section per name for the process: every handle `declare` returns
   // is the same object, so a child session's redeclare cannot retire the parent's.
-  type Live = { section: Section; byKey: Map<string, Setting>; values: Map<string, Value>; listeners: Set<(key: string, value: Value) => void> };
+  type Live = { section: Section; byKey: Map<string, Setting>; values: Map<string, Value>; listeners: Set<(key: string, value: Value | undefined) => void> };
   const sections = new Map<string, Live>();
 
   function declare(name: string, settings: readonly Setting[]): Section {
@@ -129,7 +130,9 @@ export function createRigSettings(agentDir: string): RigSettings {
       const old = live.values;
       Object.assign(live, { byKey, values });
       (live.section as { settings: readonly Setting[] }).settings = settings;
-      for (const [key, value] of values) if (old.has(key) && old.get(key) !== value) notify(live, key, value);
+      // Changed and added keys carry their value; a removed key carries undefined.
+      for (const [key, value] of values) if (old.get(key) !== value) notify(live, key, value);
+      for (const key of old.keys()) if (!values.has(key)) notify(live, key, undefined);
       return live.section;
     }
 
@@ -183,7 +186,7 @@ export function createRigSettings(agentDir: string): RigSettings {
     return section;
   }
 
-  function notify(live: Live, key: string, value: Value) {
+  function notify(live: Live, key: string, value: Value | undefined) {
     for (const l of live.listeners) l(key, value);
   }
 
