@@ -51,6 +51,7 @@ test("provider owns a mid-message /word, prefix matches first", async () => {
   const r = await get(p, "please /gri");
   assert.deepEqual(r.items.map((i) => i.label), ["grill-with-docs", "grilling", "setup-grill"]);
   assert.equal(r.prefix, "gri");
+  assert.deepEqual((await get(p, "x /t")).items.map((i) => i.label), ["tdd", "grill-with-docs", "setup-grill"], "prefix before substring");
   assert.deepEqual((await get(p, "x /")).items.length, 4, "a bare / lists every skill");
   assert.deepEqual((await get(p, "", ["first line", "/td"])).items.map((i) => i.label), ["tdd"], "a later line is mid-message");
   assert.equal(await get(p, "try /zzq"), null, "no match: no list, and no file completion");
