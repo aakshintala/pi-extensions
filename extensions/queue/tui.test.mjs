@@ -138,7 +138,33 @@ second edited
 
 `);
 
-  tui.keys("Enter");
+  tui.keys("Enter"); // saved; wait for it, or the release can deliver the row first and Enter submits the draft
+  await tui.waitForScreen(`
+
+ go
+
+
+
+ gate
+
+
+ Follow-ups (1) · after the run
+   second edited
+── ● Working ───────────────────────────────────────────────────────────────────
+my draft
+────────────────────────────────────────────────────────────────────────────────
+~/cwd
+↑2 ↓2 W2 CH0.0% 0.0%/128k (auto)                                       harness-1
+
+
+
+
+
+
+
+
+`);
+
   release(tui);
   await tui.waitForEvent("agent_end", 2);
   await tui.waitForScreen(`
