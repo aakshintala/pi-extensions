@@ -131,7 +131,7 @@ test("group summary: fixed per-verb wording in order of first use, line totals, 
   assert.equal(plain(td.summaryText(theme, calls, true)), "thought · read 3 files, edited 2 files +442 −12, updated todos, ran 1 shell command");
 });
 
-test("group summary: failed and cancelled calls are not counted as done work and show in the error colour", () => {
+test("group summary: failed and cancelled calls count under their verb and again in the error colour", () => {
   const theme = recordingTheme();
   const calls = [
     { summary: READ, status: "done" },
@@ -141,17 +141,84 @@ test("group summary: failed and cancelled calls are not counted as done work and
     { summary: BASH, status: "cancelled" },
   ];
   const text = td.summaryText(theme, calls);
-  assert.equal(plain(text), "Read 2 files · 1 failed · 2 cancelled");
+  assert.equal(plain(text), "Read 3 files, edited 1 file, ran 1 shell command · 1 failed · 2 cancelled");
   assert.match(text, /\x1b\[38;5;\d+m1 failed/);
   assert.equal(theme.keys.at(-1), "error");
   assert.equal(theme.keys.at(-2), "error");
-  assert.equal(plain(td.summaryText(recordingTheme(), [{ summary: READ, status: "cancelled" }])), "1 cancelled");
+  assert.equal(plain(td.summaryText(recordingTheme(), [{ summary: READ, status: "error" }])), "Read 1 file · 1 failed");
+});
+
+test("outcome of a result: Pi's abort result is a cancel, any other error a failure", () => {
+  const text = (t) => ({ content: [{ type: "text", text: t }] });
+  assert.equal(td.outcomeOf(false, text("ok")), "done");
+  assert.equal(td.outcomeOf(true, text("Operation aborted")), "cancelled");
+  assert.equal(td.outcomeOf(true, text("ENOENT: no such file")), "error");
+});
+
+// A session's groups, drawn the way Pi's chat draws its calls: in message order.
+const GROUPED = td.toolRenderers({ title: "Read", arg: (a) => a.path, result: () => ({ summary: "Read", body: [] }), summary: READ });
+const toolCall = (id, name = "read") => ({ type: "toolCall", id, name, arguments: { path: id } });
+// Every call renders once, then each is drawn (Pi redraws a leader when a later call joins).
+const draw = (ids, over = {}) => {
+  const render = (id) => GROUPED.renderCall({ path: id }, recordingTheme(), { toolCallId: id, args: {}, cwd: "/w", expanded: false, invalidate() {}, ...over });
+  ids.forEach(render);
+  return ids.flatMap((id) => plainLines(render(id).render(80)));
+};
+
+test("groups: a result that arrives before its call is registered still counts", (t) => {
+  const g = new td.ToolGroups();
+  t.after(() => g.reset());
+  g.settle("e1", false, { content: [] });
+  g.track({ role: "assistant", content: [toolCall("e1"), toolCall("e2")] });
+  g.settle("e2", false, { content: [] });
+  g.endRun();
+  assert.deepEqual(draw(["e1", "e2"]), [" ⏺ Read 2 files"]);
+});
+
+test("groups: a call revised out of the message leaves its group", (t) => {
+  const g = new td.ToolGroups();
+  t.after(() => g.reset());
+  g.track({ role: "assistant", content: [toolCall("v1"), toolCall("v2")] });
+  draw(["v1", "v2"]);
+  g.track({ role: "assistant", content: [toolCall("v1")] });
+  assert.deepEqual(draw(["v1"]), [" ⠋ Read 1 file"]);
+  assert.deepEqual(draw(["v2"]), [" ⏺ Read(v2)"]); // no longer grouped
+});
+
+test("groups: a call with an image always shows, since Pi draws the image outside the renderers", (t) => {
+  const g = new td.ToolGroups();
+  t.after(() => g.reset());
+  g.track({ role: "assistant", content: [toolCall("i1"), toolCall("i2")] });
+  draw(["i1", "i2"]);
+  g.settle("i1", false, { content: [] });
+  g.settle("i2", false, { content: [{ type: "image", data: "", mimeType: "image/png" }] });
+  assert.deepEqual(draw(["i1", "i2"]), [" ⏺ Read 2 files", " ⏺ Read(i2)"]);
+});
+
+test("groups: an aborted message cancels its calls with no result; an errored one fails them", (t) => {
+  const g = new td.ToolGroups();
+  t.after(() => g.reset());
+  g.track({ role: "assistant", stopReason: "aborted", content: [toolCall("a1"), toolCall("a2")] });
+  g.track({ role: "assistant", stopReason: "error", content: [toolCall("f1")] });
+  g.settle("a1", false, { content: [] });
+  assert.deepEqual(draw(["a1", "a2"]), [" ⏺ Read 2 files · 1 cancelled"]);
+  assert.deepEqual(draw(["f1"]), [" ⏺ Read 1 file · 1 failed", " ⏺ Read(f1)"]);
+});
+
+test("groups: a tool without a summary splits a run, and so does text", (t) => {
+  const g = new td.ToolGroups();
+  t.after(() => g.reset());
+  g.track({ role: "assistant", content: [toolCall("s1"), toolCall("s2"), toolCall("s3", "ls"), toolCall("s4"), { type: "text", text: "then" }, toolCall("s5")] });
+  for (const id of ["s1", "s2", "s3", "s4", "s5"]) g.settle(id, false, { content: [] });
+  draw(["s1", "s2", "s4", "s5"]); // s3 is drawn by its own tool
+  const shown = ["s1", "s2", "s4", "s5"].map((id) => draw([id]));
+  assert.deepEqual(shown, [[" ⏺ Read 2 files"], [], [" ⏺ Read 1 file"], [" ⏺ Read 1 file"]]);
 });
 
 test("a group still on screen after its session is reset draws without throwing", () => {
-  const r = td.toolRenderers({ title: "Read", arg: () => "", result: () => ({ summary: "", body: [] }), summary: { tool: "read", verb: "read", one: "file" } });
-  td.trackMessage({ role: "assistant", content: [{ type: "toolCall", id: "r1", name: "read", arguments: {} }] });
-  const line = r.renderCall({}, recordingTheme(), { toolCallId: "r1", args: {}, cwd: "/w", expanded: false, invalidate() {} });
-  td.resetGroups();
+  const g = new td.ToolGroups();
+  g.track({ role: "assistant", content: [toolCall("r1")] });
+  const line = GROUPED.renderCall({}, recordingTheme(), { toolCallId: "r1", args: {}, cwd: "/w", expanded: false, invalidate() {} });
+  g.reset();
   assert.doesNotThrow(() => line.render(80));
 });

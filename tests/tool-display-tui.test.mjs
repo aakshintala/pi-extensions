@@ -50,7 +50,7 @@ test("tool display: decorated built-ins grouped, visible error, Ctrl+O shows eac
   tui.type("go");
   tui.keys("Enter");
   await tui.waitForEvent("agent_end");
-  await tui.waitForScreen(fill(`${calls("go", "Read 1 file, edited 1 file +3 −2, wrote 1 file +6 · 1 failed", A_FAILS)}
+  await tui.waitForScreen(fill(`${calls("go", "Read 1 file, edited 2 files +3 −2, wrote 1 file +6 · 1 failed", A_FAILS)}
 ${RULE}
 
 ${RULE}
@@ -106,7 +106,7 @@ ${RULE}
   await tui.waitForEvent("agent_end", 2);
   await tui.waitForScreen(fill(`${calls(
     "again",
-    "Read 1 file, wrote 1 file +6 · 2 failed",
+    "Read 1 file, edited 2 files, wrote 1 file +6 · 2 failed",
     `
  ⏺ Edit(b.txt)
    ⎿  Error: Could not find the exact text in b.txt. The old text must match

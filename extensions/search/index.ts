@@ -18,7 +18,8 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import type { FileFinder } from "@ff-labs/fff-node";
-import { plural, resultText, toolRenderers } from "../../shared/tool-display/index.ts";
+import { plural, resultText, toolRenderers, type Summary } from "../../shared/tool-display/index.ts";
+import { oneLine } from "../../shared/text/index.ts";
 
 type FinderClass = Pick<typeof FileFinder, "isAvailable" | "create">;
 type Finder = Pick<FileFinder, "grep" | "glob" | "fileSearch" | "waitForScan" | "destroy" | "isDestroyed">;
@@ -27,10 +28,10 @@ type Result = { content: { type: "text"; text: string }[]; details: unknown };
 // Rendered in the shared tool style; in a group, grep counts as "searched N patterns"
 // and find as "found files" (a find call returns many files, so calls are not counted).
 const outputLines = (r: unknown) => resultText(r).split("\n").filter((l) => l && !/^\[.*\]$/.test(l)); // not the [limit] notice
-const searchStyle = (title: string, none: RegExp, found: (n: number) => string, summary: { tool: string; verb: string; one?: string; many?: string }) =>
+const searchStyle = (title: string, none: RegExp, found: (n: number) => string, summary: Summary) =>
   toolRenderers({
     title,
-    arg: (a: { pattern?: string }) => a.pattern ?? "",
+    arg: (a: { pattern?: string }) => oneLine(a.pattern ?? ""), // model input
     result: (r, _a, _e, theme) => {
       const lines = outputLines(r);
       if (lines.length === 1 && none.test(lines[0])) return { summary: lines[0], body: [] };
@@ -38,8 +39,8 @@ const searchStyle = (title: string, none: RegExp, found: (n: number) => string, 
     },
     summary,
   });
-const GREP_STYLE = searchStyle("Grep", /^No matches found$/, (n) => `Found ${n} ${plural(n, "line")}`, { tool: "grep", verb: "searched", one: "pattern" });
-const FIND_STYLE = searchStyle("Find", /^No files found/, (n) => `Found ${n} ${plural(n, "file")}`, { tool: "find", verb: "found", many: "files" });
+const GREP_STYLE = searchStyle("Grep", /^No matches found$/, (n) => `Found ${n} ${plural(n, "line")}`, { verb: "searched", one: "pattern" });
+const FIND_STYLE = searchStyle("Find", /^No files found/, (n) => `Found ${n} ${plural(n, "file")}`, { verb: "found", many: "files" });
 
 const SCAN_WAIT_MS = 5_000;
 const GREP_LIMIT = 100;

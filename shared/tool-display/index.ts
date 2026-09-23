@@ -118,28 +118,28 @@ export interface ToolStyle<Args = any, Result = any> {
  * render zero lines.
  */
 export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
-  if (style.summary) S.summaries.set(style.summary.tool, style.summary);
   return {
     renderShell: "self" as const,
     renderCall(args: Args, theme: Theme, context: ToolRenderContext): Component {
-      const c = call(context.toolCallId);
-      c.invalidate = context.invalidate;
-      const g = c.group;
+      const groups = sessionOf(context.toolCallId);
+      const c = groups?.describe(context.toolCallId, style.summary, context.invalidate);
+      const g = c && groups!.group(context.toolCallId);
       const own = (w: number) => {
-        const state = g ? stateOf(c) : context.isError ? "error" : context.isPartial ? "pending" : "done";
+        const state = c ? c.state() : context.isError ? "error" : context.isPartial ? "pending" : "done";
         const status: CallStatus = state === "cancelled" ? "error" : state;
         return callLine(theme, status, style.title, style.arg(args ?? ({} as Args), context.cwd), w);
       };
       if (!g) return lines((w) => [own(w)]);
-      const open = isOpen(g, context);
-      const summary = !open && g.ids[0] === context.toolCallId;
-      const shown = open || stateOf(c) === "error";
+      const open = context.expanded || g.open;
+      const summary = !open && g.calls[0] === c;
+      const shown = open || c!.alwaysShown();
       return clickable(g, lines((w) => [...(summary ? [summaryLine(theme, g, w)] : []), ...(shown ? [own(w)] : [])]));
     },
     renderResult(result: Result, options: { expanded: boolean; isPartial: boolean }, theme: Theme, context: ToolRenderContext): Component {
-      const c = S.calls.get(context.toolCallId);
-      const g = c?.group;
-      if (options.isPartial || (g && !isOpen(g, context) && stateOf(c!) !== "error")) return lines(() => []);
+      const groups = sessionOf(context.toolCallId);
+      const g = groups?.group(context.toolCallId);
+      const c = g?.calls.find((m) => m.id === context.toolCallId);
+      if (options.isPartial || (g && !context.expanded && !g.open && !c!.alwaysShown())) return lines(() => []);
       let out: Component;
       if (context.isError) {
         const message = resultText(result).replaceAll(`${context.cwd}/`, "");
@@ -154,16 +154,18 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
 }
 
 // ---- Groups (#56) ----
-// A run of consecutive calls to tools with a summary, in one assistant message, is a
-// group. Its first call draws one summary line and the others draw nothing, until
-// Ctrl+O (context.expanded) or a click on the group opens it. Failed calls always
-// show. Groups come from the message itself (trackMessage), so a transcript rebuilt
+// Consecutive calls to tools with a summary, in one assistant message, form a group.
+// Its first call draws one summary line and the others draw nothing, until Ctrl+O
+// (context.expanded) or a click on the group opens it. Failed calls and calls with
+// images always show. Groups come from the message itself, so a transcript rebuilt
 // from saved messages groups the same way as the live chat.
+//
+// Each session owns one ToolGroups (its extension creates it and drives it from Pi's
+// events and its own spinner timer). Renderers find a call's session through a
+// process-wide index of call ids, which each session adds to and removes from.
 
 /** How a tool counts in a group summary: `verb N one|many`, or `verb many` without `one`. */
 export interface Summary<Args = any> {
-  /** The tool's registered name. */
-  tool: string;
   verb: string;
   one?: string;
   many?: string;
@@ -172,117 +174,209 @@ export interface Summary<Args = any> {
 }
 
 export type CallState = "pending" | "done" | "error" | "cancelled";
+type Outcome = Exclude<CallState, "pending">;
+
+/**
+ * How a finished call ended, from data Pi saves with it: Pi's own abort result
+ * ("Operation aborted") is a cancel, any other error a failure.
+ */
+export const outcomeOf = (isError: boolean, result: unknown): Outcome =>
+  !isError ? "done" : resultText(result).trim() === "Operation aborted" ? "cancelled" : "error";
+
+const hasImage = (result: unknown) =>
+  Array.isArray((result as any)?.content) && (result as any).content.some((c: any) => c?.type === "image");
+
+interface Run {
+  ids: string[];
+  /** Set when the message or its turn ended: what a call with no result counts as. */
+  ended?: "cancelled" | "error";
+}
+
+class Call {
+  status: CallState = "pending";
+  image = false;
+  open = false;
+  summary?: Summary;
+  invalidate?: () => void;
+  id: string;
+  run: Run;
+  args: unknown;
+  constructor(id: string, run: Run, args: unknown) {
+    this.id = id;
+    this.run = run;
+    this.args = args;
+  }
+  state(): CallState {
+    return this.status === "pending" && this.run.ended ? this.run.ended : this.status;
+  }
+  /** Failures show under the summary; so do images, which Pi draws outside the renderers. */
+  alwaysShown() {
+    return this.state() === "error" || this.image;
+  }
+}
 
 interface Group {
-  ids: string[];
-  expanded: boolean;
-  /** The turn was aborted: calls still pending are cancelled. */
-  ended: boolean;
-}
-interface Call {
-  status: Exclude<CallState, "cancelled">;
-  summary?: Summary;
-  args?: any;
-  group?: Group;
-  invalidate?: () => void;
+  calls: Call[];
+  open: boolean;
 }
 
-// One store per process: every extension that imports this module shares the groups.
-const S: { summaries: Map<string, Summary>; calls: Map<string, Call>; frame: number; timer?: ReturnType<typeof setInterval> } =
-  ((globalThis as any)[Symbol.for("pi-rig.tool-groups")] ??= { summaries: new Map(), calls: new Map(), frame: 0 });
+const INDEX: Map<string, ToolGroups> = ((globalThis as any)[Symbol.for("pi-rig.tool-groups")] ??= new Map());
+const sessionOf = (id: string) => INDEX.get(id);
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const SPIN_MS = 80;
 
-const call = (id: string): Call => S.calls.get(id) ?? S.calls.set(id, { status: "pending" }).get(id)!;
-const stateOf = (c: Call): CallState => (c.status === "pending" && c.group?.ended ? "cancelled" : c.status);
-const isOpen = (g: Group, context: ToolRenderContext) => context.expanded || g.expanded;
-// A chat can still draw a group after resetGroups (session switch) forgot its calls.
-const members = (g: Group) => g.ids.flatMap((id) => S.calls.get(id) ?? []);
-const running = (g: Group) => members(g).some((c) => stateOf(c) === "pending");
-const refresh = (g: Group) => members(g).forEach((c) => c.invalidate?.());
+/** One session's tool groups. */
+export class ToolGroups {
+  private calls = new Map<string, Call>();
+  /** Results that arrived before their call was registered. */
+  private early = new Map<string, { outcome: Outcome; image: boolean }>();
+  frame = 0;
+
+  /** Registers the groups in an assistant message (call on every update and at its end). */
+  track(message: any): void {
+    if (message?.role !== "assistant" || !Array.isArray(message.content)) return;
+    const runs: any[][] = [[]];
+    for (const b of message.content) {
+      if (b?.type === "toolCall" && typeof b.id === "string") runs.at(-1)!.push(b);
+      else if (b?.type === "text" && b.text?.trim()) runs.push([]);
+    }
+    const ended = message.stopReason === "aborted" ? "cancelled" : message.stopReason === "error" ? "error" : undefined;
+    for (const blocks of runs.filter((r) => r.length)) {
+      const ids = blocks.map((b) => b.id);
+      const old = this.calls.get(ids[0])?.run;
+      const run: Run = old ?? { ids: [] };
+      // A call revised out of the message leaves its group.
+      for (const id of run.ids) if (!ids.includes(id)) this.forget(id);
+      const changed = ids.join() !== run.ids.join() || (ended && !run.ended);
+      run.ids = ids;
+      run.ended ??= ended;
+      for (const b of blocks) {
+        const c = this.calls.get(b.id);
+        if (c) Object.assign(c, { run, args: b.arguments });
+        else this.add(new Call(b.id, run, b.arguments));
+      }
+      if (changed) this.refresh(run);
+    }
+  }
+
+  /** Records a call's result (Pi's tool_execution_end, or a saved toolResult message). */
+  settle(id: string, isError: boolean, result: unknown): void {
+    const outcome = { outcome: outcomeOf(isError, result), image: hasImage(result) };
+    const c = this.calls.get(id);
+    if (!c) return void this.early.set(id, outcome);
+    Object.assign(c, { status: outcome.outcome, image: outcome.image });
+    this.refresh(c.run);
+  }
+
+  /** The turn is over: calls still without a result are cancelled. */
+  endRun(): void {
+    for (const run of new Set([...this.calls.values()].map((c) => c.run))) {
+      if (!run.ended && run.ids.some((id) => this.calls.get(id)?.status === "pending")) {
+        run.ended = "cancelled";
+        this.refresh(run);
+      }
+    }
+  }
+
+  /** Forgets every call (session start and shutdown). */
+  reset(): void {
+    for (const id of this.calls.keys()) if (INDEX.get(id) === this) INDEX.delete(id);
+    this.calls.clear();
+    this.early.clear();
+  }
+
+  /** Advances the spinner and redraws the summary line of each running group. */
+  tick(): void {
+    this.frame++;
+    for (const run of new Set([...this.calls.values()].map((c) => c.run))) {
+      if (run.ended || !run.ids.some((id) => this.calls.get(id)?.status === "pending")) continue;
+      for (const id of run.ids) {
+        const g = this.group(id);
+        if (g && g.calls[0].id === id && g.calls.some((c) => c.state() === "pending")) g.calls[0].invalidate?.();
+      }
+    }
+  }
+
+  /** Called by a renderer: records the call's summary and redraw hook. */
+  describe(id: string, summary: Summary | undefined, invalidate: () => void): Call | undefined {
+    const c = this.calls.get(id);
+    if (!c) return undefined;
+    c.invalidate = invalidate;
+    if (summary && !c.summary) {
+      c.summary = summary;
+      // The call may join the group before it: redraw the others (not itself, mid-render).
+      for (const m of this.group(id)?.calls ?? []) if (m !== c) m.invalidate?.();
+    }
+    return c;
+  }
+
+  /**
+   * The call's group: the calls around it in its run that have a summary. Pi renders
+   * calls in message order, so every call before this one has already described itself.
+   */
+  group(id: string): Group | undefined {
+    const c = this.calls.get(id);
+    if (!c?.summary) return undefined;
+    const ids = c.run.ids;
+    const has = (i: number) => !!this.calls.get(ids[i])?.summary;
+    let start = ids.indexOf(id);
+    let end = start;
+    while (start > 0 && has(start - 1)) start--;
+    while (end < ids.length - 1 && has(end + 1)) end++;
+    const calls = ids.slice(start, end + 1).map((i) => this.calls.get(i)!);
+    return { calls, open: calls[0].open };
+  }
+
+  /** Opens or closes a group (a click on it). */
+  toggle(g: Group): void {
+    for (const c of g.calls) c.open = !g.open;
+    for (const c of g.calls) c.invalidate?.();
+  }
+
+  private add(c: Call) {
+    this.calls.set(c.id, c);
+    INDEX.set(c.id, this);
+    const early = this.early.get(c.id);
+    if (early) {
+      this.early.delete(c.id);
+      Object.assign(c, { status: early.outcome, image: early.image });
+    }
+  }
+
+  private forget(id: string) {
+    this.calls.delete(id);
+    if (INDEX.get(id) === this) INDEX.delete(id);
+  }
+
+  private refresh(run: Run) {
+    for (const id of run.ids) this.calls.get(id)?.invalidate?.();
+  }
+}
 
 /** Clicking any row of a group opens or closes that group only. */
 const clickable = (g: Group, child: Component): Component =>
   new MouseRegion(child, (e) => {
     if (e.type !== "click" || e.button !== "left") return undefined;
-    g.expanded = !g.expanded;
-    refresh(g);
+    sessionOf(g.calls[0].id)?.toggle(g);
     return { handled: true };
   });
 
-/** Registers the groups in an assistant message (call on every update and at its end). */
-export function trackMessage(message: any): void {
-  if (message?.role !== "assistant" || !Array.isArray(message.content)) return;
-  const runs: any[][] = [[]];
-  for (const b of message.content) {
-    if (b?.type === "toolCall" && S.summaries.has(b.name)) runs.at(-1)!.push(b);
-    else if (b?.type === "toolCall" || (b?.type === "text" && b.text?.trim())) runs.push([]);
-  }
-  const ended = message.stopReason === "aborted" || message.stopReason === "error";
-  for (const run of runs.filter((r) => r.length)) {
-    const g = call(run[0].id).group ?? { ids: [], expanded: false, ended: false };
-    const ids = run.map((b) => b.id);
-    const changed = ids.join() !== g.ids.join() || ended !== g.ended;
-    Object.assign(g, { ids, ended: g.ended || ended });
-    for (const b of run) Object.assign(call(b.id), { group: g, summary: S.summaries.get(b.name), args: b.arguments });
-    if (changed) refresh(g);
-  }
-}
-
-/** Records a call's result. */
-export function settle(id: string, status: Exclude<CallState, "pending">): void {
-  const c = S.calls.get(id);
-  if (!c?.group) return;
-  if (status === "cancelled") c.group.ended = true;
-  else c.status = status;
-  refresh(c.group);
-}
-
-/** The turn is over: calls with no result are cancelled. */
-export function endRun(): void {
-  for (const g of new Set([...S.calls.values()].map((c) => c.group))) {
-    if (g && running(g)) {
-      g.ended = true;
-      refresh(g);
-    }
-  }
-}
-
-/** Forgets every group and stops the spinner (session start and shutdown). */
-export function resetGroups(): void {
-  stopSpinner();
-  S.calls.clear();
-}
-
-// One timer for every running group; each tick redraws only those groups' summary lines.
-function spin() {
-  S.timer ??= setInterval(() => {
-    S.frame++;
-    const live = new Set([...S.calls.values()].map((c) => c.group).filter((g) => g && running(g)));
-    for (const g of live) S.calls.get(g!.ids[0])?.invalidate?.();
-    if (live.size === 0) stopSpinner();
-  }, SPIN_MS);
-}
-const stopSpinner = () => {
-  clearInterval(S.timer);
-  S.timer = undefined;
-};
-
 function summaryLine(theme: Theme, g: Group, width: number): string {
-  const calls = members(g).map((c) => ({ summary: c.summary!, status: stateOf(c), args: c.args }));
+  const calls = g.calls.map((c) => ({ summary: c.summary!, status: c.state(), args: c.args }));
   const live = calls.some((c) => c.status === "pending");
-  if (live) spin();
   const bad = calls.some((c) => c.status === "error" || c.status === "cancelled");
-  const bullet = live ? theme.fg("muted", SPINNER[S.frame % SPINNER.length]) : theme.fg(bad ? "error" : "success", CALL);
+  const frame = SPINNER[(sessionOf(g.calls[0].id)?.frame ?? 0) % SPINNER.length];
+  const bullet = live ? theme.fg("muted", frame) : theme.fg(bad ? "error" : "success", CALL);
   return truncateToWidth(`${PAD}${bullet} ${summaryText(theme, calls)}`, width);
 }
 
 const lineTotals = new WeakMap<object, { added: number; removed: number } | undefined>();
 
 /**
- * A group's summary: "Read 3 files, edited 2 files +442 −12" in the dim colour, with
- * "N failed" and "N cancelled" in the error colour. `thought` starts it with "thought ·".
+ * A group's summary: "Read 3 files, edited 2 files +442 −12 · 1 failed", counts in the
+ * dim colour and "N failed" / "N cancelled" in the error colour. Every call counts
+ * under its verb; line totals come from finished calls only. `thought` starts it
+ * with "thought ·".
  */
 export function summaryText(theme: Theme, calls: { summary: Summary; status: CallState; args?: any }[], thought = false): string {
   const kinds = new Map<string, { s: Summary; n: number; added: number; removed: number }>();
@@ -290,16 +384,14 @@ export function summaryText(theme: Theme, calls: { summary: Summary; status: Cal
   let cancelled = 0;
   for (const { summary: s, status, args } of calls) {
     if (status === "error") failed++;
-    else if (status === "cancelled") cancelled++;
-    else {
-      const key = `${s.verb}|${s.one}|${s.many}`;
-      const k = kinds.get(key) ?? kinds.set(key, { s, n: 0, added: 0, removed: 0 }).get(key)!;
-      k.n++;
-      if (status === "done" && s.lines && args && typeof args === "object") {
-        if (!lineTotals.has(args)) lineTotals.set(args, s.lines(args));
-        k.added += lineTotals.get(args)?.added ?? 0;
-        k.removed += lineTotals.get(args)?.removed ?? 0;
-      }
+    if (status === "cancelled") cancelled++;
+    const key = `${s.verb}|${s.one}|${s.many}`;
+    const k = kinds.get(key) ?? kinds.set(key, { s, n: 0, added: 0, removed: 0 }).get(key)!;
+    k.n++;
+    if (status === "done" && s.lines && args && typeof args === "object") {
+      if (!lineTotals.has(args)) lineTotals.set(args, s.lines(args));
+      k.added += lineTotals.get(args)?.added ?? 0;
+      k.removed += lineTotals.get(args)?.removed ?? 0;
     }
   }
   let text = [...kinds.values()]

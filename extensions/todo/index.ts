@@ -120,7 +120,7 @@ export default function (pi: ExtensionAPI) {
       title: "TodoWrite",
       arg: () => "",
       result: (r) => ({ summary: resultText(r), body: [] }),
-      summary: { tool: "todo_write", verb: "updated", many: "todos" },
+      summary: { verb: "updated", many: "todos" },
     }),
     async execute(_id, params: { todos: Todo[] }, _signal, _onUpdate, ctx) {
       const next = params.todos.map(({ text, status }, i) => {

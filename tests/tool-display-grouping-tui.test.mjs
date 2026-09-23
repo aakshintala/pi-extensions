@@ -1,12 +1,15 @@
 // Tool grouping (#56) in a real pi: a run of calls is one live summary line, failed
 // calls show under it, text between calls splits groups, Ctrl+O expands every call,
 // Esc counts result-less calls as cancelled, and a click toggles one group.
+// Pi draws all of a message's text before its tool calls, so text between two runs
+// shows above both groups, not between them.
+// Running screens wait for the group spinner's first frame (⠋): it comes round every
+// 800 ms, and the wait fixture makes Pi's own working indicator still.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { setTimeout as delay } from "node:timers/promises";
 import { liveGroup, startTui } from "./helpers/tui.mjs";
 
 const EXTENSIONS = ["../extensions/tool-display/index.ts", "./fixtures/tool-display/wait.ts"].map((p) =>
@@ -17,18 +20,6 @@ const TOOLS = ["--tools", "read,edit,write,wait"];
 const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
 const text = (t) => ({ type: "text", text: t });
 const RULE = "─".repeat(80);
-
-// Like tui.waitForScreen, with every spinner frame read as ⠋ so a running screen is exact.
-const SPIN = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g;
-async function waitForSpinning(tui, expected) {
-  const want = expected.replace(/^\n/, "").split("\n").map((l) => l.trimEnd()).join("\n");
-  const now = () => tui.screen().replace(SPIN, "⠋");
-  const deadline = Date.now() + 20_000;
-  while (now() !== want) {
-    if (Date.now() > deadline) assert.equal(now(), want);
-    await delay(10); // poll interval, not a sync point: we wait on the condition
-  }
-}
 
 // A full 30-row screen: `top` rows, blank rows, then `bottom` rows.
 const rows = (top, bottom = []) => "\n" + [...top, ...Array(30 - top.length - bottom.length).fill(""), ...bottom].join("\n");
@@ -42,7 +33,7 @@ async function start(t, replies, args = []) {
   return tui;
 }
 
-test("a run of calls is one live summary line; failures show under it; text splits groups; Ctrl+O expands", async (t) => {
+test("a run of calls is one live summary line; failures show under it; text makes a second group, drawn after all of the message's text; Ctrl+O expands", async (t) => {
   const tui = await start(t, [
     [
       text("Looking."),
@@ -63,7 +54,7 @@ test("a run of calls is one live summary line; failures show under it; text spli
  Looking.
  Then:
 
- ${bullet} Read 1 file, edited 1 file +3 −2, waited on 1 file · 1 failed
+ ${bullet} Read 1 file, edited 2 files +3 −2, waited on 1 file · 1 failed
 
  ⏺ Edit(a.txt)
    ⎿  Error: Could not find the exact text in a.txt. The old text must match
@@ -71,8 +62,8 @@ test("a run of calls is one live summary line; failures show under it; text spli
 
  ⏺ Wrote 1 file +2
 `;
-  await waitForSpinning(tui, `${top("⠋")}
-── ⠋ Working ───────────────────────────────────────────────────────────────────
+  await tui.waitForScreen(`${top("⠋")}
+── ~ Working ───────────────────────────────────────────────────────────────────
 
 ${RULE}
 ~/cwd
@@ -144,11 +135,11 @@ ${RULE}
 test("Esc counts calls with no result as cancelled", async (t) => {
   const tui = await start(t, [[call("c1", "read", { path: "a.txt" }), call("c2", "wait", { file: "x" }), call("c3", "wait", { file: "y" })], "Done."]);
   await tui.waitForEvent("tool_execution_end"); // the read is done, both waits are running
-  await waitForSpinning(tui, rows(["", " go", "", "", " ⠋ Read 1 file, waited on 2 files", "", `── ⠋ Working ${"─".repeat(67)}`, "", RULE, "~/cwd",
+  await tui.waitForScreen(rows(["", " go", "", "", " ⠋ Read 1 file, waited on 2 files", "", `── ~ Working ${"─".repeat(67)}`, "", RULE, "~/cwd",
     "↑2 ↓15 W2 CH0.0% 0.0%/128k (auto)                                      harness-1"]));
   tui.keys("Escape");
   await tui.waitForEvent("agent_end");
-  await tui.waitForScreen(rows(["", " go", "", "", " ⏺ Read 1 file · 2 cancelled", "", " Error: This operation was aborted", "", RULE, "", RULE, "~/cwd",
+  await tui.waitForScreen(rows(["", " go", "", "", " ⏺ Read 1 file, waited on 2 files · 2 cancelled", "", " Error: This operation was aborted", "", RULE, "", RULE, "~/cwd",
     "↑2 ↓15 W2 0.0%/128k (auto)                                             harness-1"]));
 });
 

@@ -224,7 +224,7 @@ export function registerQuota(pi: ExtensionAPI, settings: Settings, deps: Partia
       title: "GetQuotas",
       arg: (a: { provider?: string }) => a.provider ?? "",
       result: (r, _a, _e, theme) => ({ summary: "Checked quotas", body: resultText(r).split("\n").map((l) => theme.fg("toolOutput", l)) }),
-      summary: { tool: "get_quotas", verb: "checked", many: "quotas" },
+      summary: { verb: "checked", many: "quotas" },
     }),
     async execute(_id, params: { provider?: string }) {
       const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: undefined });
