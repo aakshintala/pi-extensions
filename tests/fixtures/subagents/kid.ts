@@ -22,7 +22,8 @@
 // call at a time, and returns once globalThis[Symbol.for("pi-rig.test.jobStarted")](id), if
 // set, settles.
 // globalThis[Symbol.for("pi-rig.test.kidPrice")], when set, is each reply's cost in dollars
-// per token (the faux provider reports none).
+// per token (the faux provider reports none). In file mode each reply counts 1,000 tokens: the
+// faux estimate counts the prompt, whose cwd and date vary by machine and day.
 import { appendFileSync, existsSync, readFileSync, watch, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -73,14 +74,16 @@ export default function (pi: ExtensionAPI) {
   const next = (stream: typeof core.stream): typeof core.stream => (model, context, options) => {
     core.setResponses([(ctx, opts) => (g[Symbol.for("pi-rig.test.kid")] ?? fromFile)(ctx, opts)]);
     const price = g[Symbol.for("pi-rig.test.kidPrice")];
+    const fixed = !g[Symbol.for("pi-rig.test.kid")];
     const events = stream(model, context, options);
-    if (!price) return events;
+    if (!price && !fixed) return events;
     // Re-emits every event, pricing the final message by its token count.
     const priced = createAssistantMessageEventStream();
     void (async () => {
       for await (const e of events as any) {
         const m = e.type === "done" ? e.message : e.type === "error" ? e.error : undefined;
-        if (m?.usage) m.usage = { ...m.usage, cost: { ...m.usage.cost, total: m.usage.totalTokens * price } };
+        if (m?.usage && fixed) m.usage = { ...m.usage, input: 1000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1000 };
+        if (m?.usage && price) m.usage = { ...m.usage, cost: { ...m.usage.cost, total: m.usage.totalTokens * price } };
         priced.push(e);
       }
       priced.end();

@@ -4,7 +4,7 @@
 // (#45, viewer.ts). It also delivers the session's notices (#46) and
 // keeps a run without the UI alive until the work it started returns.
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
+import { getKeybindings, isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { duration, fleet, isFinished, viewerTakes, type Item, type Notice } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
@@ -57,12 +57,19 @@ function rows(items: readonly Item[]): Row[] {
   return out;
 }
 
-/** A producer's activity line; a producer that throws breaks only its own row. */
+/** A producer's activity line and detail fields; a producer that throws breaks only its own row. */
 function safeActivity(item: Item) {
   try {
     return item.activity();
   } catch {
     return "activity failed";
+  }
+}
+function safeDetail(item: Item) {
+  try {
+    return item.detail?.() ?? [];
+  } catch {
+    return ["detail failed"];
   }
 }
 
@@ -207,7 +214,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     return { start: top, end: top + size, hidden: all.length - size };
   }
 
-  function line(row: Row, index: number, theme: Theme) {
+  function line(row: Row, index: number, theme: Theme, width: number) {
     const id = row.item?.id ?? MAIN;
     const mark = (focused && index === selected ? "›" : " ") + (id === active() ? "●" : " ");
     if (!row.item) return theme.fg("accent", mark) + " main";
@@ -219,7 +226,15 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
         : (done ? (item.status === "completed" ? "done " : `${item.status} `) : "") +
           duration((item.endedAt ?? registry.now()) - item.startedAt);
     const activity = oneLine(done && item.result !== undefined ? item.result : safeActivity(item));
-    const text = `${"  ".repeat(row.depth)}${oneLine(item.kind)} ${oneLine(item.label)} · ${state}${activity ? ` · ${activity}` : ""}`;
+    // Detail fields that do not fit are dropped from the right, and the activity takes what is
+    // left if a few columns are (#138). The label and status always stay.
+    const fits = (more: string) => 3 + visibleWidth(`${text} · ${more}`) <= width;
+    let text = `${"  ".repeat(row.depth)}${oneLine(item.kind)} ${oneLine(item.label)} · ${state}`;
+    for (const field of safeDetail(item).map(oneLine).filter(Boolean)) {
+      if (!fits(field)) break;
+      text += ` · ${field}`;
+    }
+    if (activity && fits(activity.slice(0, 6))) text += ` · ${activity}`;
     const color = item.status === "failed" ? "error" : done ? "muted" : "text";
     return theme.fg("accent", mark) + " " + theme.fg(color, text);
   }
@@ -231,7 +246,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
       const out: string[] = [];
       if (all.length > 1) {
         const { start, end, hidden } = window(all);
-        out.push(...all.slice(start, end).map((row, i) => line(row, start + i, theme)));
+        out.push(...all.slice(start, end).map((row, i) => line(row, start + i, theme, width)));
         if (hidden) out.push(theme.fg("dim", `   … ${hidden} more`));
         const confirm = viewer.confirmation();
         if (confirm) out.push(theme.fg("warning", ` ${confirm}`));

@@ -3,7 +3,8 @@
 //   {"add": id, "kind", "label", "parent"?, "activity"?, "status"?}
 //   {"act": id, "text"}                       new activity line
 //   {"update": id, ...fields}                 registry.update(id, fields)
-//   {"add": ..., "throws": true}              activity() throws
+//   {"add": ..., "throws": true}              activity() throws, and detail() too if given
+//   {"add": ..., "detail": [fields]}          detail() returns those fields
 //   {"add": ..., "log": path}                 viewer shows that log file (default /dev/null)
 //   {"add": ..., "transcript": text}          viewer shows a transcript component with that text
 //   {"add": ..., "steer": true}               steer handler: activity becomes "steered: <text>"
@@ -65,6 +66,12 @@ export default function (pi: ExtensionAPI) {
               if (op.throws) throw new Error("producer bug");
               return activity.get(op.add) ?? "";
             },
+            detail: op.detail
+              ? () => {
+                  if (op.throws) throw new Error("producer bug");
+                  return op.detail;
+                }
+              : undefined,
             view: "transcript" in op ? { transcript: () => new Text(op.transcript, 1, 0) } : { log: op.log ?? "/dev/null" },
             stop: () => registry.finish(op.add, "stopped", "stopped by user", null),
             steer: op.steer

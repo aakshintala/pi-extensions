@@ -4,6 +4,7 @@ FleetView: one list below the editor of all background work (agents, shell jobs 
 
 - The first row is the main session. Every item follows, and nested items are indented under their parent.
 - Each row shows kind, label, running time and the latest activity. A finished row shows its status and result.
+- An item's detail fields, such as an agent's model, thinking level, tokens and cost, follow its status. On a narrow row they drop from the right, and then the activity or result; the label and status always stay.
 - A finished item leaves 30 s after it finishes. While it is selected, open in the viewer or has a running item under it, it stays, and the 30 s count from when that ends. Sending a prompt removes nothing.
 - FleetView shows at most 6 lines. A `… N more` line counts the hidden rows, and the list scrolls to keep the selection visible.
 - FleetView is hidden when nothing is registered.
@@ -86,6 +87,7 @@ fleet().register({
   label: "npm test",
   parentId: "agent-1",            // optional: shows the row under that item
   activity: () => lastLine,       // required: the row's latest activity, read on every render
+  detail: () => ["kid-1", "low"], // optional: fields shown after the status, read on every render
   view: { log: logPath },         // required: a log file, or { transcript: (tui, ui) => component, showsSteers? };
                                   // a transcript is built on each open, and its dispose(), if any, runs on close
   stop: () => child.kill(),       // required

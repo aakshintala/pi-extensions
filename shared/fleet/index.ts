@@ -37,6 +37,8 @@ export interface ItemSpec {
   status?: "queued" | "running";
   /** A short line of latest activity, read on every render. */
   activity(): string;
+  /** Fields shown between the status and the activity, such as the model and tokens, read on every render. FleetView drops them from the right when the row is too narrow. */
+  detail?(): string[];
   view: ItemView;
   stop(): void | Promise<void>;
   /** Agents only. */

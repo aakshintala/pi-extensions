@@ -168,10 +168,42 @@ test("a finished item stays finished when its producer updates it", async (t) =>
 test("an activity line that throws breaks only its own row", async (t) => {
   const tui = await start(t);
   await tui.fx(
-    { add: "a", kind: "agent", label: "broken", throws: true },
+    { add: "a", kind: "agent", label: "broken", throws: true, detail: ["kid-1"] },
     { add: "b", kind: "shell", label: "fine", activity: "PASS 3" },
   );
-  await tui.waitForScreen(idle([" ● main", "   agent broken · 0s · activity failed", "   shell fine · 0s · PASS 3"]));
+  await tui.waitForScreen(idle([" ● main", "   agent broken · 0s · detail failed · activity failed", "   shell fine · 0s · PASS 3"]));
+});
+
+test("detail fields follow the status and drop from the right when the row is narrow; the label and status stay", async (t) => {
+  const detail = ["claude-sonnet-4-5", "high", "41.2k tokens", "$0.31", "12 turns", "34 tool uses"];
+  const ops = [
+    { add: "a", kind: "agent", label: "scout", activity: "reading", detail },
+    { add: "b", kind: "agent", label: "a-very-long-agent-label-that-fills-the-row", detail },
+    { add: "c", kind: "shell", label: "test", detail: ["npm"], activity: "PASS src/a.test.ts, src/b.test.ts, src/c.test.ts and more" },
+    { clock: 133 },
+    { finish: "a", status: "completed", result: "STATUS: DONE" },
+  ];
+  const wide = await start(t);
+  await wide.fx(...ops);
+  await wide.waitForScreen(idle([
+    " ● main",
+    "   agent scout · done 2m13s · claude-sonnet-4-5 · high · 41.2k tokens · $0.31",
+    "   agent a-very-long-agent-label-that-fills-the-row · 2m13s · claude-sonnet-4-5",
+    "   shell test · 2m13s · npm · PASS src/a.test.ts, src/b.test.ts, src/c.test.t...",
+  ]));
+
+  const narrow = await start(t, { cols: 60 });
+  await narrow.fx(...ops);
+  const border = "─".repeat(60);
+  await narrow.waitForScreen(pad([
+    "", border, "", border,
+    " ● main",
+    "   agent scout · done 2m13s · claude-sonnet-4-5 · high",
+    "   agent a-very-long-agent-label-that-fills-the-row · 2m13s",
+    "   shell test · 2m13s · npm · PASS src/a.test.ts, src/b.t...",
+    "~/cwd",
+    "0.0%/128k (auto)                                   harness-1",
+  ]));
 });
 
 test("arrow keys at an empty prompt move through FleetView; Esc returns", async (t) => {

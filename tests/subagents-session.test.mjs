@@ -135,6 +135,9 @@ const tokens = (line) => Number(/ · ([\d,]+) tokens? · /.exec(line)[1].replace
 const cost = (line) => /tokens? · (\$[\d.]+)/.exec(line)[1];
 const { money } = await import("../extensions/subagents/index.ts");
 
+/** FleetView's short token count. */
+const short = (n) => (n < 1000 ? String(n) : `${(n / 1e3).toFixed(1)}k`);
+
 const STATS = /^\d+ turns? · \d+ tool uses? · [\d,]+ tokens? · \$0\.00 · 0s$/;
 
 test("spawn rejects an unknown model or thinking level and requires model, thinking and isolation", async (t) => {
@@ -233,7 +236,7 @@ test("a message steers a running child, and resumes a finished one from its save
   const held = gate();
   const release = gate();
   const seen = [];
-  let id;
+  let id, running;
   const { session, results, notices } = await start(
     t,
     [
@@ -244,6 +247,7 @@ test("a message steers a running child, and resumes a finished one from its save
       },
       async () => {
         await held; // the child is mid-run
+        running = fleet().get(id).detail();
         release.open();
         return calls(["subagent_message", { id, message: "/kidcmd focus on src/" }])();
       },
@@ -284,6 +288,9 @@ test("a message steers a running child, and resumes a finished one from its save
   const [, run, total] = got[1].split("\n");
   assert.match(run, /^1 turn · 0 tool uses · [\d,]+ tokens · \$0\.00 · 0s$/);
   assert.match(total, /^Session total: 3 turns · 1 tool use · [\d,]+ tokens · \$0\.00$/);
+  // Its FleetView row: model and thinking while it runs (no tokens yet), then the latest run's counts and the session's tokens.
+  assert.deepEqual(running, ["kid-1", "low"]);
+  assert.deepEqual(fleet().get(id).detail(), ["kid-1", "low", `${short(tokens(total))} tokens`, "1 turn", "0 tool uses"]);
 });
 
 test("stop ends a child waiting on its own work, with its partial output marked incomplete", { timeout: 20_000 }, async (t) => {
@@ -744,7 +751,7 @@ test("a nested agent finishing frees room for a queued top-level spawn", { timeo
 });
 
 test("tokens and cost roll up across a resumed nested run, and Session total counts every child's run", { timeout: 20_000 }, async (t) => {
-  let g, cContext;
+  let g, cContext, woken;
   let asked = false;
   const root = (context) => {
     if (!context.messages.some((m) => m.role === "toolResult")) return calls(spawn("C"))();
@@ -759,6 +766,7 @@ test("tokens and cost roll up across a resumed nested run, and Session total cou
     const heard = users.filter((u) => u.startsWith(`Subagent ${g} `)).length;
     const second = users.some((u) => u.startsWith("again"));
     if (!second) {
+      if (heard && !woken) woken = { context, detail: fleet().get(idOf("C")).detail() }; // G's notice woke C
       if (!context.messages.some((m) => m.role === "toolResult")) return calls(spawn("G"))();
       return says(heard ? "C one\nSTATUS: DONE" : "waiting")();
     }
@@ -782,6 +790,10 @@ test("tokens and cost roll up across a resumed nested run, and Session total cou
   assert.equal(tokens(total), own(entries) + grand[0] + grand[1]);
   assert.equal(cost(run), money(tokens(run) * 1e-6));
   assert.equal(cost(total), money(tokens(total) * 1e-6));
+  // C's FleetView row: G's tokens join it once G finishes, while C still runs; its counts are the latest run's.
+  const replied = woken.context.messages.filter((m) => m.role === "assistant").reduce((n, m) => n + m.usage.totalTokens, 0);
+  assert.equal(woken.detail[2], `${short(replied + grand[0])} tokens`);
+  assert.deepEqual(fleet().get(c).detail(), ["kid-1", "low", `${short(tokens(total))} tokens`, cost(total), ...run.split(" · ").slice(0, 2)]);
 });
 
 test("a stopped agent leaves the tree's cap at once, even while it winds down", { timeout: 20_000 }, async (t) => {
@@ -1035,6 +1047,7 @@ test("a worktree child works in its own worktree: removed when clean, kept with 
   assert.equal(notices().at(-1).split("\n")[2], `${where}, removed: nothing uncommitted, ignored or unpushed.`);
   assert.equal(existsSync(path), false);
   assert.equal(git(cwd, "branch", "--list", `subagent/${id}`), "");
+  assert.equal(fleet().get(id).detail().at(-1), "worktree removed"); // its FleetView row
 
   // After a restart (no agents in memory), a resume recreates it at the same path, from its saved entry, and runs there.
   globalThis[Symbol.for("pi-rig.subagents.known")].clear();
@@ -1044,6 +1057,7 @@ test("a worktree child works in its own worktree: removed when clean, kept with 
   await session.waitForIdle();
   assert.deepEqual(pwds, [path, path]);
   assert.equal(notices().at(-1).split("\n")[3], `${where}, kept: it has unpushed commits.`);
+  assert.equal(fleet().get(id).detail().at(-1), `subagent/${id}`);
   assert.equal(git(path, "log", "-1", "--format=%s"), "work");
 
   await fresh.call("subagent_message", { id, message: "change a file" }, ctx);

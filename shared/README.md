@@ -140,7 +140,9 @@ The background-work registry (#29). Items carry an `owner` session id.
 `finish(id, status, result, notice?)` and `notify(id, text)` send notices to the
 owner's fleet extension. That extension delivers them, and it keeps a run
 without the UI alive until its items return. A `finish` with no notice sends a
-default line; a `null` notice sends nothing. See `extensions/fleet/README.md`.
+default line; a `null` notice sends nothing. An item's optional `detail()`
+returns fields FleetView shows after its status, such as an agent's model and
+tokens. See `extensions/fleet/README.md`.
 
 A finished item leaves `DECAY_MS` (30 s) after it finishes (#137). While it is
 viewed (`fleet().viewing`), selected in FleetView (`fleet().selected`) or above a
