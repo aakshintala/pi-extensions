@@ -19,9 +19,10 @@ const tool = () => fauxAssistantMessage(fauxToolCall("ls", { path: "." }), { sto
 
 // A TUI-mode UI with an editor, key listeners, notices and rendered widget rows.
 function fakeUi(session) {
-  const state = { editor: "", notices: [], widget: [], keys: [] };
-  const editor = { onSubmit: (text) => text === "/reload" && session.reload() };
-  const tui = { getFocusedComponent: () => editor };
+  // Pi's /reload handler clears the editor, then reloads.
+  const editor = { getText: () => state.editor, onSubmit: (text) => text === "/reload" && ((state.editor = ""), session.reload()) };
+  const state = { editor: "", notices: [], widget: [], keys: [], focus: editor };
+  const tui = { getFocusedComponent: () => state.focus };
   const theme = { fg: (_c, s) => s };
   const target = {
     setWidget: (_k, w) => (state.widget = w ? w(tui, theme).render(80) : []),
@@ -286,4 +287,69 @@ test("a queued /compact is Pi's call: a large session Pi cannot compact gives th
   assert.deepEqual(state.notices, ["info: Nothing to compact"]);
   assert.deepEqual(transcript(session).slice(-3), ["assistant: short", "user: next", "assistant: re: next"]);
   assert.deepEqual(state.widget, []);
+});
+
+// Resolves on each session_start reason "reload".
+function reloads() {
+  const seen = [];
+  let wake;
+  const next = () => new Promise((r) => (wake = r));
+  const ext = (pi) => pi.on("session_start", (e) => e.reason === "reload" && (seen.push(e), wake?.()));
+  return { seen, next, ext };
+}
+
+test("a queued /reload keeps the draft typed while it waited", async (t) => {
+  const g = gate();
+  const r = reloads();
+  const { session, state } = await start(t, [async () => (await g.wait(), say("before"))], [r.ext]);
+  const run = session.prompt("go");
+  await g.waiting;
+  await session.prompt("/reload", { streamingBehavior: "followUp" });
+  state.editor = "half-typed draft";
+  const reloaded = r.next();
+  g.open();
+  await run;
+  await reloaded;
+  assert.equal(state.editor, "half-typed draft");
+});
+
+test("a queued /reload waits while a picker or the label editor has focus", async (t) => {
+  const g = gate();
+  const r = reloads();
+  const { session, state, press } = await start(t, [async () => (await g.wait(), say("before"))], [r.ext]);
+  const main = state.focus;
+  const submitted = [];
+  const labelEditor = { getText: () => "a label", onSubmit: (text) => submitted.push(text) };
+  const run = session.prompt("go");
+  await g.waiting;
+  await session.prompt("/reload", { streamingBehavior: "followUp" });
+  state.focus = labelEditor;
+  g.open();
+  await run;
+  await session.agent.waitForIdle();
+  press("escape"); // a key while the label editor still has focus
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(submitted, []);
+  assert.deepEqual(r.seen, []);
+  assert.deepEqual(state.widget, [" Follow-ups (1) · after the run", " ⚙ /reload · runs when idle"]);
+
+  state.focus = main; // the label editor closed
+  const reloaded = r.next();
+  press("escape");
+  await reloaded;
+  assert.equal(r.seen.length, 1);
+  assert.deepEqual(submitted, []);
+});
+
+test("a saved queue that no reload in this process wrote is never restored", async (t) => {
+  const r = reloads();
+  const { session, state } = await start(t, [say("unused")], [r.ext]);
+  // As if the process died after saving: the entry is in the session, no token is in memory.
+  session.sessionManager.appendCustomEntry("rig.queue", { token: "stale", rows: [{ lane: "followUp", text: "old" }], draft: "old draft" });
+  await session.reload();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(r.seen.length, 1);
+  assert.deepEqual(state.widget, []);
+  assert.equal(state.editor, "");
+  assert.deepEqual(transcript(session), []);
 });

@@ -322,6 +322,7 @@ test("/compact and /reload typed while the agent works wait for it, with no erro
 
 `);
 
+  tui.type("draft kept"); // Pi's /reload clears the editor; the queue puts this back
   release(tui);
   await tui.waitForEvent("session_start", 2);
   await tui.waitForScreen(`
@@ -339,7 +340,7 @@ test("/compact and /reload typed while the agent works wait for it, with no erro
  Reloaded keybindings, extensions, skills, prompts, themes, and context files
 
 ────────────────────────────────────────────────────────────────────────────────
-
+draft kept
 ────────────────────────────────────────────────────────────────────────────────
 ~/cwd
 ↑13 ↓4 R2 W14 CH8.0% 0.0%/128k (auto)                                  harness-1

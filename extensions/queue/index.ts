@@ -11,7 +11,10 @@ type Row = { id: number; lane: Lane; text: string; images?: ImageContent[]; erro
 type Mode = "all" | "one-at-a-time";
 
 const WIDGET = "queue";
-const ENTRY = "rig.queue"; // rows saved across /reload
+const ENTRY = "rig.queue"; // rows and draft saved across /reload
+// The token of the entry the last reload wrote, handed to the next runtime in this
+// process. An entry without it (a crash, a fork, a later session) is never restored.
+const RELOAD = Symbol.for("pi-rig.queue.reload");
 
 /** `/compact [instructions]` or `/reload`, exact text only. */
 export const commandOf = (row: Pick<Row, "text" | "images">) => {
@@ -31,9 +34,16 @@ export default function (pi: ExtensionAPI) {
   let edit: { id: number; draft: string } | undefined;
   let modes: Record<Lane, Mode> = { steer: "one-at-a-time", followUp: "one-at-a-time" };
   let ctx: ExtensionContext | undefined;
-  let tui: any; // from the widget factory; its focused editor replays /reload
+  let tui: any; // from the widget factory
+  let mainEditor: any; // Pi's main editor component, once identified
+  let reloadRow: Row | undefined; // a /reload row waiting for Pi's main editor
+  let reloadDraft: string | undefined; // editor text saved while a queued /reload runs
   let unsubscribeKeys: (() => void) | undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  const later = (fn: () => void) => {
+    const t = setTimeout(() => (timers.delete(t), fn()), 0);
+    timers.add(t);
+  };
 
   const ordered = () => [...rows.filter((r) => r.lane === "steer"), ...rows.filter((r) => r.lane === "followUp")];
 
@@ -147,17 +157,25 @@ export default function (pi: ExtensionAPI) {
       });
       return;
     }
-    if (!editorFocused()) return fail("Pi's editor is not focused");
-    const editor = tui.getFocusedComponent();
     running = "reload";
-    rows = rows.filter((r) => r !== row);
-    draw();
-    // Pi's own /reload handler, reached through its editor; deferred so the runtime is
-    // not replaced from inside one of our handlers.
-    timer = setTimeout(() => {
-      timer = undefined;
-      editor.onSubmit("/reload");
-    }, 0);
+    reloadRow = row;
+    replayReload();
+  }
+
+  // Pi's own /reload handler, reached through its main editor. With anything else focused
+  // (a picker, the label editor) it waits, retried after each key. Deferred so the
+  // runtime is not replaced from inside one of our handlers.
+  function replayReload() {
+    later(() => {
+      const row = reloadRow;
+      if (!ctx || !row || !editorFocused()) return;
+      reloadRow = undefined;
+      if (!rows.includes(row)) return (running = undefined), dispatchIdle(); // deleted while waiting
+      reloadDraft = ctx.ui.getEditorText(); // Pi clears the editor; restored after the reload
+      rows = rows.filter((r) => r !== row);
+      draw();
+      mainEditor.onSubmit("/reload");
+    });
   }
 
   // Option+Up selects the most recent row, then moves up; Option+Down moves down. The
@@ -194,7 +212,19 @@ export default function (pi: ExtensionAPI) {
   // Keys are read here rather than through registerShortcut: overriding Pi's Option+Up
   // that way prints an "[Extension issues]" warning at every start. Only while Pi's editor
   // has focus, so pickers keep their own Option+Up/Down.
-  const editorFocused = () => typeof tui?.getFocusedComponent?.()?.onSubmit === "function";
+  // Pi's main editor is the focused component that ctx.ui's editor text writes to. The
+  // one-time probe restores the text (the cursor moves to its end).
+  const editorFocused = () => {
+    const focused = tui?.getFocusedComponent?.();
+    if (!focused || typeof focused.onSubmit !== "function" || typeof focused.getText !== "function") return false;
+    if (mainEditor) return focused === mainEditor;
+    const text = ctx!.ui.getEditorText();
+    ctx!.ui.setEditorText(`${text}\u200b`);
+    const main = focused.getText() === `${text}\u200b`;
+    ctx!.ui.setEditorText(text);
+    if (main) mainEditor = focused;
+    return main;
+  };
 
   const onKey = (data: string) => {
     if (!ctx || !rows.length || !editorFocused()) return;
@@ -228,32 +258,38 @@ export default function (pi: ExtensionAPI) {
     ctx = c;
     const settings = SettingsManager.create(c.cwd);
     modes = { steer: settings.getSteeringMode(), followUp: settings.getFollowUpMode() };
-    if (event.reason === "reload") {
-      const saved = (c.sessionManager.getEntries() as any[]).findLast((e) => e.type === "custom" && e.customType === ENTRY)?.data;
-      if (saved?.rows?.length) {
-        rows = saved.rows.map((r: Row) => ({ ...r, id: nextId++ }));
-        paused = !!saved.paused;
-        pi.appendEntry(ENTRY, { rows: [] }); // consumed: a later reload must not restore them again
-        timer = setTimeout(() => {
-          timer = undefined;
-          dispatchIdle();
-        }, 0);
-      }
+    const token = (globalThis as any)[RELOAD];
+    delete (globalThis as any)[RELOAD];
+    const saved = (c.sessionManager.getEntries() as any[]).findLast((e) => e.type === "custom" && e.customType === ENTRY)?.data;
+    if (event.reason === "reload" && token && saved?.token === token) {
+      rows = saved.rows.map((r: Row) => ({ ...r, id: nextId++ }));
+      paused = !!saved.paused;
+      if (saved.draft) c.ui.setEditorText(saved.draft);
+      later(dispatchIdle);
     }
-    if (c.hasUI) unsubscribeKeys = c.ui.onTerminalInput((data) => onKey(data) ?? onCommandKey(data));
+    if (c.hasUI)
+      unsubscribeKeys = c.ui.onTerminalInput((data) => {
+        if (reloadRow) replayReload(); // focus may be back on the editor
+        return onKey(data) ?? onCommandKey(data);
+      });
     draw();
   });
 
   pi.on("session_shutdown", (event) => {
-    if (event.reason === "reload" && rows.length) pi.appendEntry(ENTRY, { rows, paused });
-    if (timer) clearTimeout(timer);
+    if (event.reason === "reload" && (rows.length || reloadDraft)) {
+      const token = crypto.randomUUID();
+      pi.appendEntry(ENTRY, { token, rows, paused, draft: reloadDraft });
+      (globalThis as any)[RELOAD] = token;
+    }
+    for (const t of timers) clearTimeout(t);
+    timers.clear();
     unsubscribeKeys?.();
     if (ctx?.hasUI) ctx.ui.setWidget(WIDGET, undefined);
     rows = [];
     edit = undefined;
     paused = false;
     running = undefined;
-    ctx = tui = unsubscribeKeys = timer = undefined;
+    ctx = tui = mainEditor = reloadRow = reloadDraft = unsubscribeKeys = undefined;
   });
 
   pi.on("input", (event, c) => {
