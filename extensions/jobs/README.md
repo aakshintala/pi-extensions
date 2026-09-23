@@ -16,7 +16,10 @@ Spec: #30. Built in #48, #49 (guards and crash clean-up) and #51
   - `timeout` is a hard limit in seconds that kills the command, also after it
     became a job. The job then fails as timed out.
   - Ctrl+B moves every running foreground command to the background. Each
-    call returns its job ID and log path.
+    call returns its job ID and log path. While a command can be backgrounded,
+    its call shows a dim `ctrl+b to run in background` line (#139), unless
+    Ctrl+B still moves the cursor left. The hint needs the tool-display
+    extension.
   - A steering message submitted while a command runs (through the queue)
     moves that session's foreground commands to the background too, so the
     turn ends and the message is delivered as steering, without an abort.
@@ -48,7 +51,7 @@ Only the session that started a job can see, wait on or stop it.
   hold it. If the shell left processes running in its group, the notice, `wait`
   and `list` say so.
 - Each job is a `shell` row in FleetView. Opening it shows the live log, and
-  Ctrl+Q stops it.
+  `x` on its row in FleetView stops it.
 - Each job ends with exactly one notice: status, exit code, running time and
   log path. A failed job's notice carries its last 20 lines, cut to 2,000
   characters. A `wait` or `stop` that returned the final state replaces the

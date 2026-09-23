@@ -349,3 +349,81 @@ test("groups: a collapsed group's first call draws its failed calls, which draw 
   assert.deepEqual(draw(["f1"]), [" ⏺ Read 3 files · 1 failed", " ⏺ Read(f2)", "   ⎿  Error: ENOENT f2"]);
   assert.deepEqual([draw(["f2"]), draw(["f3"])], [[], []]);
 });
+
+// #139: a running call with a hint shows outside its group until the hint is cleared.
+const HINT = () => "ctrl+b to run in background";
+const hinted = (t, owner = "s") => {
+  const g = groups(t);
+  g.owner = owner;
+  return g;
+};
+
+test("hints: a hinted call after the first shows outside the summary, spinning, and folds back when cleared", (t) => {
+  const g = hinted(t);
+  g.track(said(toolCall("h1"), toolCall("h2"), toolCall("h3")));
+  g.settle("h1", false, { content: [] });
+  draw(["h1", "h2", "h3"]);
+  const clear = td.showHint("s", "h2", HINT);
+  assert.deepEqual(draw(["h1", "h2", "h3"]), [" ⠋ Read 3 files", " ⠋ Read(h2)", "   ⎿  ctrl+b to run in background"]);
+  clear();
+  assert.deepEqual(draw(["h1", "h2", "h3"]), [" ⠋ Read 3 files"]);
+});
+
+test("hints: a failed call still shows under the summary while the group's first call is hinted", (t) => {
+  const g = hinted(t);
+  g.track(said(toolCall("l1"), toolCall("l2")));
+  g.settle("l2", true, { content: [{ type: "text", text: "ENOENT /w/l2" }] });
+  draw(["l1", "l2"]);
+  td.showHint("s", "l1", HINT);
+  assert.deepEqual(draw(["l1", "l2"]), [
+    " ⠋ Read 2 files · 1 failed",
+    " ⠋ Read(l1)",
+    "   ⎿  ctrl+b to run in background",
+    " ⏺ Read(l2)",
+    "   ⎿  Error: ENOENT l2",
+  ]);
+});
+
+test("hints: read on every draw; while the hint returns nothing the call stays folded", (t) => {
+  const g = hinted(t);
+  g.track(said(toolCall("r1")));
+  let text;
+  td.showHint("s", "r1", () => text);
+  assert.deepEqual(draw(["r1"]), [" ⠋ Read 1 file"]);
+  text = "hint";
+  assert.deepEqual(draw(["r1"]), [" ⠋ Read 1 file", " ⠋ Read(r1)", "   ⎿  hint"]);
+});
+
+test("hints: two sessions with the same call id never share a hint or clear each other's", (t) => {
+  const a = hinted(t, "a");
+  const b = hinted(t, "b");
+  const inA = toolCall("dup");
+  const inB = toolCall("dup");
+  a.track(said(inA));
+  b.track(said(inB));
+  // Each session's call, drawn with its own arguments (how a renderer finds its session).
+  const drawIn = (call) => {
+    const render = () => GROUPED.renderCall(call.arguments, recordingTheme(), { toolCallId: "dup", args: call.arguments, cwd: "/w", expanded: false, invalidate() {} });
+    render();
+    return plainLines(render().render(80));
+  };
+  const clearA = td.showHint("a", "dup", HINT);
+  td.showHint("b", "dup", () => "b's hint");
+  clearA();
+  assert.deepEqual(drawIn(inA), [" ⠋ Read 1 file"]);
+  assert.deepEqual(drawIn(inB), [" ⠋ Read 1 file", " ⠋ Read(dup)", "   ⎿  b's hint"]);
+});
+
+test("hints: a spinner tick redraws a hinted first call once, and only this session's hinted calls", (t) => {
+  const a = hinted(t, "a");
+  const b = hinted(t, "b");
+  a.track(said(toolCall("k1")));
+  b.track(said(toolCall("k2")));
+  const counts = { k1: 0, k2: 0 };
+  for (const id of ["k1", "k2"]) GROUPED.renderCall({ path: id }, recordingTheme(), { toolCallId: id, args: {}, cwd: "/w", expanded: false, invalidate: () => counts[id]++ });
+  td.showHint("a", "k1", HINT);
+  td.showHint("b", "k2", HINT);
+  Object.assign(counts, { k1: 0, k2: 0 });
+  a.tick();
+  assert.deepEqual(counts, { k1: 1, k2: 0 });
+});

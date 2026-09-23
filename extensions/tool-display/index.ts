@@ -100,6 +100,7 @@ export default function (pi: ExtensionAPI, piVersion: string = VERSION) {
   // Hidden thinking (#57): patched while a session with this extension is live, so a
   // /reload that drops the extension, /new and /resume never inherit it.
   pi.on("session_start", (_e, ctx) => {
+    groups.owner = ctx.sessionManager.getSessionId(); // how showHint names the session
     useHiddenThinking(groups, piVersion);
     load(ctx.sessionManager.getBranch());
   });

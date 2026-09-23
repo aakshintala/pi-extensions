@@ -1,4 +1,4 @@
-// Ctrl+B and its hint (#47) in a real pi. The test producer registers "background now"
+// Ctrl+B (#47) in a real pi. Its hint is on the running call (#139), never under the editor. The test producer registers "background now"
 // handlers; the fleet extension binds Ctrl+B only once keybindings.json frees it from
 // Pi's default cursor-left binding. /reload re-reads keybindings.json.
 import { test } from "node:test";
@@ -17,7 +17,6 @@ const COLS = 240;
 const ROWS = 24;
 const BORDER = "─".repeat(COLS);
 const FOOTER = ["~/cwd", "0.0%/128k (auto)".padEnd(COLS - "harness-1".length) + "harness-1"];
-const HINT = " ctrl+b to run in background";
 const RELOADED = " Reloaded keybindings, extensions, skills, prompts, themes, and context files";
 
 // The chat, the editor, what is under it, and the footer.
@@ -62,7 +61,7 @@ test("while Ctrl+B moves the cursor left, one warning names the line to add and 
   // No second warning. The reload ended the session, which dropped its foreground command.
   await tui.waitForScreen(screen(["", RELOADED, ""]));
   await tui.fx({ fg: "b" });
-  await tui.waitForScreen(screen(["", RELOADED, ""], "", [HINT]));
+  await tui.waitForScreen(screen(["", RELOADED, ""])); // no hint row under the editor
   tui.keys("C-b");
   await tui.waitForEvent("bg:b");
   await tui.waitForScreen(screen(["", RELOADED, ""]));
@@ -79,10 +78,10 @@ test("Ctrl+B blocked again by a reload warns once, at the next key", async (t) =
   await tui.waitForScreen(screen(["", RELOADED, "", tui.warning[1], ""], "xy"));
 });
 
-test("Ctrl+B calls every registered handler, and the hint shows only while one is registered", async (t) => {
+test("Ctrl+B calls every registered handler, and reaches the editor once none is registered", async (t) => {
   const tui = await start(t);
   await tui.fx({ add: "j", kind: "shell", label: "build" }, { fg: "a" }, { fg: "b" }, { fg: "c" }, { fgEnd: "c" });
-  await tui.waitForScreen(screen([""], "", [" ● main", "   shell build · 0s", HINT]));
+  await tui.waitForScreen(screen([""], "", [" ● main", "   shell build · 0s"]));
 
   tui.keys("C-b");
   await tui.waitForEvent("bg:b");
@@ -96,10 +95,10 @@ test("Ctrl+B calls every registered handler, and the hint shows only while one i
   await tui.waitForScreen(screen([""], "abX", [" ● main", "   shell build · 0s"]));
 });
 
-test("a handler that throws is dropped: the hint goes and the next Ctrl+B reaches the editor", async (t) => {
+test("a handler that throws is dropped: the next Ctrl+B reaches the editor", async (t) => {
   const tui = await start(t);
   await tui.fx({ fg: "a", throws: true });
-  await tui.waitForScreen(screen([""], "", [HINT]));
+  await tui.waitForScreen(screen([""]));
   tui.keys("C-b");
   await tui.waitForEvent("bg:a");
   await tui.waitForScreen(screen([""]));
@@ -110,10 +109,10 @@ test("a handler that throws is dropped: the hint goes and the next Ctrl+B reache
   assert.deepEqual(tui.events().filter((e) => e.startsWith("bg:")), ["bg:a"]);
 });
 
-test("the hint counts toward FleetView's 6 lines", async (t) => {
+test("FleetView keeps all 6 lines for rows while a command can be backgrounded", async (t) => {
   const tui = await start(t);
   await tui.fx(...["a", "b", "c", "d", "e", "f"].map((id) => ({ add: id, kind: "shell", label: id })), { fg: "x" });
-  await tui.waitForScreen(screen([""], "", [" ● main", "   shell a · 0s", "   shell b · 0s", "   shell c · 0s", "   … 3 more", HINT]));
+  await tui.waitForScreen(screen([""], "", [" ● main", "   shell a · 0s", "   shell b · 0s", "   shell c · 0s", "   shell d · 0s", "   … 2 more"]));
 });
 
 test("Ctrl+B is not taken from an overlay", async (t) => {
@@ -126,7 +125,7 @@ test("Ctrl+B is not taken from an overlay", async (t) => {
   tui.type("hi");
   await tui.waitForScreen(overlay("› hi"));
   tui.keys("Escape");
-  await tui.waitForScreen(screen([""], "", [" ● main", "   shell build · 0s", HINT]));
+  await tui.waitForScreen(screen([""], "", [" ● main", "   shell build · 0s"]));
   assert.deepEqual(tui.events().filter((e) => e.startsWith("bg:")), []);
   tui.keys("C-b");
   await tui.waitForEvent("bg:a");
@@ -142,7 +141,7 @@ test("Ctrl+B backgrounds while FleetView has focus on an item shown in the chat 
     return "\n" + [...lines, ...Array(ROWS - lines.length - bottom.length).fill(""), ...bottom].join("\n");
   };
   tui.keys("Down", "Down", "Enter");
-  await tui.waitForScreen(viewing([HINT]));
+  await tui.waitForScreen(viewing([]));
   tui.keys("C-b");
   await tui.waitForEvent("bg:a");
   await tui.waitForScreen(viewing([]));

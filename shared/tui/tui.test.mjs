@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { editorFocused } from "./index.ts";
+import "../../tests/fixtures/tool-display/pi-tui.mjs"; // lets index.ts load pi-tui in plain node
+
+const { editorFocused } = await import("./index.ts");
 
 const fn = () => {};
 const editor = () => ({ onSubmit: fn, getText: fn, handleInput: fn });

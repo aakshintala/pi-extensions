@@ -90,6 +90,13 @@ summary: { verb: "updated", many: "todos" }                                     
   show, drawn by the first call right under the summary, so a group has no blank
   rows. Calls with images show themselves. Ctrl+O (`context.expanded`) or a click
   on the group shows every call.
+- `showHint(owner, toolCallId, hint)` (#139) shows session `owner`'s running call
+  outside its group, with a spinner and a dim `⎿ hint()` line, until the function
+  it returns is called; the call then folds back in. `hint()` is read on every
+  draw, and while it returns nothing the call stays folded. The hint lives on the
+  session's call, so sessions that reuse an id never share one; `ToolGroups.owner`
+  names the session, and `extensions/tool-display` sets it. `jobs` uses it for the
+  Ctrl+B hint.
 - What splits a run:
   - a tool without `summary` (such as `ask_user`), which is never grouped;
   - assistant text: Pi draws a message's text above its calls, so any text in a
@@ -160,7 +167,7 @@ routing does not depend on load order.
 call once it ends or is backgrounded. The owner's detach (its session
 shutting down) drops its commands. The fleet extension binds Ctrl+B and calls
 `backgroundAll()`, which runs each `background` once and drops one that throws;
-`foregrounds()` counts them, and the hint shows while it is above 0. The queue
+`foregrounds()` counts them, and Ctrl+B is bound while it is above 0. The queue
 calls `backgroundAll(owner)` on a steer, which moves only that session's.
 
 ### `git/`
@@ -187,6 +194,11 @@ by structure: the only child of the root's fifth child, with Pi's submit
 handler on it (Pi 0.87.1, interactive-mode.js:661). Off Pi 0.87.x, or with
 anything else in that slot or in focus, it returns false. Used by
 `extensions/queue` and `extensions/fleet`.
+
+`ctrlBFree()` says whether Ctrl+B is free of Pi's default cursor-left binding,
+so it can background commands (#29). Read it on each use: `/reload` re-reads
+`keybindings.json`. Used by `extensions/fleet` to bind Ctrl+B and by
+`extensions/jobs` for its hint.
 
 ### `process-groups/`
 

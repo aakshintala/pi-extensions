@@ -42,7 +42,7 @@ Interactive sessions end their runs as usual: their work keeps running and its n
 
 ## Ctrl+B
 
-Ctrl+B moves every running foreground command, such as a shell command, into the background. While one can be moved, `ctrl+b to run in background` shows under the editor, as one of FleetView's 6 lines.
+Ctrl+B moves every running foreground command, such as a shell command, into the background. While one can be moved, its call in the chat shows `ctrl+b to run in background` (#139); nothing shows under the editor.
 
 Ctrl+B works only while Pi's editor has focus: a picker, dialog or overlay keeps the key.
 

@@ -1,5 +1,12 @@
 // Pi's main editor, found by structure: Pi exposes no handle to it.
 import { VERSION } from "@earendil-works/pi-coding-agent";
+import { getKeybindings } from "@earendil-works/pi-tui";
+
+/**
+ * Whether Ctrl+B is free of Pi's default cursor-left binding, so it can background
+ * commands (#29). Read it on each use: /reload re-reads keybindings.json after session_start.
+ */
+export const ctrlBFree = () => !getKeybindings().getKeys("tui.editor.cursorLeft").includes("ctrl+b");
 
 type Node = { children?: unknown[]; getFocusedComponent?: () => unknown };
 

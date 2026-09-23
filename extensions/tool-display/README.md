@@ -22,6 +22,16 @@ Collapses each run of tool calls into one summary line, and draws the built-in
 - **Failed calls always shown** right under their group's summary, with no
   blank rows. Calls that returned an image also show, each with a blank row above
   it (Pi draws images outside the tool's renderers).
+- **Running calls with a hint show** outside the summary, with a spinner and a
+  dim hint line, and fold back in when they end. A foreground `bash` shows
+  `ctrl+b to run in background` this way (#139):
+
+  ```
+   ⠋ Ran 1 shell command
+   ⠋ Bash(npm test)
+     ⎿  ctrl+b to run in background
+  ```
+
 - **Cancelled.** When a turn is aborted (Esc), calls with no result and calls
   whose error ends in Pi's `Operation aborted` or `Command aborted` count as
   `cancelled` in the error colour. They are counted, not shown. Any other
