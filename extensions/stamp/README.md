@@ -14,7 +14,9 @@ entry. A response's entry records its timing, model metadata, thinking level,
 cost since your last message and the duration and outcome of each tool it ran.
 Everything is recorded; settings only decide what is shown, and a change applies
 to stamps already on screen, including tools that ran while `toolStamps` was
-off. Entries written by every earlier version of the fork still render.
+off. The exception is tool-only responses, which a `toolStamps` change reaches
+when Pi rebuilds the chat (see below). Entries written by every earlier version
+of the fork still render.
 
 ## Tool-only responses
 
@@ -23,7 +25,7 @@ draws no row either. That includes one that was aborted or failed; a `length`
 stop keeps its row, under Pi's truncation line. A collapsed run of tool calls
 therefore has one stamp, under the reply that ends it. That stamp's response
 time totals the whole run, from the first tool-only response, and its date
-context skips the hidden stamps.
+context skips the hidden stamps (with `toolStamps` on, they are drawn and count).
 
 - `toolStamps` on brings their rows back, each with its tool durations.
 - Pi gives extensions no way to redraw the chat, so a `toolStamps` change

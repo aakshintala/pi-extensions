@@ -7,7 +7,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import "../../tests/fixtures/tool-display/pi-tui.mjs";
-const { createRigSettings } = await import("../../shared/settings/index.ts");
+const { createRigSettings, rigSettings } = await import("../../shared/settings/index.ts");
 const { MAX_FORMATTERS } = await import("./format.ts");
 const { stampRenderer } = await import("./render.ts");
 const { frozenSettings, importPiStamp, IMPORTED, SETTINGS } = await import("./settings.ts");
@@ -280,16 +280,22 @@ test("the extension factory only registers; the import runs at session_start", a
 });
 
 // Drives the extension through one agent run with a fake Pi and returns the entries it appends.
-async function recordRun(responses, userAt, branch = []) {
+async function recordRun(responses, userAt, branch = [], { settings = {} } = {}) {
   process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(root, "agent-"));
   const { default: stamp } = await import("./index.ts");
   const handlers = {};
   const entries = [];
   let clock = 0;
   stamp({ on: (name, h) => (handlers[name] = h), registerEntryRenderer() {}, appendEntry: (_type, data) => entries.push(data) }, { now: () => clock });
+  // Settings are process-wide (one rig.json per process): set for this run, then restored.
+  const section = rigSettings().sections().find((s) => s.name === "stamp");
+  for (const [k, v] of Object.entries(settings)) section.set(k, v);
   handlers.session_start({}, { mode: "tui", hasUI: false, sessionManager: { getBranch: () => branch } });
   handlers.message_end({ message: { role: "user", timestamp: userAt } });
-  for (const { at, done, ...message } of responses) {
+  for (const { at, done, user, end, ...message } of responses) {
+    if (end) handlers.agent_end({});
+    if (user !== undefined) handlers.message_end({ message: { role: "user", timestamp: user } });
+    if (end || user !== undefined) continue;
     const m = { role: "assistant", timestamp: at, ...message };
     handlers.turn_start({}, {});
     handlers.message_start({ message: m });
@@ -299,6 +305,7 @@ async function recordRun(responses, userAt, branch = []) {
   }
   handlers.agent_end({});
   handlers.session_shutdown({});
+  for (const k of Object.keys(settings)) section.set(k, DEFAULTS[k]);
   return entries;
 }
 const toolCall = { type: "toolCall", id: "c1", name: "read", arguments: {} };
@@ -332,4 +339,28 @@ test("tool-only covers aborted and failed responses with calls; a length stop an
   assert.equal(await only("length", [toolCall]), undefined);
   assert.equal(await only("aborted", []), undefined);
   assert.equal(await only("toolUse", [{ type: "text", text: "Reading." }, toolCall]), undefined);
+});
+
+test("a run that ends on an aborted tool-only response does not time the next run's reply", async () => {
+  const D = Date.UTC(2026, 8, 23, 10, 0, 0);
+  const aborted = { at: D + 1000, done: D + 2000, stopReason: "aborted", content: [toolCall] };
+  const reply = { at: D + 61_000, done: D + 62_000, stopReason: "stop", content: [{ type: "text", text: "Hi." }] };
+  // The next run starts without a user message (an extension's follow-up), or with one mid-run (a steer).
+  for (const between of [{ end: true }, { user: D + 60_000 }]) {
+    const entries = await recordRun([aborted, between, reply], D);
+    assert.equal("runStartedAt" in entries.at(-1), false, JSON.stringify(between));
+  }
+});
+
+test("with toolStamps on, tool-only stamps are drawn, so they count for the date context", async () => {
+  const D = Date.UTC(2026, 8, 22, 23, 59, 0);
+  const responses = [
+    { at: D + 90_000, done: D + 95_000, stopReason: "toolUse", content: [toolCall] },
+    { at: D + 100_000, done: D + 160_000, stopReason: "stop", content: [{ type: "text", text: "Done." }] },
+  ];
+  const [, hidden, reply] = await recordRun(responses, D, [], { settings: { toolStamps: true } });
+  assert.deepEqual([hidden.previousTimestamp, reply.previousTimestamp], [D, D + 90_000]);
+  const saved = [{ type: "custom", customType: "pi-stamp", data: hidden }];
+  const [next] = await recordRun([], D + 200_000, saved, { settings: { toolStamps: true } });
+  assert.equal(next.previousTimestamp, D + 90_000);
 });

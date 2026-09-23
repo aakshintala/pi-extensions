@@ -34,7 +34,10 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
   const section = rig.declare("stamp", SETTINGS);
   // Subscribed on first use, released on shutdown.
   let live: ReturnType<typeof frozenSettings> | undefined;
-  pi.registerEntryRenderer(STAMP_ENTRY_TYPE, stampRenderer(() => (live ??= frozenSettings(section)).get()));
+  const settings = () => (live ??= frozenSettings(section)).get();
+  pi.registerEntryRenderer(STAMP_ENTRY_TYPE, stampRenderer(settings));
+  // A tool-only stamp draws a row only with toolStamps on; the date context skips it otherwise.
+  const drawn = (stamp: object) => !("toolOnly" in stamp) || settings().toolStamps;
 
   let tui = false;
   let lastStamp: number | undefined;
@@ -49,8 +52,7 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
   const append = (stamp: UserStamp | AssistantStamp) => {
     if (!isMessageStamp(stamp)) return;
     pi.appendEntry(STAMP_ENTRY_TYPE, stamp);
-    // A tool-only stamp draws no row, so the next one's date context skips it.
-    if (!("toolOnly" in stamp)) lastStamp = stamp.timestamp;
+    if (drawn(stamp)) lastStamp = stamp.timestamp;
   };
   const previous = () => (lastStamp === undefined ? {} : { previousTimestamp: lastStamp });
   const flushUsers = () => {
@@ -82,7 +84,7 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
     lastStamp = undefined;
     for (let i = branch.length - 1; i >= 0 && lastStamp === undefined; i--) {
       const e = branch[i];
-      if (isRecord(e) && e.type === "custom" && e.customType === STAMP_ENTRY_TYPE && isMessageStamp(e.data) && !("toolOnly" in e.data)) {
+      if (isRecord(e) && e.type === "custom" && e.customType === STAMP_ENTRY_TYPE && isMessageStamp(e.data) && drawn(e.data)) {
         lastStamp = e.data.timestamp;
       }
     }
@@ -200,6 +202,7 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
   pi.on("agent_end", () => {
     flushUsers();
     reset();
+    runStart = undefined; // a run that ended without a reply (aborted, failed) times nothing
   });
 
   pi.on("session_shutdown", () => {
