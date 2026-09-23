@@ -90,6 +90,15 @@ test("grep: an invalid regex is an error, as with the built-in", async (t) => {
 test("find: glob, fuzzy, ranking by git changes, limit", async (t) => {
   const spy = spyFFF();
   const { run } = await searchSession(t, { load: spy.load });
+  // FFF's waitForScan can resolve before its git status settles, leaving the modified
+  // b/handler.ts reported as clean (the flake in #94). Wait until it is actually "modified".
+  const f = spy.finders[0];
+  for (const deadline = Date.now() + 12_000; !t.signal.aborted; await new Promise((r) => setTimeout(r, 25))) {
+    const s = f.glob("**/handler.ts", { pageSize: 10 });
+    if (s.ok && s.value.items.find((i) => i.relativePath === "b/handler.ts")?.gitStatus === "modified") break;
+    if (Date.now() >= deadline) break;
+  }
+  spy.calls.length = 0; // the settle probes are not part of the asserted tool sequence
   const r = await run([
     ["find", { pattern: "*.js" }],
     ["find", { pattern: "src/**/*.ts" }],
