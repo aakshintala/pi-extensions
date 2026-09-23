@@ -108,6 +108,7 @@ test("a tool-only response renders no component unless toolStamps is on; entries
   assert.deepEqual(render(assistant({ toolOnly: true, tools }), { toolStamps: true }), ["14:05:09", "tool read · 0.1s · success"]);
   assert.deepEqual(render(assistant({ tools })), ["14:05:09"]);
   assert.equal(render(assistant({ toolOnly: false })), undefined); // only `true` is ever written
+  assert.equal(render(assistant({ runStartedAt: T + 1 })), undefined); // a run starts before its reply
   // Drawn while toolStamps was on, it goes blank when it is turned off.
   let settings = Object.freeze({ ...DEFAULTS, toolStamps: true });
   const shown = stampRenderer(() => settings)({ type: "custom", customType: "pi-stamp", data: assistant({ toolOnly: true }) }, { expanded: false }, theme);
@@ -276,4 +277,59 @@ test("the extension factory only registers; the import runs at session_start", a
   handlers.session_start({}, { mode: "tui", hasUI: false, sessionManager: { getBranch: () => [] } });
   assert.deepEqual(rigFile(), { stamp: { locale: "system" } });
   handlers.session_shutdown({});
+});
+
+// Drives the extension through one agent run with a fake Pi and returns the entries it appends.
+async function recordRun(responses, userAt, branch = []) {
+  process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(root, "agent-"));
+  const { default: stamp } = await import("./index.ts");
+  const handlers = {};
+  const entries = [];
+  let clock = 0;
+  stamp({ on: (name, h) => (handlers[name] = h), registerEntryRenderer() {}, appendEntry: (_type, data) => entries.push(data) }, { now: () => clock });
+  handlers.session_start({}, { mode: "tui", hasUI: false, sessionManager: { getBranch: () => branch } });
+  handlers.message_end({ message: { role: "user", timestamp: userAt } });
+  for (const { at, done, ...message } of responses) {
+    const m = { role: "assistant", timestamp: at, ...message };
+    handlers.turn_start({}, {});
+    handlers.message_start({ message: m });
+    clock = done;
+    handlers.message_end({ message: m });
+    handlers.turn_end({ message: m, toolResults: [] });
+  }
+  handlers.agent_end({});
+  handlers.session_shutdown({});
+  return entries;
+}
+const toolCall = { type: "toolCall", id: "c1", name: "read", arguments: {} };
+
+test("the reply that ends a run is timed from its first tool-only response, and hidden stamps leave the date context alone", async () => {
+  const D = Date.UTC(2026, 8, 22, 23, 59, 0);
+  const [userStamp, r1, r2, reply] = await recordRun(
+    [
+      { at: D + 10_000, done: D + 20_000, stopReason: "toolUse", content: [toolCall] },
+      { at: D + 90_000, done: D + 95_000, stopReason: "toolUse", content: [{ type: "thinking", thinking: "Hm." }, toolCall] },
+      { at: D + 100_000, done: D + 160_000, stopReason: "stop", content: [{ type: "text", text: "Done." }] },
+    ],
+    D,
+  );
+  assert.deepEqual([userStamp.timestamp, r1.toolOnly, r2.toolOnly, r2.previousTimestamp, reply.previousTimestamp], [D, true, true, D, D]);
+  assert.equal(reply.runStartedAt, D + 10_000);
+  assert.equal("runStartedAt" in r2, false);
+  // Past midnight since the last drawn stamp, so the date shows; the total is the run's 150s.
+  assert.deepEqual(render(reply, { responseTiming: "detailed" }), ["2026-09-23 · 00:00:40 · first n/a · total 150.0s"]);
+  // Resumed: the last drawn stamp in the saved branch is the user's, not the later tool-only one.
+  const saved = [userStamp, r2].map((data) => ({ type: "custom", customType: "pi-stamp", data }));
+  const [next] = await recordRun([], D + 200_000, saved);
+  assert.equal(next.previousTimestamp, D);
+});
+
+test("tool-only covers aborted and failed responses with calls; a length stop and a call-less abort keep their stamps", async () => {
+  const D = Date.UTC(2026, 8, 23, 10, 0, 0);
+  const only = async (stopReason, content) => (await recordRun([{ at: D, done: D, stopReason, content }], D - 1000))[1].toolOnly;
+  assert.equal(await only("aborted", [toolCall]), true);
+  assert.equal(await only("error", [toolCall]), true);
+  assert.equal(await only("length", [toolCall]), undefined);
+  assert.equal(await only("aborted", []), undefined);
+  assert.equal(await only("toolUse", [{ type: "text", text: "Reading." }, toolCall]), undefined);
 });

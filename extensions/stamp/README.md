@@ -12,17 +12,27 @@ It registers no tools and no commands.
 In TUI sessions, every user message and every response gets a `pi-stamp` session
 entry. A response's entry records its timing, model metadata, thinking level,
 cost since your last message and the duration and outcome of each tool it ran.
-Everything is recorded; settings only decide what is shown, so a change applies
-to stamps already on screen, including tools that ran while `toolStamps` was off.
-Entries written by every earlier version of the fork still render.
+Everything is recorded; settings only decide what is shown, and a change applies
+to stamps already on screen, including tools that ran while `toolStamps` was
+off. Entries written by every earlier version of the fork still render.
 
-A response that only calls tools, with no text, draws nothing in the chat, so its
-stamp draws no row either: a collapsed run of tool calls has one stamp, under the
-reply that ends it. Its entry is still written, and `toolStamps` brings its row
-back. That setting reaches these rows when Pi rebuilds the chat (`/reload`,
-`/resume`, `/tree`), not at once. The rule looks at text only, because Pi does not
-tell extensions whether thinking is shown: a tool-only response whose thinking you
-show with `Ctrl+T` gets no row either.
+## Tool-only responses
+
+A response with tool calls and no text draws nothing in the chat, so its stamp
+draws no row either. That includes one that was aborted or failed; a `length`
+stop keeps its row, under Pi's truncation line. A collapsed run of tool calls
+therefore has one stamp, under the reply that ends it. That stamp's response
+time totals the whole run, from the first tool-only response, and its date
+context skips the hidden stamps.
+
+- `toolStamps` on brings their rows back, each with its tool durations.
+- Pi gives extensions no way to redraw the chat, so a `toolStamps` change
+  reaches these rows only when Pi rebuilds the chat (`/reload`, `/resume`,
+  `/tree`, compaction). Turning it off blanks their text at once but leaves one
+  blank row each until then.
+- Pi does not tell extensions whether thinking is shown, so the rule looks at
+  text only: a tool-only response whose thinking you show with `Ctrl+T` gets no
+  row either.
 
 ## Keys
 

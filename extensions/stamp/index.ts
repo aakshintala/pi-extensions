@@ -41,13 +41,16 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
   let response: { timestamp: number; firstContentAt?: number; completedAt?: number } | undefined;
   let thinkingLevel: StampThinkingLevel | undefined;
   let cost = noCost();
+  // The first tool-only response of the current run; the reply that ends the run is timed from it.
+  let runStart: number | undefined;
   const tools = new Map<string, { name: string; startedAt: number; completedAt?: number; outcome?: ToolStampOutcome }>();
   const pendingUsers: number[] = [];
 
   const append = (stamp: UserStamp | AssistantStamp) => {
     if (!isMessageStamp(stamp)) return;
     pi.appendEntry(STAMP_ENTRY_TYPE, stamp);
-    lastStamp = stamp.timestamp;
+    // A tool-only stamp draws no row, so the next one's date context skips it.
+    if (!("toolOnly" in stamp)) lastStamp = stamp.timestamp;
   };
   const previous = () => (lastStamp === undefined ? {} : { previousTimestamp: lastStamp });
   const flushUsers = () => {
@@ -73,12 +76,15 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
     }
     reset();
     pendingUsers.length = 0;
+    runStart = undefined;
     tui = ctx.mode === "tui";
     const branch = ctx.sessionManager.getBranch() as unknown[];
     lastStamp = undefined;
     for (let i = branch.length - 1; i >= 0 && lastStamp === undefined; i--) {
       const e = branch[i];
-      if (isRecord(e) && e.type === "custom" && e.customType === STAMP_ENTRY_TYPE && isMessageStamp(e.data)) lastStamp = e.data.timestamp;
+      if (isRecord(e) && e.type === "custom" && e.customType === STAMP_ENTRY_TYPE && isMessageStamp(e.data) && !("toolOnly" in e.data)) {
+        lastStamp = e.data.timestamp;
+      }
     }
     // Cost since the last user message, for a resumed session.
     cost = noCost();
@@ -142,6 +148,7 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
     const { message } = event;
     if (message.role === "user") {
       cost = noCost();
+      runStart = undefined;
       if (isValidTimestamp(message.timestamp)) pendingUsers.push(message.timestamp);
       return;
     }
@@ -170,6 +177,9 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
     for (const r of event.toolResults) addCost(cost, captureReportedCost(r));
     const metadata = captureAssistantMetadata(message);
     const withCost = message.stopReason !== "toolUse" && cost.valid && cost.reported;
+    const toolOnly = isToolOnly(message);
+    const run = toolOnly ? undefined : runStart;
+    runStart = toolOnly ? (runStart ?? message.timestamp) : undefined;
     append({
       version: 7,
       role: "assistant",
@@ -182,7 +192,8 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
       ...(level === undefined ? {} : { thinkingLevel: level }),
       ...(withCost ? { ...(estimatedCost === undefined ? {} : { estimatedCost }), costSinceUser: cost.total } : {}),
       ...(done.length ? { tools: done } : {}),
-      ...(isToolOnly(message) ? { toolOnly: true } : {}),
+      ...(toolOnly ? { toolOnly: true } : {}),
+      ...(run === undefined ? {} : { runStartedAt: run }),
     });
   });
 
@@ -198,16 +209,22 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
     reset();
     tui = false;
     lastStamp = undefined;
+    runStart = undefined;
     cost = noCost();
   });
 }
 
-/** A response that only calls tools: no text, just thinking (if any) and the calls. */
+/**
+ * A response that only calls tools, which Pi draws nothing for: no text, only thinking
+ * (if any) and the calls. Pi still draws its error line for an aborted or failed one
+ * with no calls, and its truncation line for a `length` stop.
+ */
 function isToolOnly(message: { stopReason?: string; content?: unknown }): boolean {
+  const content = Array.isArray(message.content) ? message.content : [];
   return (
-    message.stopReason === "toolUse" &&
-    Array.isArray(message.content) &&
-    !message.content.some((b) => isRecord(b) && b.type === "text" && typeof b.text === "string" && b.text.trim() !== "")
+    message.stopReason !== "length" &&
+    content.some((b) => isRecord(b) && b.type === "toolCall") &&
+    !content.some((b) => isRecord(b) && b.type === "text" && typeof b.text === "string" && b.text.trim() !== "")
   );
 }
 

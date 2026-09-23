@@ -53,6 +53,8 @@ export interface AssistantStamp {
   tools?: ToolTiming[];
   /** No text: the response only called tools. Absent in entries written before #142. */
   toolOnly?: true;
+  /** When this reply ends a run of tool-only responses: the first one's timestamp. */
+  runStartedAt?: number;
 }
 
 // Read-only shapes written by earlier versions of the fork.
@@ -88,7 +90,7 @@ const KEYS: Record<number, string[]> = {
   4: [...TIMING_KEYS, "metadata"],
   5: [...TIMING_KEYS, "metadata", "thinkingLevel"],
   6: [...TIMING_KEYS, "metadata", "thinkingLevel", "estimatedCost", "costSinceUser"],
-  7: [...TIMING_KEYS, "metadata", "thinkingLevel", "estimatedCost", "costSinceUser", "tools", "toolOnly"],
+  7: [...TIMING_KEYS, "metadata", "thinkingLevel", "estimatedCost", "costSinceUser", "tools", "toolOnly", "runStartedAt"],
 };
 
 export function isMessageStamp(value: unknown): value is MessageStamp {
@@ -109,6 +111,7 @@ export function isMessageStamp(value: unknown): value is MessageStamp {
     if (has("costSinceUser") && value.estimatedCost > (value.costSinceUser as number)) return false;
   }
   if (has("toolOnly") && value.toolOnly !== true) return false;
+  if (has("runStartedAt") && !(isValidTimestamp(value.runStartedAt) && value.runStartedAt <= value.timestamp)) return false;
   return !has("tools") || (Array.isArray(value.tools) && value.tools.every(isToolTiming));
 }
 
