@@ -1,6 +1,7 @@
 // ask_user: questions in a bottom panel with inline free text (spec #34).
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { isChild } from "../../shared/subagent/index.ts";
 import { oneLine } from "../../shared/text/index.ts"; // question text is model input
 import { panel, type Outcome, type Question } from "./panel.ts";
 
@@ -68,7 +69,7 @@ export function format(questions: Question[], o: Outcome): string {
 export default function (pi: ExtensionAPI) {
   // Subagents never open a panel: #26 writes `rig.subagent` as a child session's first entry.
   pi.on("session_start", (_event, ctx) => {
-    if (ctx.sessionManager.getEntries().some((e) => e.type === "custom" && e.customType === "rig.subagent")) {
+    if (isChild(ctx)) {
       pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "ask_user"));
     }
   });
