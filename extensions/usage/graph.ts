@@ -129,6 +129,18 @@ function domainFor(period: TabName, bounds: PeriodBounds, hourly: Map<number, Ma
 	}
 }
 
+/** Index of the last bucket starting at or before `ms` (binary search; starts ascend). */
+function bucketIndex(starts: readonly number[], ms: number): number {
+	let lo = 0;
+	let hi = starts.length - 1;
+	while (lo < hi) {
+		const mid = (lo + hi + 1) >> 1;
+		if (starts[mid]! <= ms) lo = mid;
+		else hi = mid - 1;
+	}
+	return lo;
+}
+
 /**
  * Build the graph model for one (period, metric, groupBy) view.
  *
@@ -145,12 +157,18 @@ export function buildGraphModel(
 	const spanMs = Math.max(endMs - startMs, 1);
 	const bucketMs = spanMs / HOUR_MS <= MAX_HOURLY_BUCKETS ? HOUR_MS : DAY_MS;
 
-	// Bucket starts aligned to the domain start so "day" buckets follow the
-	// local-midnight period boundaries computed by data.ts (DST shifts move a
-	// boundary by an hour, which is invisible at graph resolution).
-	const bucketCount = Math.max(1, Math.ceil(spanMs / bucketMs));
+	// Hour buckets are fixed spans. Day buckets step the local calendar from the
+	// domain start, so a 23- or 25-hour DST day is still one day.
 	const bucketStarts: number[] = [];
-	for (let i = 0; i < bucketCount; i++) bucketStarts.push(startMs + i * bucketMs);
+	if (bucketMs === HOUR_MS) {
+		const hours = Math.max(1, Math.ceil(spanMs / HOUR_MS));
+		for (let i = 0; i < hours; i++) bucketStarts.push(startMs + i * HOUR_MS);
+	} else {
+		for (const day = new Date(startMs); day.getTime() < endMs; day.setDate(day.getDate() + 1)) {
+			bucketStarts.push(day.getTime());
+		}
+	}
+	const bucketCount = bucketStarts.length;
 
 	// Accumulate per-group bucket values.
 	const groupValues = new Map<string, number[]>();
@@ -160,7 +178,7 @@ export function buildGraphModel(
 
 	for (const [hour, bucket] of hourly) {
 		if (hour < startMs || hour >= endMs) continue;
-		const idx = Math.min(bucketCount - 1, Math.floor((hour - startMs) / bucketMs));
+		const idx = bucketIndex(bucketStarts, hour);
 		for (const [key, cell] of bucket) {
 			const value = metricOf(cell, options.metric);
 			if (value === 0) continue;

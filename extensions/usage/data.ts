@@ -966,11 +966,14 @@ function emptyUsageData(bounds: PeriodBounds): UsageData {
 	};
 }
 
-/** Start of the local hour holding `ms`: the same local clock the period bounds use. */
+/**
+ * Start of the local hour holding `ms`: the same local clock the period bounds
+ * use. Subtracting the local minutes keeps both 01:00 hours of a DST fall-back
+ * apart; setting the minutes to 0 would resolve both to the first.
+ */
 export function localHourStart(ms: number): number {
 	const d = new Date(ms);
-	d.setMinutes(0, 0, 0);
-	return d.getTime();
+	return ms - (d.getMinutes() * 60_000 + d.getSeconds() * 1000 + d.getMilliseconds());
 }
 
 function addToHourlyBuckets(hourly: Map<number, Map<HourlyKey, HourlyCell>>, msg: SessionMessage): void {
