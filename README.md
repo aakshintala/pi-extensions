@@ -27,3 +27,4 @@ pi install /path/to/pi-rig
 | [clear](extensions/clear/README.md) | `/clear`: starts a new session, as `/new` does | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
 | [theme](extensions/theme/README.md) | `/theme`: Pi's own theme picker with live preview | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
 | [inline-skills](extensions/inline-skills/README.md) | `/skill-name` anywhere in a prompt loads that skill, with mid-prompt autocomplete | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
+| [subagents](extensions/subagents/README.md) | Background subagents via `subagent_spawn`, `subagent_message` and `subagent_stop`, with results pushed as notices | [#26](https://github.com/aakshintala/pi-rig/issues/26) |
