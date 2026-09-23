@@ -27,8 +27,8 @@ const screen = (chat, editor = "", below = []) => {
 };
 
 // `keybindings: null` starts pi with its default keybindings, which bind Ctrl+B to cursor left.
-async function start(t, keybindings) {
-  const tui = await startTui(t, { extensions: EXTENSIONS, cols: COLS, rows: ROWS, keybindings });
+async function start(t, keybindings, args = []) {
+  const tui = await startTui(t, { extensions: EXTENSIONS, cols: COLS, rows: ROWS, keybindings, args });
   t.after(() => assert.deepEqual(liveGroup(tui.pid), []));
   const file = join(dirname(tui.home), "agent", "keybindings.json");
   let n = 0;
@@ -131,4 +131,25 @@ test("Ctrl+B is not taken from an overlay, and cancels a stop confirmation", asy
   assert.deepEqual(tui.events().filter((e) => e.startsWith("bg:")), []);
   tui.keys("C-b");
   await tui.waitForEvent("bg:a");
+});
+
+test("at a stop confirmation in the chat area, Ctrl+B cancels it and backgrounds nothing", async (t) => {
+  const tui = await start(t, undefined, ["--tui-mode", "fullscreen"]);
+  await tui.fx({ add: "j", kind: "shell", label: "build" }, { fg: "a" });
+  // Fullscreen: the item takes the chat area and Pi's editor keeps focus.
+  const viewing = (below) => {
+    const lines = [" shell build · 0s · esc back · ctrl+q stop"];
+    const bottom = [BORDER, "", BORDER, "   main", " ● shell build · 0s", ...below, ...FOOTER];
+    return "\n" + [...lines, ...Array(ROWS - lines.length - bottom.length).fill(""), ...bottom].join("\n");
+  };
+  tui.keys("Down", "Down", "Enter");
+  await tui.waitForScreen(viewing([HINT]));
+  tui.keys("C-q");
+  await tui.waitForScreen(viewing([" Stop shell build? y stops it, any other key cancels.", HINT]));
+  tui.keys("C-b");
+  await tui.waitForScreen(viewing([HINT]));
+  assert.deepEqual(tui.events().filter((e) => e.startsWith("bg:")), []);
+  tui.keys("C-b"); // with the confirmation gone, the editor has focus: Ctrl+B backgrounds
+  await tui.waitForEvent("bg:a");
+  await tui.waitForScreen(viewing([]));
 });
