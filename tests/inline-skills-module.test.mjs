@@ -1,0 +1,204 @@
+// inline-skills module tests: token detection, the injected message, the autocomplete
+// provider, delivery, and the editor patch.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import "./fixtures/tool-display/pi-tui.mjs";
+const ext = await import("../extensions/inline-skills/index.ts");
+const { namedSkills, editorPatch, skillMessage, skillProvider, stripFrontmatter } = ext;
+
+const skill = (name) => ({ name, description: `${name} skill`, path: `/s/${name}/SKILL.md` });
+const SKILLS = ["grilling", "grill-with-docs", "setup-grill", "tdd"].map(skill);
+const names = (list) => list.map((s) => s.name);
+
+test("token detection: boundaries, case, second slash, colon, dedup and loaded", () => {
+  const found = (text, loaded = [], commands = []) => names(namedSkills(text, () => SKILLS, new Set(loaded), () => commands));
+  assert.deepEqual(found("use /tdd, (/grilling) and /TDD"), ["tdd", "grilling"]);
+  assert.deepEqual(found("x,/tdd [/grilling"), ["tdd", "grilling"]);
+  assert.deepEqual(found("/tdd first"), ["tdd"]);
+  assert.deepEqual(found("a/tdd /usr/tdd /tdd/x /tdd:x /tdd-x /nope"), []);
+  assert.deepEqual(found("/tdd and /grilling", ["tdd"]), ["grilling"]);
+  assert.deepEqual(found("/tdd and /grilling", [], ["tdd"]), ["grilling"], "a command wins at the start");
+});
+
+test("a message with no `/` never lists skills", () => {
+  const skills = () => assert.fail("skills listed for a message without a slash");
+  assert.deepEqual(namedSkills("an ordinary prompt", skills, new Set()), []);
+});
+
+test("frontmatter is stripped, with or without a newline after it", () => {
+  assert.equal(stripFrontmatter("---\nname: x\n---\nbody"), "body");
+  assert.equal(stripFrontmatter("---\nname: x\n---body"), "body");
+  assert.equal(stripFrontmatter("---\nname: x\n---"), "");
+  assert.equal(stripFrontmatter("no frontmatter"), "no frontmatter");
+  assert.equal(stripFrontmatter("---\nunclosed"), "---\nunclosed");
+});
+
+test("skill message: fenced bodies, names in details", () => {
+  const block = { name: "m", location: "/s/m/SKILL.md", content: "a ```` b\n</skill>", userMessage: undefined };
+  const msg = skillMessage([block]);
+  assert.equal(msg.customType, "inline-skill");
+  assert.equal(msg.display, true);
+  assert.deepEqual(msg.details, { names: ["m"], skills: [block] });
+  assert.ok(msg.content.endsWith("Skill `m` (/s/m/SKILL.md). Its relative paths start at /s/m.\n`````markdown\na ```` b\n</skill>\n`````"), msg.content);
+});
+
+// Pi's provider stand-in: records delegated calls.
+function provider() {
+  const calls = [];
+  const current = {
+    triggerCharacters: ["#"],
+    getSuggestions: async (lines) => (calls.push(["get", lines[0]]), { items: [{ value: "pi", label: "pi" }], prefix: "x" }),
+    applyCompletion: (lines, line, col, item) => (calls.push(["apply", item.label]), { lines, cursorLine: line, cursorCol: col }),
+    shouldTriggerFileCompletion: () => false,
+  };
+  return { p: skillProvider(() => SKILLS, current), calls };
+}
+const get = (p, text, lines = [text]) => p.getSuggestions(lines, lines.length - 1, lines.at(-1).length, { signal: new AbortController().signal });
+
+test("provider owns a mid-message /word, prefix matches first", async () => {
+  const { p, calls } = provider();
+  const r = await get(p, "please /gri");
+  assert.deepEqual(r.items.map((i) => i.label), ["grill-with-docs", "grilling", "setup-grill"]);
+  assert.equal(r.prefix, "gri");
+  assert.deepEqual((await get(p, "x /t")).items.map((i) => i.label), ["tdd", "grill-with-docs", "setup-grill"], "prefix before substring");
+  assert.deepEqual((await get(p, "x /")).items.length, 4, "a bare / lists every skill");
+  assert.deepEqual((await get(p, "", ["first line", "/td"])).items.map((i) => i.label), ["tdd"], "a later line is mid-message");
+  assert.equal(await get(p, "try /zzq"), null, "no match: no list, and no file completion");
+  for (const text of ["use (/td", "a,/td", "(/td", "[/td", "{/td"]) {
+    assert.deepEqual((await get(p, text)).items.map((i) => i.label), ["tdd"], `${text}: same boundaries as a sent message`);
+  }
+  assert.deepEqual(calls, []);
+  assert.equal(p.triggerCharacters[0], "#");
+  assert.equal(p.shouldTriggerFileCompletion(["x"], 0, 1), false);
+});
+
+test("provider leaves start-of-message / and paths to Pi", async () => {
+  const { p, calls } = provider();
+  for (const text of ["/gri", "  /gri", "see /usr/lo", "a/gr"]) assert.equal((await get(p, text)).items[0].label, "pi");
+  assert.deepEqual(calls.map((c) => c[1]), ["/gri", "  /gri", "see /usr/lo", "a/gr"]);
+});
+
+test("provider completion replaces the token and adds one space", async () => {
+  const { p, calls } = provider();
+  const { items } = await get(p, "run /gr");
+  const at = (text, col, item = items[0]) => p.applyCompletion([text], 0, col, item, "gr");
+  assert.deepEqual(at("run /gr now", 7), { lines: ["run /grill-with-docs now"], cursorLine: 0, cursorCol: 20 });
+  assert.deepEqual(at("run /gr", 7), { lines: ["run /grill-with-docs "], cursorLine: 0, cursorCol: 21 });
+  at("x", 1, { value: "pi", label: "pi" });
+  assert.deepEqual(calls, [["apply", "pi"]], "Pi's own items go to Pi");
+});
+
+test("a skill counts as loaded only once its message is delivered", async () => {
+  const handlers = {};
+  const pi = {
+    on: (name, h) => (handlers[name] = h),
+    registerMessageRenderer: () => {},
+    getCommands: () => [{ name: "skill:tdd", source: "skill", sourceInfo: { path: new URL("./fixtures/inline-skills/skills/tdd/SKILL.md", import.meta.url).pathname } }],
+  };
+  ext.default(pi);
+  const ctx = { ui: { notify: assert.fail } };
+  const first = await handlers.before_agent_start({ prompt: "use /tdd" }, ctx);
+  assert.match(first.message.content, /Body of tdd\./);
+  const retry = await handlers.before_agent_start({ prompt: "use /tdd" }, ctx); // the first never reached the model
+  assert.deepEqual(retry, first);
+  await handlers.message_end({ message: { role: "custom", ...retry.message } }, ctx);
+  assert.equal(await handlers.before_agent_start({ prompt: "use /tdd" }, ctx), undefined);
+});
+
+// A real CustomEditor mounted where Pi mounts it, with Pi's app actions (as Pi's main
+// editor has); counts autocomplete triggers.
+const { CustomEditor } = await import("@earendil-works/pi-coding-agent");
+function mounted({ main = true } = {}) {
+  const editor = new CustomEditor({ requestRender() {} }, { borderColor: (s) => s, selectList: {} }, { matches: () => false });
+  if (main) editor.onAction("app.clear", () => {});
+  let triggers = 0;
+  editor.tryTriggerAutocomplete = () => void triggers++;
+  const type = (text) => {
+    for (const c of text) editor.handleInput(c);
+    const n = triggers;
+    triggers = 0;
+    return n;
+  };
+  return { editor, type, tui: { children: [0, 0, 0, 0, { children: [editor] }] } };
+}
+
+test("the editor patch opens the list on a mid-message / plus two name characters", () => {
+  const { tui, type } = mounted();
+  assert.equal(editorPatch().ensure(tui), true);
+  assert.equal(type("please /g"), 0);
+  assert.equal(type("r"), 1);
+  assert.equal(type("i"), 1);
+  assert.equal(type(" (/td"), 1, "after (");
+  assert.equal(type(" ,/td"), 1, "after ,");
+  assert.equal(type(" see /us"), 1);
+  assert.equal(type("r/lo"), 1, "only /usr, before the second slash");
+});
+
+test("restore undoes the wrap; a later install (a /reload) wraps exactly once", () => {
+  const { editor, tui, type } = mounted();
+  const first = editorPatch();
+  first.ensure(tui);
+  assert.equal(editorPatch().ensure(tui), false, "a second live install stays out");
+  assert.equal(type("a /gr"), 1);
+  first.restore();
+  first.restore(); // twice is a no-op
+  assert.equal(Object.hasOwn(editor, "handleInput"), false, "the prototype method is back");
+  assert.equal(type(" /gr"), 0);
+  const second = editorPatch();
+  assert.equal(second.ensure(tui), true);
+  assert.equal(second.ensure(tui), true);
+  assert.equal(type(" /gr"), 1, "wrapped once");
+  second.restore();
+});
+
+test("the extension wraps at session start, on keys, and restores at shutdown", async () => {
+  const handlers = {};
+  ext.default({ on: (name, h) => (handlers[name] = h), registerMessageRenderer: () => {}, getCommands: () => [] });
+  const { editor, tui, type } = mounted();
+  const slot = tui.children[4].children;
+  const main = slot[0];
+  slot[0] = { render: () => [] }; // the /reload notice holds the slot during session_start
+  let onKey;
+  const ui = {
+    addAutocompleteProvider() {},
+    setWidget: (_key, factory) => factory?.(tui),
+    onTerminalInput: (h) => ((onKey = h), () => (onKey = undefined)),
+  };
+  await handlers.session_start({}, { hasUI: true, ui, sessionManager: { getBranch: () => [] } });
+  assert.equal(Object.hasOwn(editor, "handleInput"), false);
+  slot[0] = main;
+  onKey("a");
+  assert.equal(type("a /gr"), 1);
+  await handlers.session_shutdown({});
+  await handlers.session_shutdown({});
+  assert.equal(Object.hasOwn(editor, "handleInput"), false, "restored");
+  assert.equal(onKey, undefined, "key listener removed");
+});
+
+test("the wrap follows the editor in Pi's slot", () => {
+  const a = mounted();
+  const b = mounted();
+  const tui = a.tui;
+  const patch = editorPatch();
+  patch.ensure(tui);
+  tui.children[4].children[0] = { render: () => [] }; // a panel or the /reload notice
+  assert.equal(patch.ensure(tui), false);
+  assert.equal(a.type("x /gr"), 1, "the hidden main editor keeps its wrap");
+  tui.children[4].children[0] = b.editor; // setEditorComponent
+  assert.equal(patch.ensure(tui), true);
+  assert.equal(b.type("x /gr"), 1);
+  assert.equal(a.type(" /gr"), 0, "the replaced editor is unwrapped");
+  patch.restore();
+});
+
+test("the editor patch skips any shape mismatch without throwing", () => {
+  for (const tui of [undefined, {}, { children: [] }, { children: [0, 0, 0, 0, { children: [{ handleInput() {} }] }] }]) {
+    assert.equal(editorPatch().ensure(tui), false);
+  }
+  const { tui, type } = mounted();
+  assert.equal(editorPatch("0.88.0").ensure(tui), false, "another Pi version");
+  assert.equal(type("please /gr"), 0);
+  assert.equal(editorPatch().ensure(mounted({ main: false }).tui), false, "a CustomEditor without Pi's app actions (a ui.custom panel)");
+  delete tui.children[4].children[0].state;
+  assert.equal(editorPatch().ensure(tui), false, "no editor state");
+});
