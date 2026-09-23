@@ -144,3 +144,38 @@ by structure: the only child of the root's fifth child, with Pi's submit
 handler on it (Pi 0.87.1, interactive-mode.js:661). Off Pi 0.87.x, or with
 anything else in that slot or in focus, it returns false. Used by
 `extensions/queue` and `extensions/fleet`.
+
+### `process-groups/`
+
+Process groups of background work (#49), shared by `extensions/jobs` and
+`extensions/monitor`. State is one per process on a `globalThis` symbol.
+
+```ts
+import { track, groupOf, signalGroup, tooManyJobs, pastOutputCap, reap } from "../../shared/process-groups/index.ts";
+
+const refusal = tooManyJobs();                 // a message once the cap's groups are alive
+const child = spawn(shell, args, { detached: true, ... });
+const g = track({ child, pgid: child.pid, record: join(dir, `${id}.pid`), counted: true });
+signalGroup(groupOf(g), "SIGTERM");            // groupOf: the live pgid, or undefined once empty
+if (pastOutputCap(log)) { /* stop it */ }
+```
+
+- `track(g)` adds the group to the process set, which one `exit` handler
+  SIGKILLs, and writes its crash record synchronously: the group, its
+  leader's `ps` start time, and Pi's pid and start time. `record` must sit
+  in a `pi-jobs-*` or `pi-monitor-*` directory made by `mkdtempSync` under
+  `tmpdir()`.
+- `groupOf(g)` returns the pgid while the group may hold processes. Once it
+  is seen empty, or its id was reused after the leader was reaped, it
+  forgets the group and deletes the record; the id is never signalled again.
+- `counted` groups count toward the cap while alive, leftover processes
+  included. `setGroupLimit(n)` sets the cap (`maxJobs`, set by jobs; default
+  `MAX_GROUPS`, 16).
+- `signalGroup(pgid, signal)` ignores undefined, 1 or less, and gone groups.
+- `MAX_OUTPUT_BYTES` (5 GB) and `pastOutputCap(file)` are the output cap.
+- `reap()` kills the groups of Pis that have ended, reading only this user's
+  0700 directories and 0600 records, and only while the leader's start time
+  still matches. Malformed records are deleted. Jobs call it on
+  `session_start`.
+- `startTime(pid)` and `startTimeSync(pid)` give `ps -o lstart=` in UTC, or
+  undefined.

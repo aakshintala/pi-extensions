@@ -3,10 +3,10 @@
 // formatting, truncation and PI_* variables stay Pi's. Each command writes to a
 // log file; one still running after `autoBackgroundSeconds`, or started with
 // `run_in_background`, becomes a job: a fleet `shell` row whose end is one notice.
-// Guards and crash clean-up are #49, monitor is #50, Ctrl+B is #51.
+// Guards and crash clean-up are #49 (guards.ts), monitor is #50, Ctrl+B is #51.
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, fstatSync, mkdtempSync, openSync, readSync, rmdirSync, rmSync } from "node:fs";
+import { closeSync, fstatSync, mkdtempSync, openSync, readSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createBashToolDefinition, getAgentDir, getShellConfig, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -14,6 +14,8 @@ import { duration, fleet, type FinalStatus } from "../../shared/fleet/index.ts";
 import { rigSettings } from "../../shared/settings/index.ts";
 import { keepSgr, oneLine } from "../../shared/text/index.ts";
 import { resultText, toolRenderers } from "../../shared/tool-display/index.ts";
+import { groupOf, MAX_GROUPS, pastOutputCap, reap, setGroupLimit, signalGroup, tooManyJobs, track, type Group } from "../../shared/process-groups/index.ts";
+import { blockingSleep, PROMPT } from "./guards.ts";
 
 /** Grace between SIGTERM and SIGKILL to a job's process group. */
 const KILL_MS = 800;
@@ -23,6 +25,12 @@ const TAIL_CHARS = 2000;
 /** How often a foreground command's log is read for live output. */
 const POLL_MS = 100;
 const MAX_TIMER_MS = 2 ** 31 - 1;
+/** How often a killed group is checked until its zombies are reaped. */
+const ZOMBIE_MS = 10;
+/** How often a job's log size and group are checked. */
+const TICK_MS = 1000;
+/** Ticks of unchanged output before a prompt-shaped last line warns the agent. */
+const QUIET_TICKS = 10;
 
 type Timers = Pick<typeof globalThis, "setTimeout" | "clearTimeout">;
 /** The auto-background, wait and kill timers. Tests replace them through this symbol. */
@@ -30,12 +38,11 @@ const timers = (): Timers => (globalThis as any)[Symbol.for("pi-rig.jobs.timers"
 // Referenced: a headless Pi must not exit before a pending SIGKILL fires.
 const delay = (ms: number) => new Promise<void>((r) => timers().setTimeout(r, Math.min(ms, MAX_TIMER_MS)));
 
-type Job = {
+type Job = Group & {
   id: string;
   owner: string;
   command: string;
   log: string;
-  child: ChildProcess;
   startedAt: number;
   /** Became a job: it has a fleet row and gets a notice. */
   bg: boolean;
@@ -46,12 +53,18 @@ type Job = {
   timedOut?: number;
   /** Its group is being killed: leftover processes are not reported. */
   killing?: boolean;
+  /** Why the rig stopped it. */
+  reason?: string;
+  /** The prompt warning was sent. */
+  warned?: boolean;
   /** Tool calls (wait, stop) that will return the final state: the notice is then left out. */
   waiters: number;
   /** Resolves once `status` is set. */
   done: Promise<void>;
   /** Set while in the foreground: settles its bash call. */
   fg?: (code: number) => void;
+  /** The pending check of its log and group. */
+  tick?: unknown;
 };
 
 /** The last `bytes` of a file as text; empty if it cannot be read. */
@@ -78,36 +91,8 @@ function failureTail(log: string) {
 }
 
 const lastLine = (log: string) => tailOf(log, 4096).trimEnd().split("\n").at(-1) ?? "";
-
-const alive = (pgid: number) => {
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
-const signalGroup = (pgid: number | undefined, signal: NodeJS.Signals) => {
-  try {
-    if (pgid) process.kill(-pgid, signal);
-  } catch {}
-};
-
-/**
- * Every job group of this process that may still be alive. A crash or a hard exit skips
- * `session_shutdown`, so one `exit` handler per process SIGKILLs them.
- */
-function groups(): Set<number> {
-  const g = globalThis as { [GROUPS]?: Set<number> };
-  if (!g[GROUPS]) {
-    const live = (g[GROUPS] = new Set<number>());
-    process.on("exit", () => {
-      for (const pgid of live) signalGroup(pgid, "SIGKILL");
-    });
-  }
-  return g[GROUPS];
-}
-const GROUPS = Symbol.for("pi-rig.jobs.groups");
+/** The unfinished line the output ends on: where a prompt waits. Empty after a newline. */
+const openLine = (log: string) => tailOf(log, 4096).split("\n").at(-1) ?? "";
 
 /** Output as Pi's bash renderer shows it: no terminal sequences, no control characters but tab and newline. */
 const clean = (s: string) =>
@@ -118,7 +103,9 @@ const clean = (s: string) =>
 export default function (pi: ExtensionAPI) {
   const section = rigSettings(getAgentDir()).declare("jobs", [
     { key: "autoBackgroundSeconds", type: "integer", min: 1, max: 3600, default: 30, description: "Seconds before a running bash command moves to the background" },
+    { key: "maxJobs", type: "integer", min: 1, max: 64, default: MAX_GROUPS, description: "Most background jobs and monitors running at once" },
   ]);
+  setGroupLimit(section.get("maxJobs") as number);
   const autoSeconds = () => section.get("autoBackgroundSeconds") as number;
 
   const jobs = new Map<string, Job>();
@@ -127,9 +114,10 @@ export default function (pi: ExtensionAPI) {
 
   const now = () => fleet().now();
   /** A finished job whose shell left processes behind in its group. */
-  const lingers = (j: Job) => !!j.status && !!j.child.pid && alive(j.child.pid);
+  const lingers = (j: Job) => !!j.status && !!groupOf(j);
   const state = (j: Job) =>
-    `Job ${j.id} ${j.status ?? "running"}${j.code === undefined ? "" : ` (exit ${j.code})`}${j.timedOut ? `, timed out after ${j.timedOut}s` : ""} after ${duration((j.endedAt ?? now()) - j.startedAt)}. Log: ${j.log}` +
+    `Job ${j.id} ${j.status ?? "running"}${j.code === undefined ? "" : ` (exit ${j.code})`}${j.timedOut ? `, timed out after ${j.timedOut}s` : ""} after ${duration((j.endedAt ?? now()) - j.startedAt)}` +
+    `${j.reason ? ` because ${j.reason}` : ""}. Log: ${j.log}` +
     (lingers(j) && !j.killing ? "\nIts shell exited, but processes it started are still running; stop ends them." : "");
 
   function start(command: string, cwd: string, env: NodeJS.ProcessEnv | undefined, owner: string): Job {
@@ -154,18 +142,48 @@ export default function (pi: ExtensionAPI) {
       child.once("exit", (code, signal) => resolve(code ?? 128 + (signal ? constants.signals[signal] ?? 0 : 0)));
       child.once("error", () => resolve(127));
     });
-    if (child.pid) groups().add(child.pid);
-    const job: Job = { id, owner, command, log, child, startedAt: now(), bg: false, waiters: 0, done: undefined as any };
+    const job: Job = { id, owner, command, log, child, pgid: child.pid, record: join(dir, `${id}.pid`), counted: false, startedAt: now(), bg: false, waiters: 0, done: undefined as any };
     job.done = exited.then((code) => settle(job, code));
     jobs.set(id, job);
+    if (track(job).pgid) tick(job);
     return job;
+  }
+
+  /**
+   * Every TICK_MS while the job's group lives: stops a job whose log passes MAX_OUTPUT_BYTES,
+   * or what it left running once its shell exited, warns once when a background job's
+   * output has stopped on a prompt-shaped line, and forgets the group once it is empty.
+   * ponytail: the size is checked each tick, so a fast writer overshoots the cap by up to a tick's output.
+   */
+  function tick(j: Job, size = 0, quiet = 0) {
+    const h: any = (j.tick = timers().setTimeout(() => {
+      if (!groupOf(j)) return;
+      let now = size;
+      try {
+        now = statSync(j.log).size;
+      } catch {}
+      if (pastOutputCap(j.log)) {
+        if (!j.status) j.reason = "its output passed 5 GB";
+        else if (!j.killing) fleet().notify(j.id, `Job ${j.id}: the processes its shell left running were stopped because its output passed 5 GB. Log: ${j.log}`);
+        void stop(j);
+        return;
+      }
+      quiet = now === size ? quiet + 1 : 0;
+      const prompt = openLine(j.log);
+      if (j.bg && !j.status && !j.warned && quiet >= QUIET_TICKS && PROMPT.test(prompt)) {
+        j.warned = true;
+        fleet().notify(j.id, `Job ${j.id} may be waiting for input: its output stopped at "${oneLine(prompt).trim().slice(-200)}". It gets no input; stop it and rerun it non-interactively.`);
+      }
+      tick(j, now, quiet);
+    }, TICK_MS));
+    h?.unref?.();
   }
 
   function settle(j: Job, code: number) {
     j.code = code;
     j.endedAt = now();
     j.status = j.stopped ? "stopped" : code === 0 && !j.timedOut ? "completed" : "failed";
-    if (!lingers(j)) groups().delete(j.child.pid!);
+    if (!lingers(j)) timers().clearTimeout(j.tick as any); // an empty group is forgotten; nothing left to check
     if (j.fg) return j.fg(code);
     const tail = j.status === "failed" ? failureTail(j.log) : "";
     const result = j.status === "stopped" ? "stopped" : `exit ${code}${j.timedOut ? `, timed out` : ""}${tail ? `\n${tail}` : ""}`;
@@ -174,6 +192,7 @@ export default function (pi: ExtensionAPI) {
 
   function background(j: Job) {
     j.bg = true;
+    j.counted = true;
     j.fg = undefined;
     fleet().register({
       id: j.id,
@@ -193,18 +212,17 @@ export default function (pi: ExtensionAPI) {
    */
   async function kill(j: Job) {
     j.killing = true;
-    const pgid = j.child.pid!;
-    signalGroup(pgid, "SIGTERM");
+    signalGroup(groupOf(j), "SIGTERM");
     const grace = delay(KILL_MS);
     await Promise.race([j.done, grace]);
-    if (alive(pgid)) {
+    if (groupOf(j)) {
       await grace;
-      signalGroup(pgid, "SIGKILL");
+      signalGroup(groupOf(j), "SIGKILL");
       // Killed processes linger briefly as zombies until init reaps them; the group is gone after.
-      for (let i = 0; i < 100 && alive(pgid); i++) await new Promise((r) => setTimeout(r, 10));
+      for (let i = 0; i < 100 && groupOf(j); i++) await delay(ZOMBIE_MS);
     }
     await j.done;
-    groups().delete(pgid);
+    if (!groupOf(j)) timers().clearTimeout(j.tick as any);
   }
 
   /** Stops a running job, or what a finished one left running in its group. */
@@ -272,6 +290,7 @@ export default function (pi: ExtensionAPI) {
           if (!lingers(j)) jobs.delete(j.id); // else kept, so shutdown ends what it left running
           rmSync(j.log, { force: true }); // ran in the foreground: its output is in the result
           if (o.signal?.aborted) reject(new Error("aborted"));
+          else if (j.reason) reject(new Error(`Command stopped because ${j.reason}.`));
           else if (j.timedOut) reject(new Error(`timeout:${j.timedOut}`));
           else resolve({ exitCode: code });
         };
@@ -300,6 +319,13 @@ export default function (pi: ExtensionAPI) {
     },
     async execute(toolCallId: string, p: { command: string; timeout?: number; run_in_background?: boolean }, signal: AbortSignal | undefined, onUpdate: any, ctx: ExtensionContext) {
       if (p.timeout !== undefined && !(p.timeout > 0)) throw new Error("timeout must be a positive number of seconds");
+      if (!p.run_in_background && blockingSleep(p.command))
+        throw new Error(
+          "Blocked: a bare sleep only waits. To wait for a condition, poll in a loop (until <check>; do sleep 1; done). " +
+            "To wait for a job, use jobs wait. For long work, set run_in_background; to react to output, use monitor.",
+        );
+      const full = p.run_in_background ? tooManyJobs() : undefined;
+      if (full) throw new Error(full);
       const handle: { job?: Job; auto?: number } = {};
       const def = createBashToolDefinition(ctx.cwd, { operations: operations(ctx.sessionManager.getSessionId(), !!p.run_in_background, handle) });
       try {
@@ -356,6 +382,12 @@ export default function (pi: ExtensionAPI) {
         const mine = [...jobs.values()].filter((j) => j.bg && j.owner === c.sessionManager.getSessionId());
         return reply(mine.length ? mine.map((j) => `${state(j)}\n  $ ${oneLine(j.command)}`).join("\n") : "No jobs.");
       }
+      // A monitor is a fleet row of kind monitor; stop ends it through the row.
+      const row = p.id && !jobs.has(p.id) ? fleet().get(p.id) : undefined;
+      if (p.action === "stop" && row?.kind === "monitor" && row.owner === c.sessionManager.getSessionId()) {
+        await row.stop();
+        return reply(`Monitor ${row.id} ${fleet().get(row.id)?.status ?? "stopped"}.`);
+      }
       const j = find(p.id, c, p.action);
       if (j.status && (p.action === "wait" || !lingers(j))) return reply(withTail(j));
       j.waiters++;
@@ -393,8 +425,12 @@ export default function (pi: ExtensionAPI) {
     }),
   } as any);
 
+  // Crash clean-up: groups left by a Pi that was killed.
+  pi.on("session_start", () => reap());
+
   const off = section.onChange((key) => {
     if (key === "autoBackgroundSeconds") pi.registerTool(bashTool() as any);
+    if (key === "maxJobs") setGroupLimit((section.get("maxJobs") as number | undefined) ?? MAX_GROUPS);
   });
 
   // Jobs belong to this session: shutdown, reload and session switch kill every one.

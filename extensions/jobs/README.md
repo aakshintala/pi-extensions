@@ -2,7 +2,7 @@
 
 Background shell work: `bash` moves long commands into the background as jobs,
 and `jobs` lists, waits on and stops them. It replaces `pi-patty-bg-tasks`.
-Spec: #30. This is #48: the guards and crash clean-up (#49), `monitor` (#50)
+Spec: #30. Built in #48 and #49 (guards and crash clean-up); `monitor` (#50)
 and Ctrl+B (#51) come later.
 
 ## Tools
@@ -16,6 +16,12 @@ and Ctrl+B (#51) come later.
   - `timeout` is a hard limit in seconds that kills the command, also after it
     became a job. The job then fails as timed out.
   - Esc kills a foreground command.
+  - A bare `sleep` is refused with a pointer to polling loops, `jobs wait`,
+    `run_in_background` and `monitor`. `sleep` inside a `while` or `until`
+    loop, backgrounded with `&`, or in a function body, runs. The check parses
+    the command: quoted text, comments and heredoc bodies are not commands,
+    and it sees through `command`, `exec`, `env`, `nice`, `nohup`, `timeout`,
+    `/bin/sleep`, `\sleep`, `$(...)` and backticks.
 - `jobs({ action, id?, timeout? })`:
   - `list`: the session's jobs with status, running time, log path and command.
   - `wait`: returns when the job ends or after `timeout` seconds (default 30,
@@ -23,7 +29,7 @@ and Ctrl+B (#51) come later.
     leaves the job running.
   - `stop`: SIGTERM to the job's process group, then SIGKILL 800 ms later if
     any of it is still alive. It also ends processes a finished job left
-    running, such as `sleep 60 &`.
+    running, such as `sleep 60 &`. Given a monitor's id, it stops that monitor.
 
 Only the session that started a job can see, wait on or stop it.
 
@@ -46,6 +52,33 @@ Only the session that started a job can see, wait on or stop it.
   sessions in the process keep theirs.
 - If Pi exits without shutting down (a crash, a lost terminal), an `exit`
   handler sends SIGKILL to every job group it started.
+- When a job starts, its process group, its leader's start time and Pi's
+  pid and start time are recorded next to its log, until the group is
+  empty. When a session starts, groups recorded by a Pi that has ended
+  (killed with SIGKILL, for example) are killed, but only while the leader's
+  start time still matches, so a reused pid is never signalled. Only this
+  user's 0700 directories and 0600 records are read, and group ids of 1 or
+  less are refused. A Pi counts as ended only when its pid is gone or
+  belongs to a later process; a failed `ps` counts as running. A group id is
+  forgotten as soon as the group is seen empty. This lives in
+  `shared/process-groups`, which monitors use too.
+
+## Guards
+
+- At most `maxJobs` jobs and monitors, across every session of the process,
+  run at once, counting jobs whose shell exited while their leftover
+  processes still run; `run_in_background` past that is refused. A foreground
+  command can still run, and can still move to the background after
+  `autoBackgroundSeconds`. 16 is above the peak of 10 at once measured in
+  the user's Pi session logs.
+- A job whose log passes 5 GB is stopped, and its notice says so. So are the
+  processes a finished job left running, with a notice of their own.
+- A background job whose output has not changed for 10 seconds and that
+  stopped on an unfinished prompt line (`[y/N]`, `Password:`, `? Pick one`,
+  or a line ending in `? ` or `> `) sends one notice saying it may be waiting
+  for input.
+- A job being stopped does not report leftover processes while its SIGKILL
+  is still pending.
 - Tool output is drawn without terminal sequences or control characters, as
   Pi's own `bash` draws it.
 
@@ -56,6 +89,7 @@ Only the session that started a job can see, wait on or stop it.
 | Key | Default | Range | Does |
 |---|---|---|---|
 | `autoBackgroundSeconds` | 30 | 1-3,600 | Seconds before a running `bash` command moves to the background |
+| `maxJobs` | 16 | 1-64 | Most background jobs and monitors running at once |
 
 No commands or keys.
 
@@ -65,5 +99,11 @@ No commands or keys.
   settings are not applied: extensions cannot read them.
 - A process that calls `setsid` (or a daemon that does) leaves the job's
   process group, so stop, shutdown and the exit handler cannot reach it.
+- After a killed Pi, a job whose shell had already exited keeps what it
+  left running: without its leader the group cannot be proven to be the
+  job's.
+- The log size is checked once a second, so a very fast writer can pass
+  5 GB by up to a second's output.
+- A `sleep` inside `bash -c "..."` or `eval` is not seen.
 - A command's running time on its FleetView row counts from when it became a
   job; its notice counts from when it started.
