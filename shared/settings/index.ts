@@ -33,14 +33,17 @@ export interface RigSettings {
 }
 
 /** Why `value` is invalid for `setting`, or undefined when it is valid. */
-function problem(setting: Setting, value: unknown): string | undefined {
+export function problem(setting: Setting, value: unknown): string | undefined {
   switch (setting.type) {
     case "boolean":
       return typeof value === "boolean" ? undefined : "must be true or false";
     case "integer": {
-      const { min = -Infinity, max = Infinity } = setting;
+      const { min, max } = setting;
       if (!Number.isInteger(value)) return "must be an integer";
-      return (value as number) < min || (value as number) > max ? `must be between ${min} and ${max}` : undefined;
+      if ((min === undefined || (value as number) >= min) && (max === undefined || (value as number) <= max)) return undefined;
+      if (max === undefined) return `must be at least ${min}`;
+      if (min === undefined) return `must be at most ${max}`;
+      return `must be between ${min} and ${max}`;
     }
     case "enum":
       return setting.values.includes(value as string) ? undefined : `must be one of ${setting.values.join(", ")}`;
@@ -49,6 +52,10 @@ function problem(setting: Setting, value: unknown): string | undefined {
 
 const isObject = (x: unknown): x is Record<string, unknown> =>
   typeof x === "object" && x !== null && !Array.isArray(x);
+// Own properties only, so a name like "__proto__" is an ordinary key.
+const own = (o: Record<string, unknown>, k: string) => (Object.hasOwn(o, k) ? o[k] : undefined);
+const put = (o: Record<string, unknown>, k: string, v: unknown) =>
+  Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true });
 
 export function createRigSettings(agentDir: string): RigSettings {
   const path = join(agentDir, "rig.json");
@@ -89,7 +96,7 @@ export function createRigSettings(agentDir: string): RigSettings {
     } catch (e) {
       pending.add(`${(e as Error).message}; using defaults`);
     }
-    const raw = file[name];
+    const raw = own(file, name);
     if (raw !== undefined && !isObject(raw)) {
       pending.add(`${path}: section "${name}" must be an object; using defaults`);
     } else if (raw) {
@@ -111,15 +118,17 @@ export function createRigSettings(agentDir: string): RigSettings {
       },
       values: () => Object.fromEntries(values),
       set(key, value) {
+        if (sections.get(name) !== section) throw new Error(`rig section ${name} was redeclared; use the new handle`);
         const setting = byKey.get(key);
         const p = setting ? problem(setting, value) : "is not a known setting";
         if (p) throw new Error(`rig setting ${name}.${key} ${p}`);
         // Re-read so another session's changes to other keys survive.
         const current = read();
-        const sec = isObject(current[name]) ? current[name] : {};
+        const found = own(current, name);
+        const sec = isObject(found) ? found : {};
         if (value === setting!.default) delete sec[key];
-        else sec[key] = value;
-        if (Object.keys(sec).length) current[name] = sec;
+        else put(sec, key, value);
+        if (Object.keys(sec).length) put(current, name, sec);
         else delete current[name];
         mkdirSync(agentDir, { recursive: true });
         const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
