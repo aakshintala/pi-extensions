@@ -60,7 +60,28 @@ Expanded, each call looks like this:
   off by default, so registering it would add prompt tokens. When you enable
   `ls`, it keeps Pi's own look.
 
-No commands, keys or settings.
+## Thinking
 
-Hiding thinking into the group summary is
-[#57](https://github.com/aakshintala/pi-rig/issues/57).
+- **Hidden thinking renders nothing.** With thinking hidden (Ctrl+T), Pi's
+  "Thinking..." label and its blank line are gone, in messages with and
+  without text. A group whose message has thinking starts with `thought ·`:
+
+  ```
+   ⏺ thought · read 1 file
+  ```
+
+- **Shown thinking** starts with a `✻ Thinking` label line.
+- **Screen only.** Saved sessions and the model's context are unchanged.
+- **Guarded Pi patch** (one of the rig's three, #1). It wraps
+  `AssistantMessageComponent.prototype.updateContent` on Pi 0.87.x only, and
+  only when the message's children are exactly what Pi 0.87 builds; anything
+  else, or an error while restyling, keeps Pi's own render. A thinking block
+  you clicked open or closed keeps Pi's render; the message's other blocks are
+  still restyled.
+- **One patch per process.** It is installed once while any session, including
+  in-process subagent sessions, uses the extension, and removed with the last
+  one. `/new`, `/resume` and a `/reload` without the extension get Pi's stock
+  render; a `/reload` with a subagent session up runs the reloaded code. If
+  something else wraps the same method later, the patch goes inert instead.
+
+No commands, keys or settings.

@@ -5,6 +5,7 @@ import {
   createReadToolDefinition,
   createWriteToolDefinition,
   type ExtensionAPI,
+  VERSION,
 } from "@earendil-works/pi-coding-agent";
 import {
   diffBody,
@@ -15,6 +16,7 @@ import {
   toolRenderers,
   unifiedDiff,
 } from "../../shared/tool-display/index.ts";
+import { releaseHiddenThinking, useHiddenThinking } from "./thinking.ts";
 
 /** Spinner frame interval for running groups. */
 const SPIN_MS = 80;
@@ -65,7 +67,8 @@ export const RENDERERS: Record<string, ReturnType<typeof toolRenderers>> = {
   }),
 };
 
-export default function (pi: ExtensionAPI) {
+/** `piVersion` is Pi's own version; tests pass another to exercise the thinking patch's guard. */
+export default function (pi: ExtensionAPI, piVersion: string = VERSION) {
   // Execution stays Pi's own (each built-in resolves paths against the call's ctx.cwd);
   // only the renderers change. Registering a built-in's name replaces the built-in.
   // Not ls: Pi activates every registered extension tool, and ls is off by default,
@@ -94,7 +97,12 @@ export default function (pi: ExtensionAPI) {
     }
     groups.endRun();
   };
-  pi.on("session_start", (_e, ctx) => load(ctx.sessionManager.getBranch()));
+  // Hidden thinking (#57): patched while a session with this extension is live, so a
+  // /reload that drops the extension, /new and /resume never inherit it.
+  pi.on("session_start", (_e, ctx) => {
+    useHiddenThinking(groups, piVersion);
+    load(ctx.sessionManager.getBranch());
+  });
   pi.on("session_tree", (_e, ctx) => load(ctx.sessionManager.getBranch()));
   pi.on("message_update", (e) => groups.track(e.message));
   pi.on("message_end", (e) => groups.track(e.message));
@@ -107,6 +115,7 @@ export default function (pi: ExtensionAPI) {
     groups.endRun();
   });
   pi.on("session_shutdown", () => {
+    releaseHiddenThinking(groups);
     stopSpinner();
     groups.reset();
   });
