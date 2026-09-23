@@ -1,10 +1,10 @@
 // An agent's transcript for the fleet viewer (#68): its saved session drawn with Pi's
 // own message components, tool calls grouped as in the main chat (#56), and followed
 // live while the agent runs. It is pull-based: a render after the agent reports a change
-// reads its saved entries and its session's streaming message, so an unseen transcript
-// holds no listener and needs no disposal. Each agent keeps one transcript, reused by
-// every open.
-// ponytail: its ToolGroups stay indexed for the process; reset them if long runs view many agents.
+// appends the session entries added since the last one (a walk back from the leaf, never
+// a rescan) and redraws the streaming message, so it holds no listener. The viewer
+// builds one on each open and disposes it on close, which releases its tool groups.
+// It reads the agent's in-memory SessionManager only: no file is opened or written here.
 import {
   AssistantMessageComponent,
   createBashToolDefinition,
@@ -14,7 +14,6 @@ import {
   createLsToolDefinition,
   createReadToolDefinition,
   createWriteToolDefinition,
-  CustomMessageComponent,
   getAgentDir,
   getMarkdownTheme,
   sessionEntryToContextMessages,
@@ -29,21 +28,34 @@ import { Container, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
 import { ToolGroups } from "../../shared/tool-display/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
 
+/** Most messages drawn when a transcript opens; earlier ones are counted on one line. */
+export const OPEN_MESSAGES = 200;
+
 /** What a transcript reads from an agent. */
 export interface Source {
   manager: SessionManager;
   cwd: string;
   session?: AgentSession;
-  /** Tool definitions of its last session, for drawing calls once it is gone. */
-  tools?: Map<string, unknown>;
   /** Partial results of running calls, by call id. */
-  partial: Map<string, unknown>;
+  partial: Map<string, { isError?: boolean }>;
   /** Bumped on every session event. */
   version: number;
-  view?: Transcript;
 }
 
-/** Built-ins, for a transcript whose agent has not run in this process. */
+/**
+ * The tool definitions of every child session this process has run, the rig's own
+ * renderers included (they carry the group summaries), for drawing an agent's calls
+ * when it has no live session. Process-wide: a child restored after a restart and
+ * still queued has none of its own, but the running children that fill the queue do.
+ */
+const DEFS: Map<string, unknown> = ((globalThis as any)[Symbol.for("pi-rig.subagents.toolDefinitions")] ??= new Map());
+
+/** Records a child session's tool definitions (call when it opens). */
+export function rememberTools(session: AgentSession) {
+  for (const t of session.getAllTools()) DEFS.set(t.name, session.getToolDefinition(t.name));
+}
+
+/** Built-ins, when no child session has run in this process. */
 const BUILT_INS: Record<string, (cwd: string) => unknown> = {
   bash: createBashToolDefinition,
   read: createReadToolDefinition,
@@ -58,19 +70,22 @@ const userText = (m: any): string =>
   typeof m.content === "string" ? m.content : m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
 
 /**
- * The message with its own copy of each call's arguments: the renderers find a call's
- * groups by that object, so the child session's own groups never answer for this transcript.
+ * The message with its own deep copy of each call's arguments: the renderers find a call's
+ * groups by that object, so the child session's own groups never answer for this
+ * transcript, and later streaming updates never reach what is drawn.
  */
 const own = (m: any) => ({
   ...m,
-  content: m.content.map((b: any) => (b?.type === "toolCall" ? { ...b, arguments: { ...b.arguments } } : b)),
+  content: m.content.map((b: any) => (b?.type === "toolCall" ? { ...b, arguments: structuredClone(b.arguments ?? {}) } : b)),
 });
+
+const isMessage = (e: any) => e?.type === "message" || e?.type === "custom_message";
 
 class Transcript extends Container {
   private readonly saved = new Container();
   private readonly live = new Container();
   private readonly groups = new ToolGroups();
-  private shown: unknown[] = []; // saved entries drawn, in order
+  private last?: string; // id of the last entry drawn
   private tools: ToolExecutionComponent[] = [];
   private pending = new Map<string, ToolExecutionComponent>(); // saved calls without a result
   private streaming?: { component: AssistantMessageComponent; calls: Map<string, ToolExecutionComponent> };
@@ -78,33 +93,32 @@ class Transcript extends Container {
   private expanded: boolean;
   private readonly hide: boolean;
   private readonly pad: number;
-
-  private tui!: TUI;
-  private ui!: ExtensionUIContext;
   private readonly source: Source;
+  private readonly tui: TUI;
+  private readonly ui: ExtensionUIContext;
 
-  constructor(source: Source) {
+  constructor(source: Source, tui: TUI, ui: ExtensionUIContext) {
     super();
     this.source = source;
-    this.addChild(this.saved);
-    this.addChild(this.live);
-    const settings = SettingsManager.create(source.cwd, getAgentDir());
-    // ponytail: read once; Ctrl+T while viewing applies when the transcript is reopened.
-    this.hide = settings.getHideThinkingBlock();
-    this.pad = settings.getOutputPad();
-    this.expanded = false;
-  }
-
-  /** The viewer that shows it now. */
-  use(tui: TUI, ui: ExtensionUIContext) {
     this.tui = tui;
     this.ui = ui;
-    return this;
+    this.addChild(this.saved);
+    this.addChild(this.live);
+    // Read on each open, so Ctrl+T in the main chat applies from the next open.
+    const settings = SettingsManager.create(source.cwd, getAgentDir());
+    this.hide = settings.getHideThinkingBlock();
+    this.pad = settings.getOutputPad();
+    this.expanded = ui.getToolsExpanded();
+  }
+
+  /** The viewer closed it: its calls leave the process-wide group index. */
+  dispose() {
+    this.groups.reset();
   }
 
   private tool(call: any, m: any) {
     const src = this.source;
-    const definition = src.session?.getToolDefinition(call.name) ?? src.tools?.get(call.name) ?? BUILT_INS[call.name]?.(src.cwd);
+    const definition = src.session?.getToolDefinition(call.name) ?? DEFS.get(call.name) ?? BUILT_INS[call.name]?.(src.cwd);
     const c = new ToolExecutionComponent(call.name, call.id, call.arguments, {}, definition as any, this.tui, src.cwd);
     c.setExpanded(this.expanded);
     this.tools.push(c);
@@ -135,10 +149,40 @@ class Transcript extends Container {
       this.pending.get(message.toolCallId)?.updateResult(message);
       this.pending.delete(message.toolCallId);
     } else if (message.role === "custom" && message.display) {
-      const renderer = this.source.session?.extensionRunner.getMessageRenderer(message.customType);
-      this.saved.addChild(new CustomMessageComponent(message, renderer, getMarkdownTheme(), this.pad));
+      // Plain text with control sequences removed: a child's message never styles or moves the parent's screen.
+      const text = typeof message.content === "string" ? message.content : userText(message);
+      this.saved.addChild(new Spacer(1));
+      this.saved.addChild(new Text(this.ui.theme.fg("muted", text.split("\n").map(oneLine).join("\n")), this.pad, 0));
     }
     // ponytail: compaction and branch summaries are not drawn; add Pi's components for them if children compact.
+  }
+
+  /** Draws the entries added since the last sync. The first sync draws the last OPEN_MESSAGES messages. */
+  private appendEntries() {
+    const m = this.source.manager;
+    const leaf = m.getLeafId() ?? undefined;
+    if (leaf === this.last) return;
+    const up = (id: string) => m.getEntry(id)?.parentId ?? undefined;
+    const fresh: any[] = [];
+    let messages = 0;
+    let id = leaf;
+    for (; id && id !== this.last && messages < OPEN_MESSAGES; id = up(id)) {
+      const e = m.getEntry(id);
+      fresh.push(e);
+      if (isMessage(e)) messages++;
+    }
+    if (id !== this.last) {
+      // A first open, a branch switch or a burst past the limit: start over, counting what is left out.
+      this.saved.clear();
+      this.groups.reset();
+      this.tools = [];
+      this.pending.clear();
+      let earlier = 0;
+      for (; id; id = up(id)) if (isMessage(m.getEntry(id))) earlier++;
+      if (earlier) this.saved.addChild(new Text(this.ui.theme.fg("dim", `… ${earlier} earlier message${earlier === 1 ? "" : "s"}`), 1, 0));
+    }
+    for (const e of fresh.reverse()) for (const msg of sessionEntryToContextMessages(e)) this.add(msg);
+    this.last = leaf;
   }
 
   /** Brings the components up to date with the agent: new saved messages, the streaming one, pending steers. */
@@ -152,20 +196,10 @@ class Transcript extends Container {
     if (src.version === this.seen) return;
     this.seen = src.version;
 
-    const entries = src.manager.buildContextEntries();
-    if (this.shown.some((e, i) => entries[i] !== e)) {
-      // Rewritten history (a compaction): draw it again.
-      this.saved.clear();
-      this.groups.reset();
-      this.shown = [];
-      this.tools = [];
-      this.pending.clear();
-    }
-    for (const e of entries.slice(this.shown.length)) for (const m of sessionEntryToContextMessages(e)) this.add(m);
-    this.shown = entries;
+    this.appendEntries();
     for (const [id, c] of this.pending) {
       const partial = src.partial.get(id);
-      if (partial) c.updateResult({ ...(partial as any), isError: false }, true);
+      if (partial) c.updateResult({ ...(partial as any), isError: partial.isError ?? false }, true);
     }
 
     this.live.clear();
@@ -187,7 +221,8 @@ class Transcript extends Container {
         this.live.addChild(c);
       }
     } else if (this.streaming) {
-      this.tools = this.tools.filter((c) => ![...this.streaming!.calls.values()].includes(c));
+      const gone = new Set(this.streaming.calls.values());
+      this.tools = this.tools.filter((c) => !gone.has(c));
       this.streaming = undefined;
     }
     if (!session?.isStreaming) this.groups.endRun();
@@ -204,5 +239,5 @@ class Transcript extends Container {
   }
 }
 
-/** The agent's transcript, for the viewer showing it on `tui`. */
-export const transcript = (source: Source, tui: TUI, ui: ExtensionUIContext) => (source.view ??= new Transcript(source)).use(tui, ui);
+/** A new transcript of the agent for the viewer showing it on `tui`. The viewer calls its `dispose()` on close. */
+export const transcript = (source: Source, tui: TUI, ui: ExtensionUIContext) => new Transcript(source, tui, ui);

@@ -5,7 +5,7 @@
 // its own instance. The agents form a tree of objects: each instance holds its
 // session's node, found for a child through its SessionManager.
 // Its viewer content is its transcript (#68, transcript.ts). Worktrees and fork (#54) come later.
-import { existsSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
@@ -18,13 +18,15 @@ import {
   type BuildSystemPromptOptions,
   type ExtensionAPI,
   type ExtensionContext,
+  type ExtensionUIContext,
+  parseSessionEntries,
 } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { duration, fleet, isFinished, type FinalStatus } from "../../shared/fleet/index.ts";
 import { rigSettings } from "../../shared/settings/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
 import { toolRenderers, resultText } from "../../shared/tool-display/index.ts";
-import { transcript, type Source } from "./transcript.ts";
+import { rememberTools, transcript, type Source } from "./transcript.ts";
 
 const MARKER = "rig.subagent";
 /** Tokens and cost of a finished child, saved in its parent's session: the parent's next notice and `Session total:` count them. */
@@ -96,7 +98,11 @@ type Agent = Node & Source & {
 
 /** Agents by id while anything holds them (such as the viewer), so a resume keeps their open transcript. */
 const KNOWN = Symbol.for("pi-rig.subagents.known");
-const known: Map<string, WeakRef<Agent>> = ((globalThis as any)[KNOWN] ??= new Map());
+const remembered: Map<string, WeakRef<Agent>> = ((globalThis as any)[KNOWN] ??= new Map());
+/** Drops an agent's entry once it is collected. */
+const forget = new FinalizationRegistry<string>((id) => {
+  if (!remembered.get(id)?.deref()) remembered.delete(id);
+});
 
 /** Each agent by its SessionManager, so the child session's own instance finds its node. */
 const NODES = Symbol.for("pi-rig.subagents.nodes");
@@ -243,7 +249,7 @@ export default function (pi: ExtensionAPI) {
       parentId: "root" in a.parent ? (a.parent as Agent).id : undefined,
       status: a.state === "queued" ? "queued" : "running",
       activity: () => a.activity,
-      view: { transcript: (tui, ui) => transcript(a, tui as TUI, ui as any), showsSteers: true },
+      view: { transcript: (tui, ui) => transcript(a, tui as TUI, ui as ExtensionUIContext), showsSteers: true },
       stop: () => stop(a),
       steer: async (text) => {
         await message(a, text);
@@ -311,6 +317,7 @@ export default function (pi: ExtensionAPI) {
     try {
       try {
         const session = (a.session = await open(a, inherit));
+        rememberTools(session);
         a.shutDown = undefined;
         a.prompted = false;
         await session.bindExtensions({});
@@ -373,13 +380,10 @@ export default function (pi: ExtensionAPI) {
 
   async function close(a: Agent) {
     if (!a.session) return;
-    // Kept for its transcript, which draws the calls with these definitions once the session is gone.
-    const s = a.session;
-    a.tools = new Map(s.getAllTools().map((t) => [t.name, s.getToolDefinition(t.name)]));
     await shutdown(a);
     a.session.dispose();
     a.session = undefined;
-    a.version++;
+    changed(a); // an open transcript draws the final saved tail
   }
 
   function finish(a: Agent, text: string, error: string | undefined, s: Stats, total?: Omit<Stats, "ms">) {
@@ -461,28 +465,39 @@ export default function (pi: ExtensionAPI) {
     join(c.sessionManager.getSessionDir() || join(getAgentDir(), "sessions"), c.sessionManager.getSessionId());
 
   /** A child of this session saved by an earlier process: reopened from its session file. */
-  function restore(id: string, c: ExtensionContext): Agent | undefined {
-    // Still in memory (its transcript may be open): the same agent, under this session.
-    const held = known.get(id)?.deref();
-    if (held?.state === "done" && held.owner === c.sessionManager.getSessionId()) return Object.assign(held, { parent: node, root: "root" in node ? (node as Agent).root : top });
+  /** A saved child of this session: its file, read without writing, and its marker. */
+  function saved(id: string, c: ExtensionContext) {
     const dir = childDir(c);
     if (!/^[0-9a-f]{8}$/.test(id) || !existsSync(dir)) return undefined;
-    const file = readdirSync(dir).find((f) => f.endsWith(`_${id}.jsonl`));
-    if (!file) return undefined;
-    const manager = SessionManager.open(join(dir, file));
-    const marker: any = manager.getEntries().find((e) => e.type === "custom" && e.customType === MARKER);
-    const owner = c.sessionManager.getSessionId();
-    if (marker?.data?.agentId !== id || marker.data.parentSessionId !== owner) return undefined;
-    const saved = manager.buildSessionContext();
-    const model = saved.model && c.modelRegistry.find(saved.model.provider, saved.model.modelId);
+    const name = readdirSync(dir).find((f) => f.endsWith(`_${id}.jsonl`));
+    if (!name) return undefined;
+    const file = join(dir, name);
+    const marker: any = parseSessionEntries(readFileSync(file, "utf8")).find((e: any) => e.type === "custom" && e.customType === MARKER);
+    if (marker?.data?.agentId !== id || marker.data.parentSessionId !== c.sessionManager.getSessionId()) return undefined;
+    return { file, marker };
+  }
+
+  /** A finished child of this session, to resume: still in memory, or reopened from its session file. */
+  function restore(id: string, c: ExtensionContext): Agent | undefined {
+    // Still in memory (its transcript may be open): the same agent. The owner check keeps it under the
+    // session that spawned it; `node` is that session's node, new if the session was reopened.
+    const held = remembered.get(id)?.deref();
+    if (held?.state === "done" && held.owner === c.sessionManager.getSessionId()) return Object.assign(held, { parent: node, root: "root" in node ? (node as Agent).root : top });
+    const found = saved(id, c);
+    if (!found) return undefined;
+    const manager = SessionManager.open(found.file); // the resume writes to it
+    const context = manager.buildSessionContext();
+    const model = context.model && c.modelRegistry.find(context.model.provider, context.model.modelId);
     if (!model) return undefined;
-    return agent({ id, owner, depth: marker.data.depth ?? node.depth + 1, label: manager.getSessionName() ?? id, model, thinking: saved.thinkingLevel, state: "done", prompt: "", cwd: c.cwd, manager });
+    const owner = c.sessionManager.getSessionId();
+    return agent({ id, owner, depth: found.marker.data.depth ?? node.depth + 1, label: manager.getSessionName() ?? id, model, thinking: context.thinkingLevel, state: "done", prompt: "", cwd: c.cwd, manager });
   }
 
   /** A new agent below this session. */
   function agent(fields: Omit<Agent, "parent" | "root" | "children" | "stopped" | "activity" | "partial" | "version">): Agent {
     const a: Agent = { ...fields, parent: node, root: "root" in node ? (node as Agent).root : top, children: new Set(), stopped: false, activity: "", partial: new Map(), version: 0 };
-    known.set(a.id, new WeakRef(a));
+    remembered.set(a.id, new WeakRef(a));
+    forget.register(a, a.id);
     return a;
   }
 
@@ -561,7 +576,10 @@ export default function (pi: ExtensionAPI) {
       const known = search(node, p.id);
       let mine = false;
       for (let x: Node | undefined = known; x && "root" in x; x = x.parent) if ((x as Agent).owner === me) mine = true;
-      const a = known ? (mine ? known : undefined) : restore(p.id, c);
+      const a = known && mine ? known : undefined;
+      // Not running here: a finished child of this session, found without opening its file for writing.
+      const held = remembered.get(p.id)?.deref();
+      if (!known && ((held?.state === "done" && held.owner === me) || saved(p.id, c))) return reply(`Subagent ${p.id} already finished.`, p.id);
       if (!a) throw new Error(`No subagent ${p.id} below you.`);
       if (a.state === "done") return reply(`Subagent ${a.id} already finished.`, a.id);
       // An agent below a child belongs to that child's instance, which stops it.

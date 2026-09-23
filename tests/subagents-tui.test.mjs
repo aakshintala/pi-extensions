@@ -138,7 +138,7 @@ test("the viewer shows a running agent's transcript, follows it and its steer, a
   await tui.waitForScreen(viewing(done, " ● agent scout · done 0s · STATUS: DONE", "↑82 ↓30 R46 W82 CH36.7% 0.1%/128k (auto)                     (harness) harness-1"));
 });
 
-test("a finished agent's transcript opens from its saved session, and ctrl+o expands its groups", async (t) => {
+test("a finished agent's transcript opens from its saved session, ctrl+o expands its groups, and each open reads thinking visibility", async (t) => {
   const tui = await transcriptTui(t, [[SPAWN], "spawned", "read it"], [
     {
       content: [
@@ -158,6 +158,12 @@ test("a finished agent's transcript opens from its saved session, and ctrl+o exp
   const reads = [" ⏺ Read(notes.md)", "   ⎿  Read 2 lines", "      one", "      two", "", " ⏺ Read(todo.md)", "   ⎿  Read 1 line", "      three"];
   const expanded = [...reads, "", "", " $ echo hi", "", " hi", "", "", " found 3 notes", " STATUS: DONE", ""];
   await tui.waitForScreen(viewing(expanded, " ● agent scout · done 0s · STATUS: DONE", "↑82 ↓30 R46 W83 CH36.4% 0.1%/128k (auto)                     (harness) harness-1"));
+  // Thinking visibility is read on each open.
+  tui.keys("C-o", "Escape");
+  writeFileSync(join(tui.agentDir, "settings.json"), JSON.stringify({ quietStartup: true, hideThinkingBlock: false, extensions: WITH_DISPLAY }));
+  tui.keys("Down", "Down", "Enter");
+  const shown = [...TASK, "", "", " ✻ Thinking", " Where are they?", "", " ⏺ thought · read 2 files", "", "", " $ echo hi", "", " hi", "", "", " found 3 notes", " STATUS: DONE", ""];
+  await tui.waitForScreen(viewing(shown, " ● agent scout · done 0s · STATUS: DONE", "↑82 ↓30 R46 W83 CH36.4% 0.1%/128k (auto)                     (harness) harness-1"));
 });
 
 test("a running call's output shows as it comes, and ctrl+q then y in the viewer stops the agent", async (t) => {

@@ -938,8 +938,12 @@ test("a grandchild resumed after its parent finished counts in the parent's next
 });
 
 test("a transcript opened on a finished agent follows the resume its parent sends", { timeout: 20_000 }, async (t) => {
-  const { initTheme, theme } = await import("@earendil-works/pi-coding-agent");
+  const { initTheme } = await import("@earendil-works/pi-coding-agent");
+  const THEME = Symbol.for("@earendil-works/pi-coding-agent:theme");
+  const previous = globalThis[THEME];
+  t.after(() => (globalThis[THEME] = previous));
   initTheme("dark", false);
+  const theme = globalThis[THEME];
   const plain = (lines) => lines.map((l) => l.replace(/\x1b\][^\x07]*\x07/g, "").replace(/\x1b\[[0-9;]*m/g, "").trimEnd()).filter(Boolean);
   let id;
   let view;
@@ -964,4 +968,5 @@ test("a transcript opened on a finished agent follows the resume its parent send
   await session.prompt("go");
   const task = "End your final message with one line: STATUS: DONE, STATUS: DONE_WITH_CONCERNS, STATUS: BLOCKED, STATUS: NEEDS_CONTEXT.";
   assert.deepEqual(plain(view.render(200)), [" scout", ` ${task}`, " found notes", " STATUS: DONE", " and the dates", ` ${task}`, " no dates", " STATUS: DONE"]);
+  view.dispose();
 });
