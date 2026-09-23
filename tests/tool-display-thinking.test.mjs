@@ -23,7 +23,7 @@ import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall, scriptedSes
 
 const { default: toolDisplay } = await import("../extensions/tool-display/index.ts");
 const { useHiddenThinking, releaseHiddenThinking } = await import("../extensions/tool-display/thinking.ts");
-const { Spacer } = await import("@earendil-works/pi-tui");
+const { Container, MouseRegion, Spacer } = await import("@earendil-works/pi-tui");
 
 initTheme("dark", false);
 const plain = (s) => s.replace(/\x1b\]133;[A-C]\x07/g, "").replace(/\x1b\[[0-9;]*m/g, "").trimEnd();
@@ -115,23 +115,39 @@ test("off Pi 0.87.x the render is Pi's own", (t) => {
   for (const [name, [m]] of Object.entries(SHAPES)) assert.deepEqual(render(m, true), STOCK[name].hidden, name);
 });
 
-test("children of a shape Pi 0.87 does not build keep Pi's render", (t) => {
-  // A future Pi that adds a child: the patch sits on top of it and must leave it alone.
-  const proto = AssistantMessageComponent.prototype;
-  const stock = proto.updateContent;
-  proto.updateContent = function (...a) {
-    stock.apply(this, a);
-    this.contentContainer.addChild(new Spacer(1));
-  };
-  const future = Object.fromEntries(Object.entries(SHAPES).map(([k, [m]]) => [k, [render(m, true), render(m, false)]]));
-  const owner = {};
-  t.after(() => {
-    releaseHiddenThinking(owner);
-    proto.updateContent = stock;
+// Future Pis that change the children: one more child, another kind in a slot, or
+// another component inside a thinking block's click region.
+const FUTURES = {
+  "an extra child": (kids) => kids.push(new Spacer(1)),
+  "another kind of child": (kids) => kids.length && (kids[0] = new Container()),
+  "another thinking component": (kids) => {
+    for (const k of kids.filter((k) => k instanceof MouseRegion)) {
+      const box = new Container();
+      box.addChild(k.child);
+      k.child = box;
+    }
+  },
+};
+
+for (const [change, alter] of Object.entries(FUTURES)) {
+  test(`children of a shape Pi 0.87 does not build keep Pi's render: ${change}`, (t) => {
+    // The patch sits on top of that Pi and must leave its render alone.
+    const proto = AssistantMessageComponent.prototype;
+    const stock = proto.updateContent;
+    proto.updateContent = function (...a) {
+      stock.apply(this, a);
+      alter(this.contentContainer.children);
+    };
+    const future = Object.fromEntries(Object.entries(SHAPES).map(([k, [m]]) => [k, [render(m, true), render(m, false)]]));
+    const owner = {};
+    t.after(() => {
+      releaseHiddenThinking(owner);
+      proto.updateContent = stock;
+    });
+    useHiddenThinking(owner, "0.87.1");
+    for (const [name, [m]] of Object.entries(SHAPES)) assert.deepEqual([render(m, true), render(m, false)], future[name], name);
   });
-  useHiddenThinking(owner, "0.87.1");
-  for (const [name, [m]] of Object.entries(SHAPES)) assert.deepEqual([render(m, true), render(m, false)], future[name], name);
-});
+}
 
 test("the patch is applied once while any session uses it and restored after the last", (t) => {
   const [a, b] = [{}, {}];
