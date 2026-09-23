@@ -11,7 +11,7 @@ const SKILLS = new URL("./fixtures/inline-skills/skills", import.meta.url).pathn
 
 // Each reply records the request it answers: the text of every message sent. A turn is
 // a count of plain replies, or an array of reply functions run with the session.
-function start(t, turns) {
+function start(t, turns, entries = []) {
   const requests = [];
   let session;
   const say = () => fauxAssistantMessage(fauxText("ok"));
@@ -25,6 +25,7 @@ function start(t, turns) {
     cpSync(SKILLS, join(s.cwd, "skills"), { recursive: true });
     const errors = [];
     session = s.session;
+    for (const [type, data] of entries) s.session.sessionManager.appendCustomEntry(type, data);
     await s.session.bindExtensions({ uiContext: { notify: (m, level) => errors.push([level, m]) }, mode: "tui" });
     return { ...s, requests, errors };
   });
@@ -120,4 +121,12 @@ test("a /skill:name prompt counts its skill as loaded", async (t) => {
   await session.prompt("/skill:tdd go");
   await session.prompt("again /tdd");
   assert.deepEqual(skillMessages(requests[1]), []);
+});
+
+test("skills upstream recorded as loaded in a branch are not loaded again", async (t) => {
+  const { session, requests } = await start(t, 1, [["loaded-skill", { name: "tdd", source: "tool-result" }]]);
+  await session.prompt("use /tdd and /grilling");
+  const [message] = skillMessages(requests[0]);
+  assert.doesNotMatch(message, /Skill `tdd`/);
+  assert.match(message, /Skill `grilling`/);
 });

@@ -109,6 +109,8 @@ function restoreLoaded(ctx: ExtensionContext): Set<string> {
   for (const e of ctx.sessionManager.getBranch() as any[]) {
     if (e.type === "custom_message" && e.customType === MESSAGE_TYPE) {
       for (const s of e.details?.skills ?? []) if (s?.name) loaded.add(s.name);
+    } else if (e.type === "custom" && e.customType === "loaded-skill" && typeof e.data?.name === "string") {
+      loaded.add(e.data.name); // written by upstream when the agent read a skill file
     } else if (e.type === "message" && e.message?.role === "user") {
       for (const name of blockNames(textOf(e.message)) ?? []) loaded.add(name);
     }
