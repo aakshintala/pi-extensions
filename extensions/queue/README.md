@@ -8,7 +8,9 @@ editor: nothing is replaced.
 Messages you submit while the agent works are held here instead of in Pi's
 native queue:
 
-- Enter queues a steering message, delivered at the next turn boundary.
+- Enter queues a steering message, delivered at the next turn boundary. A
+  `bash` command running in the foreground moves to the background, so that
+  boundary comes at once (see `extensions/jobs`).
 - Option+Enter queues a follow-up, delivered after the run.
 - `/compact`, `/compact <instructions>` and `/reload` become command rows (⚙).
   They run once the agent is idle, in order, and rows queued after them wait.

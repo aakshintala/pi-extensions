@@ -3,7 +3,8 @@
 // formatting, truncation and PI_* variables stay Pi's. Each command writes to a
 // log file; one still running after `autoBackgroundSeconds`, or started with
 // `run_in_background`, becomes a job: a fleet `shell` row whose end is one notice.
-// Guards and crash clean-up are #49 (guards.ts), monitor is #50, Ctrl+B is #51.
+// Guards and crash clean-up are #49 (guards.ts), monitor is #50. A foreground
+// command is a fleet foreground: Ctrl+B and a queued steer background it (#51).
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, fstatSync, mkdtempSync, openSync, readSync, rmdirSync, rmSync, statSync } from "node:fs";
@@ -233,7 +234,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** Pi's bash backend: runs the command as a job, in the foreground until it ends or is backgrounded. */
-  const operations = (owner: string, runInBackground: boolean, handle: { job?: Job; auto?: number }) => ({
+  const operations = (owner: string, runInBackground: boolean, handle: { job?: Job; head?: string }) => ({
     exec: (command: string, cwd: string, o: { onData(data: Buffer): void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv }) =>
       new Promise<{ exitCode: number }>((resolve, reject) => {
         if (o.signal?.aborted) return reject(new Error("aborted"));
@@ -269,16 +270,21 @@ export default function (pi: ExtensionAPI) {
         const poll = setInterval(drain, POLL_MS);
         const onAbort = () => void stop(j);
         o.signal?.addEventListener("abort", onAbort, { once: true });
-        const seconds = autoSeconds();
-        const auto = t.setTimeout(() => {
-          if (j.status) return;
-          handle.auto = seconds;
+        // The auto-background timer, Ctrl+B and a steer submitted meanwhile (through fleet) all move it here.
+        // A child that has exited but not settled yet (its exit event before settle's microtask) finishes inline.
+        const move = (head: string) => {
+          if (j.status || !j.fg || j.child.exitCode !== null || j.child.signalCode !== null) return;
+          handle.head = head;
           drain();
           end();
           background(j);
           reject(handle);
-        }, seconds * 1000);
+        };
+        const seconds = autoSeconds();
+        const auto = t.setTimeout(() => move(`Still running after ${seconds}s, so it moved to the background`), seconds * 1000);
+        const unlist = fleet().foreground(owner, () => move("Moved to the background"));
         const end = () => {
+          unlist();
           clearInterval(poll);
           t.clearTimeout(auto);
           o.signal?.removeEventListener("abort", onAbort);
@@ -326,14 +332,14 @@ export default function (pi: ExtensionAPI) {
         );
       const full = p.run_in_background ? tooManyJobs() : undefined;
       if (full) throw new Error(full);
-      const handle: { job?: Job; auto?: number } = {};
+      const handle: { job?: Job; head?: string } = {};
       const def = createBashToolDefinition(ctx.cwd, { operations: operations(ctx.sessionManager.getSessionId(), !!p.run_in_background, handle) });
       try {
         return await def.execute(toolCallId, { command: p.command, timeout: p.timeout }, signal, onUpdate, ctx);
       } catch (e) {
         if (e !== handle) throw e;
         const j = handle.job!;
-        const head = handle.auto ? `Still running after ${handle.auto}s, so it moved to the background as job ${j.id}.` : `Started job ${j.id}.`;
+        const head = handle.head ? `${handle.head} as job ${j.id}.` : `Started job ${j.id}.`;
         return reply(`${head} Log: ${j.log}\nA notice arrives when it ends.`, { id: j.id, log: j.log });
       }
     },

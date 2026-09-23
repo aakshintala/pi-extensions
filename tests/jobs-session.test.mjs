@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage, fauxText, fauxToolCall, scriptedSession } from "./helpers/session.mjs";
 import { liveGroup } from "./helpers/tui.mjs";
@@ -189,6 +190,55 @@ test("the default auto-background wait is 30 s", async (t) => {
   await s.timers.fire(30_000);
   await run;
   assert.match(s.results()[0][1], /^Still running after 30s/);
+});
+
+test("Ctrl+B backgrounds a foreground command: its call returns the job ID and log path", async (t) => {
+  let result;
+  const s = await start(t, [
+    calls(["bash", { command: `echo early; ${hold("go")}; echo late` }]),
+    (context) => ((result = lastText(context)), says("waiting")()),
+    () => (writeFileSync(join(s.cwd, "go"), ""), says("still waiting")()),
+    says("done"),
+  ]);
+  const run = s.session.prompt("go");
+  await until(() => fleet().foregrounds() === 1, "the foreground command");
+  fleet().backgroundAll(); // what Ctrl+B calls
+  await run;
+  const id = s.jobId(result);
+  const log = s.logOf(result);
+  assert.equal(result, `Moved to the background as job ${id}. Log: ${log}\nA notice arrives when it ends.`);
+  assert.equal(readFileSync(log, "utf8"), "early\nlate\n");
+  assert.deepEqual(s.notices().filter((n) => n.startsWith("Job ")), [`Job ${id} completed (exit 0) after 0s. Log: ${log}`]);
+});
+
+test("a steer in another session leaves the command in the foreground", async (t) => {
+  const s = await start(t, [calls(["bash", { command: `echo early; ${hold("go")}; echo late` }]), says("ok")]);
+  const run = s.session.prompt("go");
+  await until(() => fleet().foregrounds() === 1, "the foreground command");
+  fleet().backgroundAll("another session");
+  writeFileSync(join(s.cwd, "go"), "");
+  await run;
+  assert.deepEqual(s.results(), [[false, "early\nlate\n"]]);
+  assert.equal(fleet().items().length, 0);
+});
+
+test("Ctrl+B after the command exited, before its exit settled, returns its output inline", async (t) => {
+  // Presses Ctrl+B from an exit listener of the command's shell: it has exited, but the jobs
+  // extension has not settled it yet.
+  const cp = createRequire(import.meta.url)("node:child_process");
+  const spawn = cp.spawn;
+  cp.spawn = (...a) => {
+    const child = spawn(...a);
+    if (JSON.stringify(a).includes("exit-race")) child.once("exit", () => fleet().backgroundAll());
+    return child;
+  };
+  syncBuiltinESMExports();
+  t.after(() => ((cp.spawn = spawn), syncBuiltinESMExports()));
+  const s = await start(t, [calls(["bash", { command: "echo exit-race" }]), says("ok")]);
+  await s.session.prompt("go");
+  assert.deepEqual(s.results(), [[false, "exit-race\n"]]);
+  assert.deepEqual(s.notices(), []);
+  assert.equal(fleet().items().length, 0);
 });
 
 test("a failure notice carries the last 20 lines, cut to 2,000 characters", async (t) => {

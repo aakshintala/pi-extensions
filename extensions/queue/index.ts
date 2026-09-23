@@ -304,6 +304,8 @@ export default function (pi: ExtensionAPI) {
     if (!event.streamingBehavior) return { action: "continue" };
     rows.push({ id: nextId++, lane: event.streamingBehavior, text: event.text, ...(event.images?.length && { images: event.images }) });
     draw();
+    // A steer should not wait on a running command: it moves to the background, its tool call returns, and the turn ends.
+    if (event.streamingBehavior === "steer") fleet().backgroundAll(c.sessionManager.getSessionId());
     return { action: "handled" };
   });
 

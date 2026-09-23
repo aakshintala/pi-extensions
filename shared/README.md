@@ -134,7 +134,8 @@ routing does not depend on load order.
 call once it ends or is backgrounded. The owner's detach (its session
 shutting down) drops its commands. The fleet extension binds Ctrl+B and calls
 `backgroundAll()`, which runs each `background` once and drops one that throws;
-`foregrounds()` counts them, and the hint shows while it is above 0.
+`foregrounds()` counts them, and the hint shows while it is above 0. The queue
+calls `backgroundAll(owner)` on a steer, which moves only that session's.
 
 ### `git/`
 

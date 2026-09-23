@@ -103,3 +103,12 @@ test("backgroundAll calls each command once from one snapshot and drops one that
   fleet.backgroundAll();
   assert.deepEqual(called, ["bad", "good", "good", "added during the press"]);
 });
+
+test("backgroundAll(owner) backgrounds only that session's commands", () => {
+  const fleet = createFleet();
+  const called = [];
+  fleet.foreground("s1", () => called.push("s1"));
+  fleet.foreground("s2", () => called.push("s2"));
+  fleet.backgroundAll("s2");
+  assert.deepEqual(called, ["s2"]);
+});

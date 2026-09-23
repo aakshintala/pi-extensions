@@ -92,8 +92,11 @@ export interface Fleet {
   foreground(owner: string, background: () => void): () => void;
   /** How many foreground commands there are. */
   foregrounds(): number;
-  /** Calls every foreground command's `background`, from one snapshot. One that throws is dropped. Only the fleet extension calls it. */
-  backgroundAll(): void;
+  /**
+   * Calls every foreground command's `background`, from one snapshot; with `owner`, only that
+   * session's. One that throws is dropped. The fleet extension calls it on Ctrl+B, the queue on a steer.
+   */
+  backgroundAll(owner?: string): void;
 }
 
 /**
@@ -201,8 +204,9 @@ export function createFleet(): Fleet {
       return () => drop(entry);
     },
     foregrounds: () => foregrounds.size,
-    backgroundAll() {
+    backgroundAll(owner) {
       for (const entry of [...foregrounds]) {
+        if (owner !== undefined && entry.owner !== owner) continue;
         try {
           entry.background();
         } catch {

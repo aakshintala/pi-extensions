@@ -2,8 +2,8 @@
 
 Background shell work: `bash` moves long commands into the background as jobs,
 and `jobs` lists, waits on and stops them. It replaces `pi-patty-bg-tasks`.
-Spec: #30. Built in #48 and #49 (guards and crash clean-up); `monitor` (#50)
-and Ctrl+B (#51) come later.
+Spec: #30. Built in #48, #49 (guards and crash clean-up) and #51
+(backgrounding a running command); `monitor` is its own extension.
 
 ## Tools
 
@@ -15,6 +15,12 @@ and Ctrl+B (#51) come later.
     the call returns its job ID and log path.
   - `timeout` is a hard limit in seconds that kills the command, also after it
     became a job. The job then fails as timed out.
+  - Ctrl+B moves every running foreground command to the background. Each
+    call returns its job ID and log path.
+  - A steering message submitted while a command runs (through the queue)
+    moves that session's foreground commands to the background too, so the
+    turn ends and the message is delivered as steering, without an abort.
+    A follow-up (Option+Enter) waits as usual.
   - Esc kills a foreground command.
   - A bare `sleep` is refused with a pointer to polling loops, `jobs wait`,
     `run_in_background` and `monitor`. `sleep` inside a `while` or `until`
@@ -91,7 +97,7 @@ Only the session that started a job can see, wait on or stop it.
 | `autoBackgroundSeconds` | 30 | 1-3,600 | Seconds before a running `bash` command moves to the background |
 | `maxJobs` | 16 | 1-64 | Most background jobs and monitors running at once |
 
-No commands or keys.
+No commands. Ctrl+B is bound by the fleet extension.
 
 ## Limits
 
