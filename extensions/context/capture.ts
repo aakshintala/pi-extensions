@@ -77,9 +77,10 @@ interface CapturePreparation {
 }
 
 /**
- * Lifecycle of the single probe attempt. A timeout settles it at once, so no
- * later run is treated as the probe's unless it carries the probe token: a
- * probe run arriving late is still claimed, aborted, and sanitized.
+ * Lifecycle of the single probe attempt. The probe's run is recognised by the
+ * token it carries, never by the phase: a timeout ends the attempt's wait, but
+ * a probe run arriving late is still aborted and scrubbed, and a run without
+ * the token (a user turn) is never touched.
  */
 type ProbePhase = "idle" | "waiting" | "running" | "settled";
 
@@ -181,7 +182,7 @@ export class SilentProbeState {
 	 * aborted. A turn without the probe token is never ours, whatever the phase.
 	 */
 	public shouldAbortTurn(token: ProbeToken | undefined): boolean {
-		return this.isCurrentRun && this.ownsToken(token);
+		return this.ownsToken(token);
 	}
 
 	/** Defensive copies of the recorded probe message identities. */
@@ -215,8 +216,7 @@ export class SilentProbeState {
 			this.resolveCompletion = resolve;
 		});
 		this.timeout = setTimeout(() => {
-			// Leave the waiting or running state at once, so no later turn is aborted.
-			this.phase = "settled";
+			// Only the wait ends: the late probe run is still aborted and scrubbed by token.
 			this.resolve({ status: "failed", reason: "Silent probe timed out." });
 		}, timeoutMs);
 		this.attempt = { started: true, token: createProbeToken(), completion };
@@ -248,8 +248,8 @@ export class SilentProbeState {
 	}
 
 	/** Record probe user/assistant identities as their message events arrive. */
-	public recordMessage(message: ContextEvent["messages"][number]): void {
-		if (!this.isCurrentRun || (message.role !== "user" && message.role !== "assistant")) return;
+	public recordMessage(message: ContextEvent["messages"][number], token: ProbeToken | undefined): void {
+		if (!this.ownsToken(token) || (message.role !== "user" && message.role !== "assistant")) return;
 		const identity = { role: message.role, timestamp: message.timestamp } satisfies SyntheticMessageIdentity;
 		this.identities.set(identityKey(identity), identity);
 	}
@@ -261,8 +261,9 @@ export class SilentProbeState {
 	 */
 	public sanitizeMessage(
 		message: ContextEvent["messages"][number],
+		token: ProbeToken | undefined,
 	): ContextEvent["messages"][number] | undefined {
-		if (!this.isCurrentRun) return undefined;
+		if (!this.ownsToken(token)) return undefined;
 		if (message.role === "user") return this.blankProbePrompt(message);
 		if (message.role === "assistant") return this.blankProbeAbort(message);
 		return undefined;

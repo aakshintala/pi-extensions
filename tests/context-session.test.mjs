@@ -83,3 +83,40 @@ test("injections include a system message another extension adds to the request"
   await session.prompt("/context injections");
   assert.match(screens[0], /unattributed \.+ 5\n {2}└─ system message \.+ 5\n/);
 });
+
+test("a probe that arrives after its 5 s timeout is still aborted and leaves no rows", async (t) => {
+  let reached, release, settled;
+  const atProbe = new Promise((r) => (reached = r));
+  const gate = new Promise((r) => (release = r));
+  const probeDone = new Promise((r) => (settled = r));
+  // Loaded after /context: holds the probe run inside before_agent_start, after
+  // /context has claimed it, until the test has fired the timeout.
+  const slow = (pi) => {
+    pi.on("before_agent_start", async (event) => {
+      if (event.prompt !== "") return;
+      reached();
+      await gate;
+    });
+    // Pi defers prompts made while it is still emitting agent_settled; resolve once it is done.
+    pi.on("agent_settled", () => void setImmediate(settled));
+  };
+  const { session, faux } = await scriptedSession(t, { extensions: [CONTEXT, slow], replies: [fauxAssistantMessage("hi")] });
+  const screens = attachUi(session);
+  t.mock.timers.enable({ apis: ["setTimeout"] }); // the injected clock for the probe timeout
+
+  const command = session.prompt("/context");
+  await atProbe;
+  t.mock.timers.tick(5_000); // the probe times out; /context falls back
+  await command;
+  assert.match(screens[0], /Silent probe timed out/);
+
+  t.mock.timers.reset();
+  release(); // the late probe run goes on
+  await probeDone;
+  assert.equal(faux.state.callCount, 0); // aborted before the model was called
+  assert.deepEqual(transcript(session), []);
+
+  await session.prompt("hello");
+  console.log(session.isIdle, JSON.stringify(session.sessionManager.getEntries().map(e=>[e.type,e.message?.role,e.message?.content,e.message?.stopReason,e.message?.errorMessage])));
+  assert.deepEqual(transcript(session), ["user: hello", "assistant: hi"]);
+});

@@ -87,11 +87,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_start", (event) => {
-		probe.recordMessage(event.message);
+		probe.recordMessage(event.message, readProbeToken());
 	});
 
 	pi.on("message_end", (event) => {
-		const message = probe.sanitizeMessage(event.message);
+		const message = probe.sanitizeMessage(event.message, readProbeToken());
 		return message === undefined ? undefined : { message };
 	});
 
