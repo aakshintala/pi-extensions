@@ -57,22 +57,24 @@ const ours = (pid: number) => {
   }
 };
 
-/** A process's start time as `ps` prints it, or undefined when it cannot be read. */
+/** A process's start time as `ps` prints it, or undefined when it cannot be read in PS_MS. */
 const PS = ["-o", "lstart=", "-p"];
+const PS_MS = 1000;
 const PS_ENV = () => ({ ...process.env, LC_ALL: "C", TZ: "UTC" });
 export function startTimeSync(pid: number) {
   try {
-    return execFileSync("ps", [...PS, String(pid)], { env: PS_ENV(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || undefined;
+    return execFileSync("ps", [...PS, String(pid)], { env: PS_ENV(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: PS_MS }).trim() || undefined;
   } catch {}
 }
 export const startTime = (pid: number) =>
-  new Promise<string | undefined>((resolve) => execFile("ps", [...PS, String(pid)], { env: PS_ENV() }, (error, out) => resolve(error ? undefined : out.trim() || undefined)));
+  new Promise<string | undefined>((resolve) => execFile("ps", [...PS, String(pid)], { env: PS_ENV(), timeout: PS_MS }, (error, out) => resolve(error ? undefined : out.trim() || undefined)));
 
 /**
  * Starts tracking a group: the exit handler kills it, it counts toward the cap if `counted`,
  * and its crash record is written now, before anything can kill this Pi: the group, its
  * leader's start time, and this Pi's pid and start time. Returns `g`.
- * ponytail: two `ps` runs per spawn (one after the first), a few ms each.
+ * ponytail: two `ps` runs per spawn (one after the first), a few ms each; a hung `ps` is cut
+ * at PS_MS, and the group then has no record: its start time is unknown, so it is never reaped.
  */
 export function track<G extends Group>(g: G): G {
   if (!g.pgid || g.pgid <= 1) return ((g.pgid = undefined), g);

@@ -648,6 +648,26 @@ test("each job's group and start time are recorded until its group is empty, lin
   assert.equal(existsSync(record), false, "the empty group is forgotten");
 });
 
+test("a hanging ps delays a spawn by at most its 1 s timeout, and no record is written", async (t) => {
+  const { startTimeSync, track } = await import("../shared/process-groups/index.ts");
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-jobs-ps-")));
+  const child = spawn("tail", ["-f", "/dev/null"], { detached: true, stdio: "ignore" });
+  const path = process.env.PATH;
+  t.after(() => {
+    process.env.PATH = path;
+    rmSync(bin, { recursive: true, force: true });
+    return new Promise((exited) => (child.once("exit", exited), process.kill(-child.pid, "SIGKILL")));
+  });
+  writeFileSync(join(bin, "ps"), "#!/bin/sh\nexec sleep 10\n", { mode: 0o755 });
+  process.env.PATH = `${bin}:${path}`;
+  const began = Date.now();
+  assert.equal(startTimeSync(child.pid), undefined);
+  track({ child, pgid: child.pid, record: join(bin, "x.pid") });
+  const took = Date.now() - began;
+  assert.ok(took < 6000, `up to three ps runs (this one, Pi's and the leader's) took ${took} ms`); // 30 s without the timeout
+  assert.equal(existsSync(join(bin, "x.pid")), false, "an unknown start time writes no record");
+});
+
 test("a killed Pi's jobs and monitors are reaped on the next start; nothing else is", async (t) => {
   const box = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-jobs-reap-")));
   const strays = [];

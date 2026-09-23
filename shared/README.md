@@ -178,4 +178,6 @@ if (pastOutputCap(log)) { /* stop it */ }
   still matches. Malformed records are deleted. Jobs call it on
   `session_start`.
 - `startTime(pid)` and `startTimeSync(pid)` give `ps -o lstart=` in UTC, or
-  undefined.
+  undefined when `ps` fails or takes over 1 s. An unknown start time never
+  kills: `track` writes no record, and `reap` keeps a record whose
+  process still runs.
