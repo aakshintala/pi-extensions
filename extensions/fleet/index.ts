@@ -121,7 +121,6 @@ export default function (pi: ExtensionAPI) {
       viewer.steer(event.text);
       return { action: "handled" };
     }
-    if (event.source !== "extension") fleet().prune();
     return undefined;
   });
 
@@ -252,6 +251,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     if (index >= end) return undefined;
     selected = index;
     choose(all[index]);
+    hold();
     return { handled: true, render: true };
   });
 
@@ -262,7 +262,14 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     else viewer.close();
   };
 
+  // The selected item does not decay (#137): tell the registry, and follow it when rows above it leave.
+  const hold = () => {
+    registry.selected = focused ? current()[selected]?.item?.id : undefined;
+  };
+
   const redraw = () => {
+    const held = current().findIndex((r) => r.item && r.item.id === registry.selected);
+    if (held >= 0) selected = held;
     const shown = viewer.active();
     if (shown && !registry.get(shown)) viewer.close(); // pruned: nothing left to show
     viewer.refresh(); // a producer update often means new log output
@@ -273,11 +280,17 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
       timer = undefined;
     }
     if (current().length === 1) focused = false;
+    hold();
     tui?.requestRender();
   };
   const unsubscribe = registry.subscribe(redraw);
 
   const unlisten = ctx.ui.onTerminalInput((data) => {
+    const result = key(data);
+    hold();
+    return result;
+  });
+  function key(data: string) {
     if (data.startsWith("\x1b[<") || isKeyRelease(data)) return undefined;
     checkCtrlB(ctx);
     if (viewer.overlay()) focused = false; // the overlay covers FleetView and takes the keys
@@ -306,7 +319,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     }
     tui?.requestRender();
     return { consume: true };
-  });
+  }
 
   ctx.ui.setWidget(
     "fleet",
@@ -325,6 +338,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     viewer.close();
     unsubscribe();
     unlisten();
+    registry.selected = undefined;
     if (timer) clearInterval(timer);
     timer = undefined;
     tui = undefined;

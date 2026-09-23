@@ -3,6 +3,8 @@
 // both see the one registry.
 import { test } from "node:test";
 import assert from "node:assert";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { liveGroup, startTui } from "./helpers/tui.mjs";
 
@@ -85,7 +87,7 @@ test("control sequences are stripped from every row", async (t) => {
   ]));
 });
 
-test("finished items stay until the next user prompt", async (t) => {
+test("finished rows leave 30 s after they finish, without a prompt; a prompt does not remove them", async (t) => {
   const tui = await start(t, { replies: ["ok"] });
   await tui.fx(
     { add: "a", kind: "agent", label: "scout" },
@@ -96,34 +98,59 @@ test("finished items stay until the next user prompt", async (t) => {
     { clock: 7 },
     { finish: "b", status: "stopped", result: "stopped by user" },
   );
-  const withFinished = idle([
+  await tui.waitForScreen(idle([
     " ● main",
     "   agent scout · done 5s · found 3 files",
     "   shell build · stopped 7s · stopped by user",
     "   monitor ci · 7s",
-  ]);
-  await tui.waitForScreen(withFinished);
-  await tui.fx({ clock: 9 }); // a command is not a prompt
-  await tui.waitForScreen(withFinished.replace("ci · 7s", "ci · 9s"));
+  ]));
 
   tui.type("go");
   tui.keys("Enter");
   await tui.waitForEvent("agent_end");
-  await tui.waitForScreen(pad([
-    "",
-    " go",
-    "",
-    "",
-    " ok",
-    "",
-    BORDER,
-    "",
-    BORDER,
+  const chat = (fleet) => pad(["", " go", "", "", " ok", "", BORDER, "", BORDER, ...fleet, "~/cwd", "↑2 ↓1 W2 CH0.0% 0.0%/128k (auto)                                       harness-1"]);
+  await tui.waitForScreen(chat([
     " ● main",
-    "   monitor ci · 9s",
-    "~/cwd",
-    "↑2 ↓1 W2 CH0.0% 0.0%/128k (auto)                                       harness-1",
+    "   agent scout · done 5s · found 3 files",
+    "   shell build · stopped 7s · stopped by user",
+    "   monitor ci · 7s",
   ]));
+
+  await tui.fx({ clock: 34.9 });
+  await tui.waitForScreen(chat([
+    " ● main",
+    "   agent scout · done 5s · found 3 files",
+    "   shell build · stopped 7s · stopped by user",
+    "   monitor ci · 34s",
+  ]));
+  await tui.fx({ clock: 35 }); // 30 s after scout finished
+  await tui.waitForScreen(chat([" ● main", "   shell build · stopped 7s · stopped by user", "   monitor ci · 35s"]));
+  await tui.fx({ clock: 37 });
+  await tui.waitForScreen(chat([" ● main", "   monitor ci · 37s"]));
+});
+
+test("a selected finished row stays until the selection leaves it, then 30 s more", async (t) => {
+  const tui = await start(t);
+  const later = join(tui.home, "later");
+  await tui.fx(
+    { add: "a", kind: "shell", label: "build" },
+    { add: "b", kind: "shell", label: "lint" },
+    { finish: "a", status: "completed", result: "ok" },
+    { finish: "b", status: "completed", result: "ok" },
+    { clockWhen: later, clock: 100 },
+  );
+  tui.keys("Down", "Down", "Down"); // lint is selected; build, above it, is not
+  writeFileSync(later, "");
+  await tui.waitForEvent("clock");
+  const selected = idle([" ● main", "›  shell lint · done 0s · ok"]);
+  await tui.waitForScreen(selected); // build left; the selection stays on lint
+  tui.keys("Escape"); // leaves it at 100 s
+  const left = idle([" ● main", "   shell lint · done 0s · ok"]);
+  await tui.waitForScreen(left);
+  await tui.fx({ clock: 129 });
+  await tui.waitForScreen(left);
+  await tui.fx({ clock: 130 });
+  await tui.waitForScreen(idle());
 });
 
 test("a finished item stays finished when its producer updates it", async (t) => {

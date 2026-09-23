@@ -4,7 +4,7 @@ FleetView: one list below the editor of all background work (agents, shell jobs 
 
 - The first row is the main session. Every item follows, and nested items are indented under their parent.
 - Each row shows kind, label, running time and the latest activity. A finished row shows its status and result.
-- Finished items stay until you send your next prompt.
+- A finished item leaves 30 s after it finishes. While it is selected, open in the viewer or has a running item under it, it stays, and the 30 s count from when that ends. Sending a prompt removes nothing.
 - FleetView shows at most 6 lines. A `… N more` line counts the hidden rows, and the list scrolls to keep the selection visible.
 - FleetView is hidden when nothing is registered.
 - Terminal control sequences are stripped from every row. A row whose activity line throws shows `activity failed`.

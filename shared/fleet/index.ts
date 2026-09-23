@@ -8,6 +8,10 @@ import { oneLine } from "../text/index.ts";
 
 /** Most notices held for one owner that has not attached; the oldest are dropped. */
 export const MAX_HELD = 50;
+/** How long a finished item stays once nothing keeps it, in ms (#137). */
+export const DECAY_MS = 30_000;
+
+export type Timers = Pick<typeof globalThis, "setTimeout" | "clearTimeout">;
 
 export type Kind = "agent" | "shell" | "monitor";
 export type Status = "queued" | "running" | "completed" | "failed" | "stopped";
@@ -74,14 +78,22 @@ export interface Fleet {
   get(id: string): Item | undefined;
   /** In registration order. */
   items(): readonly Item[];
-  /** Drops finished items. The fleet extension calls it when the user submits a prompt. */
+  /** Drops every finished item now. Finished items also leave by themselves, `DECAY_MS` after they finish. */
   prune(): void;
   /** Called after every change. Returns an unsubscribe function. */
   subscribe(listener: () => void): () => void;
-  /** Clock for running times, in ms. Tests replace it. */
+  /** Clock for running times and decay, in ms. Tests replace it. */
   now: () => number;
-  /** The item the fleet extension's viewer shows, if any. Only that extension sets it. */
+  /** Timers for decay. Tests replace them. A timer runs only while a finished item waits to leave. */
+  timers: Timers;
+  /**
+   * The item the fleet extension's viewer shows, if any. Only that extension sets it.
+   * A finished item leaves `DECAY_MS` after it finishes, or after the last moment it was
+   * viewed, selected or the parent of a running item, whichever is later.
+   */
   viewing?: string;
+  /** The item FleetView's focus is on, if any. Only the fleet extension sets it. */
+  selected?: string;
   /** Set while the queue extension edits one of its rows in Pi's editor: typed input then belongs to the queue. */
   editing?: boolean;
   /**
@@ -142,13 +154,76 @@ export function createFleet(): Fleet {
     }
   };
   const changed = () => {
+    decay();
     for (const l of [...listeners]) l();
   };
+
+  // Decay (#137): each finished item not kept leaves DECAY_MS after it finished or was last kept.
+  let viewing: string | undefined;
+  let selected: string | undefined;
+  let kept = new Set<string>();
+  const released = new Map<string, number>(); // when a finished item stopped being kept
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  /** Viewed, selected, or above a running item (cycles are cut). */
+  const keeps = () => {
+    const out = new Set([viewing, selected].filter((id): id is string => !!id));
+    for (const item of items.values()) {
+      if (isFinished(item.status)) continue;
+      const seen = new Set<string>();
+      for (let p = item.parentId; p && !seen.has(p); p = items.get(p)?.parentId) seen.add(p);
+      for (const p of seen) out.add(p);
+    }
+    return out;
+  };
+  const leavesAt = (item: Item) => Math.max(item.endedAt ?? 0, released.get(item.id) ?? 0) + DECAY_MS;
+  const decay = () => {
+    fleet.timers.clearTimeout(timer);
+    timer = undefined;
+    const now = fleet.now();
+    const next = keeps();
+    for (const id of kept) if (!next.has(id)) released.set(id, now);
+    kept = next;
+    let at = Infinity;
+    for (const item of items.values()) if (isFinished(item.status) && !kept.has(item.id)) at = Math.min(at, leavesAt(item));
+    if (at === Infinity) return;
+    timer = fleet.timers.setTimeout(expire, Math.max(0, at - now));
+    (timer as { unref?: () => void })?.unref?.(); // a finished item never holds the process open
+  };
+  const expire = () => {
+    timer = undefined;
+    const now = fleet.now();
+    let gone = false;
+    for (const [id, item] of items) {
+      if (!isFinished(item.status) || kept.has(id) || leavesAt(item) > now) continue;
+      items.delete(id);
+      released.delete(id);
+      gone = true;
+    }
+    if (gone) changed();
+    else decay();
+  };
+
   const fleet: Fleet = {
     now: () => Date.now(),
+    timers: globalThis,
+    get viewing() {
+      return viewing;
+    },
+    set viewing(id) {
+      viewing = id;
+      decay();
+    },
+    get selected() {
+      return selected;
+    },
+    set selected(id) {
+      selected = id;
+      decay();
+    },
     register(spec) {
       if (spec.id === "main") throw new Error('fleet: the id "main" is reserved for the main session');
       items.delete(spec.id);
+      released.delete(spec.id);
       items.set(spec.id, { ...spec, status: spec.status ?? "running", startedAt: fleet.now() });
       changed();
     },
@@ -189,8 +264,9 @@ export function createFleet(): Fleet {
     items: () => [...items.values()],
     prune() {
       const before = items.size;
-      for (const [id, item] of items) if (isFinished(item.status)) items.delete(id);
+      for (const [id, item] of items) if (isFinished(item.status)) items.delete(id) && released.delete(id);
       if (items.size !== before) changed();
+      else decay();
     },
     subscribe(listener) {
       listeners.add(listener);
