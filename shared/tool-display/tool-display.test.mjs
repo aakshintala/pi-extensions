@@ -109,3 +109,41 @@ test("a result without a content array renders instead of throwing", () => {
   const ctx = { args: {}, cwd: "/w", isPartial: false, isError: true, expanded: false };
   assert.deepEqual(plainLines(r.renderResult({}, { expanded: false, isPartial: false }, recordingTheme(), ctx).render(80)), ["   ⎿  Error: failed"]);
 });
+
+const READ = { verb: "read", one: "file" };
+const EDIT = { verb: "edited", one: "file", lines: (a) => a.lines };
+const BASH = { verb: "ran", one: "shell command" };
+const TODO = { verb: "updated", many: "todos" };
+
+test("group summary: fixed per-verb wording in order of first use, line totals, no count for countless verbs", () => {
+  const theme = recordingTheme();
+  const calls = [
+    { summary: READ, status: "done" },
+    { summary: EDIT, status: "done", args: { lines: { added: 400, removed: 2 } } },
+    { summary: READ, status: "done" },
+    { summary: TODO, status: "done" },
+    { summary: EDIT, status: "done", args: { lines: { added: 42, removed: 10 } } },
+    { summary: BASH, status: "done" },
+    { summary: TODO, status: "done" },
+    { summary: READ, status: "pending" },
+  ];
+  assert.equal(plain(td.summaryText(theme, calls)), "Read 3 files, edited 2 files +442 −12, updated todos, ran 1 shell command");
+  assert.equal(plain(td.summaryText(theme, calls, true)), "thought · read 3 files, edited 2 files +442 −12, updated todos, ran 1 shell command");
+});
+
+test("group summary: failed and cancelled calls are not counted as done work and show in the error colour", () => {
+  const theme = recordingTheme();
+  const calls = [
+    { summary: READ, status: "done" },
+    { summary: READ, status: "done" },
+    { summary: EDIT, status: "error", args: { lines: { added: 5, removed: 5 } } },
+    { summary: READ, status: "cancelled" },
+    { summary: BASH, status: "cancelled" },
+  ];
+  const text = td.summaryText(theme, calls);
+  assert.equal(plain(text), "Read 2 files · 1 failed · 2 cancelled");
+  assert.match(text, /\x1b\[38;5;\d+m1 failed/);
+  assert.equal(theme.keys.at(-1), "error");
+  assert.equal(theme.keys.at(-2), "error");
+  assert.equal(plain(td.summaryText(recordingTheme(), [{ summary: READ, status: "cancelled" }])), "1 cancelled");
+});

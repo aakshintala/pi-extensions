@@ -1,7 +1,27 @@
 # tool-display
 
-Draws the built-in `read`, `edit` and `write` calls in the rig's shared
-tool style (`shared/tool-display/`), the way Claude Code shows them:
+Collapses each run of tool calls into one summary line, and draws the built-in
+`read`, `edit` and `write` calls in the rig's shared tool style
+(`shared/tool-display/`), the way Claude Code shows them.
+
+```
+ ⏺ Read 1 file, edited 1 file +3 −2, wrote 1 file +6 · 1 failed
+
+ ⏺ Edit(a.txt)
+   ⎿  Error: Could not find the exact text in a.txt. …
+```
+
+- **Groups.** Consecutive calls in one assistant message share one summary
+  line, counted per verb. It updates live, with a spinner while calls run.
+  Text between calls, or a tool without a summary, starts a new group.
+- **Failed calls always shown** under their group. After Esc, calls that got
+  no result count as `cancelled` in the error colour.
+- **Ctrl+O** (`app.tools.expand`) shows every call on its own. In fullscreen
+  mode, a click on a group opens or closes that group only.
+- **Resumed sessions group the same way**: groups come from the saved
+  assistant messages.
+
+Expanded, each call looks like this:
 
 ```
  ⏺ Edit(b.txt)
@@ -31,6 +51,5 @@ tool style (`shared/tool-display/`), the way Claude Code shows them:
 
 No commands, keys or settings.
 
-Grouping runs of calls into one summary line is
-[#56](https://github.com/aakshintala/pi-rig/issues/56); hidden thinking and
-click-to-expand are [#57](https://github.com/aakshintala/pi-rig/issues/57).
+Hiding thinking into the group summary is
+[#57](https://github.com/aakshintala/pi-rig/issues/57).
