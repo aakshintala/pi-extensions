@@ -1,8 +1,8 @@
 // The viewer frame (spec #29, #45): one item's transcript or log in place of
 // Pi's chat container, or in a full-size overlay when Pi's layout is not the
 // tested one, and in regular mode, which has no scroll view to follow with.
-// The frame, not the producer, handles closing, stop with
-// confirmation and steer, so they work the same for every item.
+// The frame, not the producer, handles closing and steer, so they work the
+// same for every item. Stopping is FleetView's (x, #141).
 import { getMarkdownTheme, UserMessageComponent, VERSION, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   Container,
@@ -51,7 +51,7 @@ function header(ctx: ExtensionContext, id: string): Component {
           ? "queued"
           : (isFinished(item.status) ? (item.status === "completed" ? "done " : `${item.status} `) : "") +
             duration((item.endedAt ?? fleet().now()) - item.startedAt);
-      const keys = `esc back · ctrl+q stop${item.steer ? " · enter steers" : ""}`;
+      const keys = `esc back${item.steer ? " · enter steers" : ""}`;
       return [truncateToWidth(` ${theme.fg("accent", `${oneLine(item.kind)} ${oneLine(item.label)}`)} · ${state} ${theme.fg("dim", `· ${keys}`)}`, width)];
     },
     invalidate() {},
@@ -77,13 +77,11 @@ class OverlayFrame implements Component {
   private readonly tui: TUI;
   private readonly head: Component;
   private readonly content: Component;
-  private readonly confirm: () => string | undefined; // shown in place of the steer line
 
-  constructor(tui: TUI, head: Component, content: Component, confirm: () => string | undefined) {
+  constructor(tui: TUI, head: Component, content: Component) {
     this.tui = tui;
     this.head = head;
     this.content = content;
-    this.confirm = confirm;
     this.input.focused = true;
   }
 
@@ -106,8 +104,7 @@ class OverlayFrame implements Component {
     const last = Math.max(0, lines.length - size);
     const top = Math.min(this.top ?? last, last);
     const shown = lines.slice(top, top + size);
-    const confirm = this.confirm();
-    const bottom = confirm !== undefined ? [" " + confirm] : this.input.render(width);
+    const bottom = this.input.render(width);
     // Paused: how much is below, so new output is visible without moving the view.
     const below = lines.length - top - shown.length;
     const head = (this.head.render(width)[0] ?? "") + (this.top !== undefined && below > 0 ? `  ↓ ${below} below · End` : "");
@@ -145,7 +142,7 @@ export interface Viewer {
   open(item: Item): void;
   /** Back to the main chat. Releases the item's file watcher. Safe to call twice. */
   close(): void;
-  /** Esc, Ctrl+Q and the stop confirmation; true when consumed. */
+  /** Esc closes an open item; true when consumed. */
   handleKey(data: string): boolean;
   /** Editor text while an item is open: its steer, echoed in the viewer. */
   steer(text: string): void;
@@ -153,8 +150,6 @@ export interface Viewer {
   refresh(): void;
   /** Whether the viewer is an overlay, which owns the arrow keys. */
   overlay(): boolean;
-  /** The stop confirmation, for FleetView to show below the editor. */
-  confirmation(): string | undefined;
 }
 
 const scrollToEnd = (t: TUI) => (t as { scrollToBottom?: () => void }).scrollToBottom?.();
@@ -167,7 +162,6 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
         release: () => void;
         read?: () => void;
         frame?: OverlayFrame;
-        confirm?: string;
       }
     | undefined;
 
@@ -177,7 +171,7 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
     open?.content.addChild(component);
     render();
   };
-  // Runs a producer's stop or steer; a throw or rejection is shown in the viewer.
+  // Runs a producer's steer; a throw or rejection is shown in the viewer.
   const attempt = (what: string, run: () => void | Promise<void>) => {
     const failed = (e: unknown) => echo(new Text(ctx.ui.theme.fg("error", ` ${what} failed: ${oneLine((e as Error)?.message ?? e)}`), 0, 0));
     try {
@@ -191,7 +185,6 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
     active: () => open?.id,
     refresh: () => open?.read?.(),
     overlay: () => !!open?.frame,
-    confirmation: () => (open?.frame ? undefined : open?.confirm),
 
     open(item) {
       viewer.close();
@@ -268,7 +261,7 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
         ctx.ui.custom<void>(
           (overlayTui, _theme, _keys, finish) => {
             done = () => finish();
-            const frame = new OverlayFrame(overlayTui, head, content, () => state.confirm);
+            const frame = new OverlayFrame(overlayTui, head, content);
             frame.input.onSubmit = (text) => {
               frame.input.setValue("");
               if (text.trim()) viewer.steer(text);
@@ -299,25 +292,9 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
     },
 
     handleKey(data) {
-      if (!open) return false;
-      const item = fleet().get(open.id);
-      if (open.confirm !== undefined) {
-        const yes = matchesKey(data, "y") || matchesKey(data, "shift+y"); // also a kitty CSI-u key
-        open.confirm = undefined;
-        if (yes && item) attempt("stop", () => item.stop());
-        render();
-        return true;
-      }
-      if (matchesKey(data, "escape")) {
-        viewer.close();
-        return true;
-      }
-      if (matchesKey(data, "ctrl+q") && item && !isFinished(item.status)) {
-        open.confirm = `Stop ${oneLine(item.kind)} ${oneLine(item.label)}? y stops it, any other key cancels.`;
-        render();
-        return true;
-      }
-      return false;
+      if (!open || !matchesKey(data, "escape")) return false;
+      viewer.close();
+      return true;
     },
 
     steer(text) {

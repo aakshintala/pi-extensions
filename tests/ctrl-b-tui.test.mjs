@@ -116,16 +116,15 @@ test("the hint counts toward FleetView's 6 lines", async (t) => {
   await tui.waitForScreen(screen([""], "", [" ● main", "   shell a · 0s", "   shell b · 0s", "   shell c · 0s", "   … 3 more", HINT]));
 });
 
-test("Ctrl+B is not taken from an overlay, and cancels a stop confirmation", async (t) => {
+test("Ctrl+B is not taken from an overlay", async (t) => {
   const tui = await start(t);
   await tui.fx({ add: "j", kind: "shell", label: "build" }, { fg: "a" });
-  const overlay = (bottom) => "\n" + [" shell build · 0s · esc back · ctrl+q stop", ...Array(ROWS - 2).fill(""), bottom].join("\n");
+  const overlay = (bottom) => "\n" + [" shell build · 0s · esc back", ...Array(ROWS - 2).fill(""), bottom].join("\n");
   tui.keys("Down", "Down", "Enter"); // regular mode: the viewer is a full-size overlay
   await tui.waitForScreen(overlay("›"));
-  tui.keys("C-b", "C-q"); // the overlay has focus: Ctrl+B is left to it
-  await tui.waitForScreen(overlay(" Stop shell build? y stops it, any other key cancels."));
-  tui.keys("C-b"); // any other key cancels
-  await tui.waitForScreen(overlay("›"));
+  tui.keys("C-b"); // the overlay has focus: Ctrl+B is left to it
+  tui.type("hi");
+  await tui.waitForScreen(overlay("› hi"));
   tui.keys("Escape");
   await tui.waitForScreen(screen([""], "", [" ● main", "   shell build · 0s", HINT]));
   assert.deepEqual(tui.events().filter((e) => e.startsWith("bg:")), []);
@@ -133,23 +132,18 @@ test("Ctrl+B is not taken from an overlay, and cancels a stop confirmation", asy
   await tui.waitForEvent("bg:a");
 });
 
-test("at a stop confirmation in the chat area, Ctrl+B cancels it and backgrounds nothing", async (t) => {
+test("Ctrl+B backgrounds while FleetView has focus on an item shown in the chat area", async (t) => {
   const tui = await start(t, undefined, ["--tui-mode", "fullscreen"]);
   await tui.fx({ add: "j", kind: "shell", label: "build" }, { fg: "a" });
-  // Fullscreen: the item takes the chat area and Pi's editor keeps focus.
+  // Fullscreen: the item takes the chat area, FleetView keeps focus on its row (#136), and Pi's editor keeps TUI focus.
   const viewing = (below) => {
-    const lines = [" shell build · 0s · esc back · ctrl+q stop"];
-    const bottom = [BORDER, "", BORDER, "   main", " ● shell build · 0s", ...below, ...FOOTER];
+    const lines = [" shell build · 0s · esc back"];
+    const bottom = [BORDER, "", BORDER, "   main", "›● shell build · 0s", " Enter to view · x to stop · ctrl+x ctrl+k to stop all agents", ...below, ...FOOTER];
     return "\n" + [...lines, ...Array(ROWS - lines.length - bottom.length).fill(""), ...bottom].join("\n");
   };
   tui.keys("Down", "Down", "Enter");
   await tui.waitForScreen(viewing([HINT]));
-  tui.keys("C-q");
-  await tui.waitForScreen(viewing([" Stop shell build? y stops it, any other key cancels.", HINT]));
   tui.keys("C-b");
-  await tui.waitForScreen(viewing([HINT]));
-  assert.deepEqual(tui.events().filter((e) => e.startsWith("bg:")), []);
-  tui.keys("C-b"); // with the confirmation gone, the editor has focus: Ctrl+B backgrounds
   await tui.waitForEvent("bg:a");
   await tui.waitForScreen(viewing([]));
 });

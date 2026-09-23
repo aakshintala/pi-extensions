@@ -112,3 +112,75 @@ test("backgroundAll(owner) backgrounds only that session's commands", () => {
   fleet.backgroundAll("s2");
   assert.deepEqual(called, ["s2"]);
 });
+
+// Decay (#137), on the registry's clock and timer seams: `tick(s)` advances the clock and fires due timers.
+function fake(fleet) {
+  let now = 0;
+  let n = 0;
+  const pending = new Map();
+  fleet.now = () => now;
+  fleet.timers = { setTimeout: (fn, ms) => (pending.set(++n, { at: now + ms, fn }), n), clearTimeout: (id) => pending.delete(id) };
+  return {
+    pending,
+    tick(s) {
+      now += s * 1000;
+      for (const [id, t] of [...pending]) if (t.at <= now && pending.delete(id)) t.fn();
+    },
+  };
+}
+const ids = (fleet) => fleet.items().map((i) => i.id);
+
+test("a finished item leaves 30 s after it finishes, and no timer runs while nothing has finished", () => {
+  const fleet = createFleet();
+  const clock = fake(fleet);
+  fleet.register(job("a", "s1"));
+  fleet.register(job("b", "s1"));
+  clock.tick(100);
+  assert.equal(clock.pending.size, 0);
+  fleet.finish("a", "completed", "ok", null);
+  clock.tick(10);
+  fleet.finish("b", "failed", "exit 1", null);
+  clock.tick(19.999);
+  assert.deepEqual(ids(fleet), ["a", "b"]);
+  clock.tick(0.001);
+  assert.deepEqual(ids(fleet), ["b"]);
+  clock.tick(10);
+  assert.deepEqual(ids(fleet), []);
+  assert.equal(clock.pending.size, 0);
+});
+
+test("a viewed or selected item stays until it is left, then leaves 30 s later", () => {
+  const fleet = createFleet();
+  const clock = fake(fleet);
+  fleet.register(job("a", "s1"));
+  fleet.register(job("b", "s1"));
+  fleet.viewing = "a";
+  fleet.selected = "b";
+  fleet.finish("a", "completed", "ok", null);
+  fleet.finish("b", "completed", "ok", null);
+  assert.equal(clock.pending.size, 0);
+  clock.tick(300);
+  assert.deepEqual(ids(fleet), ["a", "b"]);
+  fleet.viewing = undefined;
+  clock.tick(20);
+  fleet.selected = undefined;
+  clock.tick(10);
+  assert.deepEqual(ids(fleet), ["b"]);
+  clock.tick(20);
+  assert.deepEqual(ids(fleet), []);
+});
+
+test("a finished parent stays while a child or grandchild runs", () => {
+  const fleet = createFleet();
+  const clock = fake(fleet);
+  fleet.register(job("p", "s1"));
+  fleet.register({ ...job("c", "s1"), parentId: "p" });
+  fleet.register({ ...job("g", "s1"), parentId: "c" });
+  fleet.finish("p", "completed", "ok", null);
+  fleet.finish("c", "completed", "ok", null);
+  clock.tick(60);
+  assert.deepEqual(ids(fleet), ["p", "c", "g"]);
+  fleet.finish("g", "completed", "ok", null);
+  clock.tick(30);
+  assert.deepEqual(ids(fleet), []);
+});

@@ -167,6 +167,12 @@ Subagent 3fa9c1d2 (review auth) completed. STATUS: DONE
   partial output under `Partial output, incomplete:`.
 - In FleetView each agent is one `agent` row with its latest tool call or
   message line. When it finishes, the row and the chat line show its `STATUS`.
+- After its status the row shows the model and thinking level, then its tokens
+  and cost once they are above zero. They count its session over every run
+  plus each child once it finishes, as `Session total:` does. A finished row
+  adds the latest run's turns and tool uses. A worktree agent's row ends with
+  its branch, or `worktree removed`. For example:
+  `agent scout · done 2m13s · kid-1 · low · 41.2k tokens · $0.31 · 12 turns · 34 tool uses`.
 - A resume turns the finished row back into a running one, with its own
   running time, so each agent keeps one row.
 
@@ -196,7 +202,8 @@ the main chat:
 - A finished agent opens from its saved session. If its parent resumes it
   while the viewer is open, the viewer follows the new run.
 - Typing steers the agent. The steer shows as `Steering: …` until the agent
-  reads it, then as a user message. Ctrl+Q, then y, stops it.
+  reads it, then as a user message. x on its FleetView row stops it, and
+  Ctrl+X, then Ctrl+K, in FleetView stops every agent the session started.
 - A compaction keeps the messages already drawn, as the main chat keeps its
   scrollback. The compaction summary is not drawn.
 

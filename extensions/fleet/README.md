@@ -4,15 +4,18 @@ FleetView: one list below the editor of all background work (agents, shell jobs 
 
 - The first row is the main session. Every item follows, and nested items are indented under their parent.
 - Each row shows kind, label, running time and the latest activity. A finished row shows its status and result.
-- Finished items stay until you send your next prompt.
+- An item's detail fields, such as an agent's model, thinking level, tokens and cost, follow its status. On a narrow row they drop from the right: once one does not fit, it and everything after it, the activity or result too, is dropped. The label is shortened with `…` so the status always shows.
+- A finished item leaves 30 s after it finishes. While it is selected, open in the viewer or has a running item under it, it stays, and the 30 s count from when that ends. Sending a prompt removes nothing.
 - FleetView shows at most 6 lines. A `… N more` line counts the hidden rows, and the list scrolls to keep the selection visible.
 - FleetView is hidden when nothing is registered.
 - Terminal control sequences are stripped from every row. A row whose activity line throws shows `activity failed`.
 
 ## Viewer
 
-- Enter or a click on a row shows that item in place of the chat. `●` marks the item on screen.
-- Enter on another row switches straight to it. Enter on `main`, or Esc, returns to the chat.
+- Enter or a click on a row shows that item in place of the chat. `●` marks the item on screen, and focus stays on its row (`›`).
+- Up, Down and Enter on another row switch straight to it. Enter on `main` returns to the chat, with focus on `main`.
+- Esc in FleetView returns to the prompt with the item still open, so typing steers it. A second Esc closes it.
+- While FleetView has focus, a dim line under its rows gives its keys: `Enter to view · x to stop · ctrl+x ctrl+k to stop all agents`. It counts toward the 6 lines. A stop goes through the item's own `stop()`, so its notice and the row's decay work as usual.
 - A shell job or monitor shows its log file, read as it grows, with colours kept and other control sequences stripped. An agent shows its transcript.
 - Main-session output keeps going to the chat while you view an item, so you see it when you return.
 - The viewer follows new output. Scrolling up pauses it, and End jumps back to the end and follows again.
@@ -41,7 +44,7 @@ Interactive sessions end their runs as usual: their work keeps running and its n
 
 Ctrl+B moves every running foreground command, such as a shell command, into the background. While one can be moved, `ctrl+b to run in background` shows under the editor, as one of FleetView's 6 lines.
 
-Ctrl+B works only while Pi's editor has focus: a picker, dialog or overlay keeps the key. At a stop confirmation it cancels, like any other key.
+Ctrl+B works only while Pi's editor has focus: a picker, dialog or overlay keeps the key.
 
 Pi binds Ctrl+B to cursor left by default. To free it, add this to `keybindings.json` in Pi's agent directory:
 
@@ -55,13 +58,14 @@ Until then Ctrl+B keeps moving the cursor, the hint never shows, and a warning n
 
 | Key | When | Does |
 |---|---|---|
-| Down or Left | Empty prompt | Focuses FleetView |
+| Down or Left | Empty prompt | Focuses FleetView, on the open item, or on `main` when none is open |
 | Up / Down | FleetView focused | Moves the selection |
 | Enter | FleetView focused | Opens the selected row |
-| Esc | FleetView focused | Returns to the prompt |
-| Click | Fullscreen mode | Opens the row |
-| Esc | Viewing an item | Returns to the chat |
-| Ctrl+Q, then y | Viewing an item | Stops it. Any other key cancels |
+| x | FleetView focused | Stops the selected running or queued item at once, with no confirmation |
+| Ctrl+X, then Ctrl+K | FleetView focused | Stops every running or queued agent this session started, with its subagents; jobs and monitors keep running |
+| Esc | FleetView focused | Returns to the prompt; an open item stays open |
+| Click | Fullscreen mode | Opens the row, like Enter |
+| Esc | Viewing an item, at the prompt | Returns to the chat |
 | End | Viewing an item | Jumps to the end and follows again |
 | Ctrl+B | A foreground command runs | Moves every foreground command into the background |
 
@@ -85,6 +89,7 @@ fleet().register({
   label: "npm test",
   parentId: "agent-1",            // optional: shows the row under that item
   activity: () => lastLine,       // required: the row's latest activity, read on every render
+  detail: () => ["kid-1", "low"], // optional: fields shown after the status, read on every render
   view: { log: logPath },         // required: a log file, or { transcript: (tui, ui) => component, showsSteers? };
                                   // a transcript is built on each open, and its dispose(), if any, runs on close
   stop: () => child.kill(),       // required

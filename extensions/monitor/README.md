@@ -41,7 +41,7 @@ its ID and log paths at once.
   process group. If any of the group is still alive 800 ms later, it gets
   SIGKILL until the group is empty.
 - Each monitor is a `monitor` row in FleetView. Opening it shows the live
-  standard output log, and Ctrl+Q stops it with one notice. `jobs stop <id>`
+  standard output log, and x on its row stops it with one notice. `jobs stop <id>`
   stops it too.
 - A monitor belongs to its session: shutdown, `/reload` and a session switch
   stop it without a notice. If Pi exits without shutting down, an `exit`

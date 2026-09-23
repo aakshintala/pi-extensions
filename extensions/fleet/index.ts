@@ -4,7 +4,7 @@
 // (#45, viewer.ts). It also delivers the session's notices (#46) and
 // keeps a run without the UI alive until the work it started returns.
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
+import { getKeybindings, isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { join } from "node:path";
 import { duration, fleet, isFinished, viewerTakes, type Item, type Notice } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
@@ -14,6 +14,8 @@ import { createViewer, type Viewer } from "./viewer.ts";
 /** Most lines FleetView takes, including the "… N more" line. */
 const MAX_LINES = 6;
 const MAIN = "main";
+/** Shown under the rows while FleetView has focus (#141). */
+const KEYS = " Enter to view · x to stop · ctrl+x ctrl+k to stop all agents";
 const NOTICE = "rig.notice";
 const BLOCKED = Symbol.for("pi-rig.fleet.ctrlBBlocked");
 
@@ -57,12 +59,19 @@ function rows(items: readonly Item[]): Row[] {
   return out;
 }
 
-/** A producer's activity line; a producer that throws breaks only its own row. */
+/** A producer's activity line and detail fields; a producer that throws breaks only its own row. */
 function safeActivity(item: Item) {
   try {
     return item.activity();
   } catch {
     return "activity failed";
+  }
+}
+function safeDetail(item: Item) {
+  try {
+    return item.detail?.() ?? [];
+  } catch {
+    return ["detail failed"];
   }
 }
 
@@ -121,7 +130,6 @@ export default function (pi: ExtensionAPI) {
       viewer.steer(event.text);
       return { action: "handled" };
     }
-    if (event.source !== "extension") fleet().prune();
     return undefined;
   });
 
@@ -188,6 +196,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   const registry = fleet();
   let tui: TUI | undefined;
   let focused = false;
+  let chord = false; // Ctrl+X was pressed in FleetView: Ctrl+K next stops every agent
   let selected = 0;
   let top = 0; // first row shown
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -198,17 +207,17 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
 
   const hint = () => registry.foregrounds() > 0 && ctrlBFree();
 
-  // Rows shown, as indices into current(), plus the hidden count. A stop confirmation and the Ctrl+B hint each take one line of the budget.
+  // Rows shown, as indices into current(), plus the hidden count. The keys line and the Ctrl+B hint each take one line of the budget.
   function window(all: Row[]) {
     selected = Math.min(selected, all.length - 1);
-    const budget = MAX_LINES - (viewer.confirmation() ? 1 : 0) - (hint() ? 1 : 0);
+    const budget = MAX_LINES - (focused ? 1 : 0) - (hint() ? 1 : 0);
     if (all.length <= budget) return { start: 0, end: all.length, hidden: 0 };
     const size = budget - 1;
     top = Math.max(0, Math.min(Math.max(top, selected - size + 1), selected, all.length - size));
     return { start: top, end: top + size, hidden: all.length - size };
   }
 
-  function line(row: Row, index: number, theme: Theme) {
+  function line(row: Row, index: number, theme: Theme, width: number) {
     const id = row.item?.id ?? MAIN;
     const mark = (focused && index === selected ? "›" : " ") + (id === active() ? "●" : " ");
     if (!row.item) return theme.fg("accent", mark) + " main";
@@ -220,7 +229,23 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
         : (done ? (item.status === "completed" ? "done " : `${item.status} `) : "") +
           duration((item.endedAt ?? registry.now()) - item.startedAt);
     const activity = oneLine(done && item.result !== undefined ? item.result : safeActivity(item));
-    const text = `${"  ".repeat(row.depth)}${oneLine(item.kind)} ${oneLine(item.label)} · ${state}${activity ? ` · ${activity}` : ""}`;
+    // The label and status always stay: the label is shortened to leave room for the status (#138).
+    const head = `${"  ".repeat(row.depth)}${oneLine(item.kind)} `;
+    const tail = ` · ${state}`;
+    const room = Math.max(1, width - 3 - visibleWidth(head + tail));
+    let text = head + truncateToWidth(oneLine(item.label), room, "…") + tail;
+    // Then detail fields while they fit. Once one does not, it and everything to its right is
+    // dropped, the activity too; the activity alone may be cut if a few columns are left.
+    const fits = (more: string) => 3 + visibleWidth(`${text} · ${more}`) <= width;
+    let dropped = false;
+    for (const field of safeDetail(item).map(oneLine).filter(Boolean)) {
+      if (!fits(field)) {
+        dropped = true;
+        break;
+      }
+      text += ` · ${field}`;
+    }
+    if (activity && !dropped && fits(activity.slice(0, 6))) text += ` · ${activity}`;
     const color = item.status === "failed" ? "error" : done ? "muted" : "text";
     return theme.fg("accent", mark) + " " + theme.fg(color, text);
   }
@@ -232,10 +257,9 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
       const out: string[] = [];
       if (all.length > 1) {
         const { start, end, hidden } = window(all);
-        out.push(...all.slice(start, end).map((row, i) => line(row, start + i, theme)));
+        out.push(...all.slice(start, end).map((row, i) => line(row, start + i, theme, width)));
         if (hidden) out.push(theme.fg("dim", `   … ${hidden} more`));
-        const confirm = viewer.confirmation();
-        if (confirm) out.push(theme.fg("warning", ` ${confirm}`));
+        if (focused) out.push(theme.fg("dim", KEYS));
       }
       // Last, so a click's row index still counts from the first row.
       if (hint()) out.push(theme.fg("dim", " ctrl+b to run in background"));
@@ -252,17 +276,41 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     if (index >= end) return undefined;
     selected = index;
     choose(all[index]);
+    hold();
     return { handled: true, render: true };
   });
 
-  // Opens a row in the viewer; the main row goes back to the chat.
+  // Opens a row in the viewer, or goes back to the chat for the main row. Focus stays on the row (#136).
   const choose = (row: Row) => {
-    focused = false;
+    focused = true;
     if (row.item) viewer.open(row.item);
     else viewer.close();
   };
 
+  // x (#141): stops a running or queued item at once, through its own stop(); a failure is shown.
+  const stop = (item: Item | undefined) => {
+    if (!item || isFinished(item.status)) return;
+    const failed = (e: unknown) => ctx.ui.notify(`Stopping ${oneLine(item.kind)} ${oneLine(item.label)} failed: ${oneLine((e as Error)?.message ?? e)}`, "error");
+    try {
+      void Promise.resolve(item.stop()).catch(failed);
+    } catch (e) {
+      failed(e);
+    }
+  };
+  // Ctrl+X Ctrl+K: every agent this session started; each one's stop takes its subtree with it.
+  const stopAll = () => {
+    const owner = ctx.sessionManager.getSessionId();
+    for (const item of registry.items()) if (item.kind === "agent" && item.owner === owner) stop(item);
+  };
+
+  // The selected item does not decay (#137): tell the registry, and follow it when rows above it leave.
+  const hold = () => {
+    registry.selected = focused ? current()[selected]?.item?.id : undefined;
+  };
+
   const redraw = () => {
+    const held = current().findIndex((r) => r.item && r.item.id === registry.selected);
+    if (held >= 0) selected = held;
     const shown = viewer.active();
     if (shown && !registry.get(shown)) viewer.close(); // pruned: nothing left to show
     viewer.refresh(); // a producer update often means new log output
@@ -273,14 +321,23 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
       timer = undefined;
     }
     if (current().length === 1) focused = false;
+    hold();
     tui?.requestRender();
   };
   const unsubscribe = registry.subscribe(redraw);
 
   const unlisten = ctx.ui.onTerminalInput((data) => {
+    const result = key(data);
+    hold();
+    return result;
+  });
+  function key(data: string) {
     if (data.startsWith("\x1b[<") || isKeyRelease(data)) return undefined;
+    const wasChord = chord;
+    chord = false;
     checkCtrlB(ctx);
-    // First, so at a stop confirmation Ctrl+B is "any other key" and cancels.
+    if (viewer.overlay()) focused = false; // the overlay covers FleetView and takes the keys
+    // Esc in FleetView only returns to the editor, with the viewer still open; a second Esc there closes it.
     if (!focused && viewer.handleKey(data)) return { consume: true };
     if (matchesKey(data, "ctrl+b") && hint() && editorFocused(tui)) {
       registry.backgroundAll();
@@ -291,8 +348,14 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     if (!focused) {
       if (!(matchesKey(data, "down") || matchesKey(data, "left")) || ctx.ui.getEditorText() !== "") return undefined;
       focused = true;
-      selected = 0;
-    } else if (matchesKey(data, "up")) selected = Math.max(0, selected - 1);
+      // The item open in the viewer, or main when none is.
+      selected = Math.max(0, current().findIndex((r) => r.item && r.item.id === viewer.active()));
+    } else if (wasChord && matchesKey(data, "ctrl+k")) stopAll();
+    else if (matchesKey(data, "ctrl+x")) {
+      chord = true;
+      return { consume: true };
+    } else if (matchesKey(data, "x")) stop(current()[selected]?.item);
+    else if (matchesKey(data, "up")) selected = Math.max(0, selected - 1);
     else if (matchesKey(data, "down")) selected = Math.min(current().length - 1, selected + 1);
     else if (matchesKey(data, "escape")) focused = false;
     else if (matchesKey(data, "enter")) choose(current()[selected]);
@@ -303,7 +366,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     }
     tui?.requestRender();
     return { consume: true };
-  });
+  }
 
   ctx.ui.setWidget(
     "fleet",
@@ -322,6 +385,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     viewer.close();
     unsubscribe();
     unlisten();
+    registry.selected = undefined;
     if (timer) clearInterval(timer);
     timer = undefined;
     tui = undefined;

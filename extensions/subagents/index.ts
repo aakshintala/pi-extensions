@@ -100,6 +100,12 @@ type Agent = Node & Source & {
   halt?: () => Promise<void>;
   /** Its own git worktree, with isolation "worktree"; `cwd` is inside it. */
   worktree?: Worktree;
+  /** Set when a run settles its worktree: whether it was removed. */
+  removed?: boolean;
+  /** The latest run's counts, for its FleetView row. */
+  stats: Omit<Stats, "ms">;
+  /** Tokens and cost of its session over every run, plus its children's once they finish: the notice's `Session total`. */
+  spent: { tokens: number; cost: number };
 };
 
 /** Agents by id while anything holds them (such as the viewer), so a resume keeps their open transcript. */
@@ -172,6 +178,21 @@ const count = (n: number, one: string) => `${n.toLocaleString("en-US")} ${one}${
 
 /** Dollars with two significant digits below a cent: `$0.00003` stays visible. */
 export const money = (usd: number) => `$${usd >= 0.01 || usd <= 0 ? usd.toFixed(2) : usd.toFixed(1 - Math.floor(Math.log10(usd)))}`;
+
+/** Tokens as `812`, `41.2k` or `1.3M`. */
+const short = (n: number) => (n < 1000 ? String(n) : n < 1e6 ? `${(n / 1e3).toFixed(1)}k` : `${(n / 1e6).toFixed(1)}M`);
+
+/** The notice's `Session total:`: the agent's session over every run, plus the usage its children saved in it. */
+function sessionTotal(session: AgentSession, manager: SessionManager): Omit<Stats, "ms"> {
+  const s = session.getSessionStats();
+  const total = { turns: s.assistantMessages, tools: s.toolCalls, tokens: s.tokens.total, cost: s.cost };
+  for (const e of manager.getEntries() as any[]) {
+    if (e.type !== "custom" || e.customType !== USAGE) continue;
+    total.tokens += e.data.tokens;
+    total.cost += e.data.cost;
+  }
+  return total;
+}
 
 const statsLine = (s: Omit<Stats, "ms">) => `${count(s.turns, "turn")} · ${count(s.tools, "tool use")} · ${count(s.tokens, "token")} · ${money(s.cost)}`;
 
@@ -255,6 +276,15 @@ export default function (pi: ExtensionAPI) {
       parentId: "root" in a.parent ? (a.parent as Agent).id : undefined,
       status: a.state === "queued" ? "queued" : "running",
       activity: () => a.activity,
+      // ponytail: a running child's tokens join its parent's row when it finishes, as in the notice.
+      detail: () => [
+        a.model.id,
+        a.thinking,
+        ...(a.spent.tokens ? [`${short(a.spent.tokens)} tokens`] : []),
+        ...(a.spent.cost ? [money(a.spent.cost)] : []),
+        ...(a.state === "done" ? [count(a.stats.turns, "turn"), count(a.stats.tools, "tool use")] : []),
+        ...(a.worktree ? [a.removed ? "worktree removed" : a.worktree.branch] : []),
+      ],
       view: { transcript: (tui, ui) => transcript(a, tui as TUI, ui as ExtensionUIContext), showsSteers: true },
       stop: () => stop(a),
       steer: async (text) => {
@@ -315,7 +345,7 @@ export default function (pi: ExtensionAPI) {
     a.state = "running";
     fleet().update(a.id, { status: "running" });
     const began = fleet().now();
-    const stats = { turns: 0, tools: 0, tokens: 0, cost: 0 };
+    const stats = (a.stats = { turns: 0, tools: 0, tokens: 0, cost: 0 });
     let error: string | undefined;
     let from = 0;
     let text = "";
@@ -324,7 +354,9 @@ export default function (pi: ExtensionAPI) {
     try {
       try {
         if (a.worktree) await reopenWorktree(a.worktree);
+        a.removed = false;
         const session = (a.session = await open(a, inherit));
+        a.spent = sessionTotal(session, a.manager);
         rememberTools(session, a.root.defs);
         a.shutDown = undefined;
         a.prompted = false;
@@ -341,6 +373,8 @@ export default function (pi: ExtensionAPI) {
           } else if (e.type === "message_end" && e.message.role === "assistant") {
             stats.tokens += e.message.usage?.totalTokens ?? 0;
             stats.cost += e.message.usage?.cost?.total ?? 0;
+            a.spent.tokens += e.message.usage?.totalTokens ?? 0;
+            a.spent.cost += e.message.usage?.cost?.total ?? 0;
             const last = textOf(e.message).trim().split("\n").at(-1);
             if (last) a.activity = last;
           }
@@ -357,18 +391,13 @@ export default function (pi: ExtensionAPI) {
       const replies = (a.session?.messages ?? []).slice(from).filter((m: any) => m.role === "assistant") as any[];
       text = [...replies].reverse().map(textOf).find((t) => t.trim()) ?? "";
       if (!a.stopped && !error && replies.at(-1)?.stopReason === "error") error = replies.at(-1).errorMessage || "model error";
-      if (from > 0 && a.session) {
+      if (a.session) {
+        const t = (a.spent = sessionTotal(a.session, a.manager));
         // A resumed child: the notice also gives the session's totals over every run, with every child's.
-        const s = a.session.getSessionStats();
-        total = { turns: s.assistantMessages, tools: s.toolCalls, tokens: s.tokens.total, cost: s.cost };
-        for (const e of a.manager.getEntries() as any[]) {
-          if (e.type !== "custom" || e.customType !== USAGE) continue;
-          total.tokens += e.data.tokens;
-          total.cost += e.data.cost;
-        }
+        if (from > 0) total = t;
       }
       await close(a);
-      if (a.worktree) note = await settleWorktree(a.worktree);
+      if (a.worktree) note = await settle(a);
     } catch (e) {
       error ??= (e as Error).message;
     } finally {
@@ -385,6 +414,13 @@ export default function (pi: ExtensionAPI) {
       // A finished agent anywhere in the tree may free room for the top level's queue.
       a.root.pump();
     }
+  }
+
+  /** Settles the agent's worktree; its row then shows the branch, or that the worktree was removed. */
+  async function settle(a: Agent) {
+    const note = await settleWorktree(a.worktree!);
+    a.removed = !existsSync(a.worktree!.path);
+    return note;
   }
 
   async function close(a: Agent) {
@@ -407,7 +443,12 @@ export default function (pi: ExtensionAPI) {
       s.cost += e.data.cost;
     }
     a.manager.appendCustomEntry(REPORTED, {});
-    if ("root" in a.parent) (a.parent as Agent).manager.appendCustomEntry(USAGE, { tokens: s.tokens, cost: s.cost });
+    if ("root" in a.parent) {
+      const p = a.parent as Agent;
+      p.manager.appendCustomEntry(USAGE, { tokens: s.tokens, cost: s.cost });
+      p.spent.tokens += s.tokens;
+      p.spent.cost += s.cost;
+    }
     const status = a.stopped ? "stopped" : error ? "failed" : "completed";
     const lines = [`${statsLine(s)} · ${duration(s.ms)}`, ...(total ? [`Session total: ${statsLine(total)}`] : []), ...(note ? [note] : [])];
     const head = `Subagent ${a.id} (${oneLine(a.label)}) ${status}. STATUS: ${a.stopped ? "STOPPED" : error ? "FAILED" : statusOf(text)}\n${lines.join("\n")}`;
@@ -439,7 +480,7 @@ export default function (pi: ExtensionAPI) {
       const i = queue.indexOf(a);
       if (i >= 0) queue.splice(i, 1);
       a.state = "done";
-      const note = a.worktree ? `\n${await settleWorktree(a.worktree)}` : "";
+      const note = a.worktree ? `\n${await settle(a)}` : "";
       report(a, "stopped", "stopped before it started", `Subagent ${a.id} (${oneLine(a.label)}) stopped before it started.${note}`);
       prune(a);
       return;
@@ -512,8 +553,19 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** A new agent below this session. */
-  function agent(fields: Omit<Agent, "parent" | "root" | "children" | "stopped" | "activity" | "partial" | "version">): Agent {
-    const a: Agent = { ...fields, parent: node, root: "root" in node ? (node as Agent).root : top, children: new Set(), stopped: false, activity: "", partial: new Map(), version: 0 };
+  function agent(fields: Omit<Agent, "parent" | "root" | "children" | "stopped" | "activity" | "partial" | "version" | "stats" | "spent">): Agent {
+    const a: Agent = {
+      ...fields,
+      parent: node,
+      root: "root" in node ? (node as Agent).root : top,
+      children: new Set(),
+      stopped: false,
+      activity: "",
+      partial: new Map(),
+      version: 0,
+      stats: { turns: 0, tools: 0, tokens: 0, cost: 0 },
+      spent: { tokens: 0, cost: 0 },
+    };
     remembered.set(a.id, new WeakRef(a));
     forget.register(a, a.id);
     return a;
