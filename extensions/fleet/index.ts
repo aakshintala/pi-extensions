@@ -8,6 +8,7 @@ import { getKeybindings, isKeyRelease, matchesKey, MouseRegion, Text, truncateTo
 import { join } from "node:path";
 import { duration, fleet, isFinished, viewerTakes, type Item, type Notice } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
+import { editorFocused } from "../../shared/tui/index.ts";
 import { createViewer, type Viewer } from "./viewer.ts";
 
 /** Most lines FleetView takes, including the "… N more" line. */
@@ -34,18 +35,6 @@ function checkCtrlB(ctx: ExtensionContext) {
     ctx.ui.notify(`Ctrl+B moves the cursor left, so it cannot background commands. Add "tui.editor.cursorLeft": ["left"] to ${join(getAgentDir(), "keybindings.json")}`, "warning");
   }
   g[BLOCKED] = blocked;
-}
-
-/**
- * Whether Pi's main editor has focus, so no picker, dialog or overlay owns the key. Same
- * structural lookup as extensions/queue: the only child of Pi's editor container, the
- * root's fifth child in Pi 0.87 (interactive-mode.js mountInteractiveTui), with Pi's
- * submit handler wired on.
- */
-function editorFocused(tui: TUI | undefined) {
-  const editor = (tui?.children?.[4] as { children?: unknown[] } | undefined)?.children?.[0] as Record<string, unknown> | undefined;
-  const isEditor = ["onSubmit", "getText", "handleInput"].every((k) => typeof editor?.[k] === "function");
-  return isEditor && tui!.getFocusedComponent?.() === editor;
 }
 
 type Row = { item?: Item; depth: number };

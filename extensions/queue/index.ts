@@ -6,6 +6,7 @@ import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@eare
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { fleet, viewerTakes } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts"; // row text is user input
+import { editorFocused as mainEditorFocused } from "../../shared/tui/index.ts";
 
 type Lane = "steer" | "followUp";
 type Row = { id: number; lane: Lane; text: string; images?: ImageContent[]; error?: string };
@@ -217,16 +218,7 @@ export default function (pi: ExtensionAPI) {
   // Keys are read here rather than through registerShortcut: overriding Pi's Option+Up
   // that way prints an "[Extension issues]" warning at every start. Only while Pi's editor
   // has focus, so pickers keep their own Option+Up/Down.
-  // Pi's main editor, looked up (never written to) on each check so an editor swapped in
-  // by setEditorComponent is found: the only child of Pi's editor container, the root's
-  // fifth child in Pi 0.87 (interactive-mode.js mountInteractiveTui). Pi wires its submit
-  // handler onto every editor it mounts there; pickers and the reload box that take the
-  // slot have none. Anything else there, or in focus, means "cannot tell": the caller waits.
-  const editorFocused = () => {
-    const editor = tui?.children?.[4]?.children?.[0];
-    const isEditor = ["onSubmit", "getText", "handleInput"].every((k) => typeof editor?.[k] === "function");
-    return isEditor && tui.getFocusedComponent?.() === editor;
-  };
+  const editorFocused = () => mainEditorFocused(tui);
 
   const extensionCommand = (text: string) => {
     const name = /^\/(\S+)/.exec(text)?.[1];
