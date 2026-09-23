@@ -5,9 +5,11 @@
 // answer every child request; it may return a promise, to hold a child mid-run.
 // Otherwise (a real pi) replies come in order from <agent dir>/kid.json, each
 // `{ content, after? }`: faux content (text or blocks), sent once the file `after`
-// (relative to the agent dir) exists. File mode also stops the fleet clock at 0, and a
-// child session writes its agent id to <agent dir>/child-id, then reports event
-// "child_start" to $PI_HARNESS_EVENTS (tests/helpers/tui.mjs).
+// (relative to the agent dir) exists. kid.json is that list, or an object of such lists
+// keyed by the child's task (its spawn prompt), each read in its own order. File mode
+// also stops the fleet clock at 0, and a child session reports event "child_start" to
+// $PI_HARNESS_EVENTS (tests/helpers/tui.mjs); the first child to start first writes its
+// agent id to <agent dir>/child-id.
 //
 // In a parent (no rig.subagent entry), globalThis[Symbol.for("pi-rig.test.parentPrompt")],
 // when set, is merged into before_agent_start's systemPromptOptions; this fixture loads
@@ -15,11 +17,15 @@
 // Command /kidcmd exists so a test can send its name as plain text.
 // Each session_shutdown pushes the session id to globalThis[Symbol.for("pi-rig.test.kidShutdown")].
 // Tool `start_job` registers a fleet item owned by its session; the item's stop() calls
-// globalThis[Symbol.for("pi-rig.test.jobStopped")](id) and leaves it running.
+// globalThis[Symbol.for("pi-rig.test.jobStopped")](id) and leaves it running. It runs one
+// call at a time, and returns once globalThis[Symbol.for("pi-rig.test.jobStarted")](id), if
+// set, settles.
+// globalThis[Symbol.for("pi-rig.test.kidPrice")], when set, is each reply's cost in dollars
+// per token (the faux provider reports none).
 import { appendFileSync, existsSync, readFileSync, watch, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createFauxCore, createProvider, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, createFauxCore, createProvider, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { fleet } from "../../../shared/fleet/index.ts";
 
 const g = globalThis as any;
@@ -36,9 +42,13 @@ function exists(path: string) {
   });
 }
 
-async function fromFile() {
-  const steps = JSON.parse(readFileSync(join(getAgentDir(), "kid.json"), "utf8"));
-  const step = steps[(g[STEP] = (g[STEP] ?? -1) + 1)];
+async function fromFile(context: any) {
+  const all = JSON.parse(readFileSync(join(getAgentDir(), "kid.json"), "utf8"));
+  const first = context.messages.find((m: any) => m.role === "user");
+  const text = typeof first.content === "string" ? first.content : first.content.map((c: any) => c.text ?? "").join("");
+  const task = Array.isArray(all) ? "" : text.split("\n\nEnd your final message")[0];
+  const counts = (g[STEP] ??= {});
+  const step = (Array.isArray(all) ? all : all[task])[(counts[task] = (counts[task] ?? -1) + 1)];
   if (step.after) await exists(join(getAgentDir(), step.after));
   const tools = Array.isArray(step.content) && step.content.some((b: any) => b.type === "toolCall");
   return fauxAssistantMessage(step.content, { stopReason: tools ? "toolUse" : "stop" });
@@ -50,14 +60,27 @@ export default function (pi: ExtensionAPI) {
     pi.on("session_start", (_event, ctx) => {
       const marker: any = ctx.sessionManager.getEntries().find((e: any) => e.customType === "rig.subagent");
       if (!marker) return;
-      writeFileSync(join(getAgentDir(), "child-id"), marker.data.agentId);
+      if (!existsSync(join(getAgentDir(), "child-id"))) writeFileSync(join(getAgentDir(), "child-id"), marker.data.agentId);
       appendFileSync(process.env.PI_HARNESS_EVENTS!, JSON.stringify({ event: "child_start" }) + "\n");
     });
   }
   const core = createFauxCore({ provider: "kid", models: [{ id: "kid-1", reasoning: true }] });
   const next = (stream: typeof core.stream): typeof core.stream => (model, context, options) => {
     core.setResponses([(ctx, opts) => (g[Symbol.for("pi-rig.test.kid")] ?? fromFile)(ctx, opts)]);
-    return stream(model, context, options);
+    const price = g[Symbol.for("pi-rig.test.kidPrice")];
+    const events = stream(model, context, options);
+    if (!price) return events;
+    // Re-emits every event, pricing the final message by its token count.
+    const priced = createAssistantMessageEventStream();
+    void (async () => {
+      for await (const e of events as any) {
+        const m = e.type === "done" ? e.message : e.type === "error" ? e.error : undefined;
+        if (m?.usage) m.usage = { ...m.usage, cost: { ...m.usage.cost, total: m.usage.totalTokens * price } };
+        priced.push(e);
+      }
+      priced.end();
+    })();
+    return priced as any;
   };
   pi.registerProvider(
     createProvider({
@@ -81,6 +104,7 @@ export default function (pi: ExtensionAPI) {
     label: "job",
     description: "test",
     parameters: { type: "object", properties: { id: { type: "string" } } } as any,
+    executionMode: "sequential",
     async execute(_callId, params: any, _signal, _update, ctx) {
       fleet().register({
         id: params.id,
@@ -91,6 +115,7 @@ export default function (pi: ExtensionAPI) {
         view: { log: "/dev/null" },
         stop: () => g[Symbol.for("pi-rig.test.jobStopped")]?.(params.id),
       });
+      await g[Symbol.for("pi-rig.test.jobStarted")]?.(params.id);
       return { content: [{ type: "text", text: "started" }], details: undefined };
     },
   });
