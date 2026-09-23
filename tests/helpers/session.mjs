@@ -5,12 +5,17 @@
 //   replies     faux steps: fauxAssistantMessage(...) or (context) => fauxAssistantMessage(...)
 //   extensions  extension file paths or inline factories (pi) => {...}; only these load
 //   tools       tool allowlist (default: pi's default built-ins)
+//   persist     true saves the session as a .jsonl under the temp box, via SessionManager.create;
+//               read it at session.sessionManager.getSessionFile() (default: in-memory)
 //
 // Hermetic: temp cwd, HOME and agent dir, PI_OFFLINE=1, in-memory session and settings,
 // no credentials. HOME/PI_CODING_AGENT_DIR/PI_OFFLINE are set on process.env for the
 // test's duration, so run one scripted session at a time per file (node:test's default).
 // In t.after, like pi on quit: session_shutdown is emitted, the session disposed, then
 // env restored and temp dirs removed, so cleanup runs on failure too.
+// Pi's model runtimes (the helper's and any child session's) keep refreshing after dispose
+// and can recreate agent/auth.json or agent/models-store.json; Pi 0.87.1 has no way to wait
+// for that, so every box is removed again when the process exits.
 import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,8 +30,14 @@ import {
 
 export { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 
-export async function scriptedSession(t, { replies = [], extensions = [], tools } = {}) {
+const boxes = new Set();
+process.once("exit", () => {
+  for (const box of boxes) rmSync(box, { recursive: true, force: true });
+});
+
+export async function scriptedSession(t, { replies = [], extensions = [], tools, persist = false } = {}) {
   const box = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-session-")));
+  boxes.add(box);
   const home = join(box, "home");
   const cwd = join(box, "cwd");
   const agentDir = join(box, "agent");
@@ -82,7 +93,7 @@ export async function scriptedSession(t, { replies = [], extensions = [], tools 
     modelRuntime,
     resourceLoader,
     settingsManager,
-    sessionManager: SessionManager.inMemory(cwd),
+    sessionManager: persist ? SessionManager.create(cwd, join(box, "sessions")) : SessionManager.inMemory(cwd),
     tools,
   }));
   return { session, faux, cwd, home, agentDir };
