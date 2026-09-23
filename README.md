@@ -29,3 +29,4 @@ pi install /path/to/pi-rig
 | [inline-skills](extensions/inline-skills/README.md) | `/skill-name` anywhere in a prompt loads that skill, with mid-prompt autocomplete | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
 | [subagents](extensions/subagents/README.md) | Background subagents via `subagent_spawn`, `subagent_message` and `subagent_stop`, nested up to a depth cap, with results pushed as notices | [#26](https://github.com/aakshintala/pi-rig/issues/26) |
 | [jobs](extensions/jobs/README.md) | `bash` that moves long commands to the background, and `jobs` to list, wait on and stop them | [#30](https://github.com/aakshintala/pi-rig/issues/30) |
+| [monitor](extensions/monitor/README.md) | `monitor`: a watch command whose output lines reach the agent as rate-limited notices | [#30](https://github.com/aakshintala/pi-rig/issues/30) |
