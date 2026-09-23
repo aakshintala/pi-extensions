@@ -582,7 +582,8 @@ test("at most 16 jobs and monitors run at once; more starts are refused, foregro
   const { track } = await import("../shared/process-groups/index.ts");
   for (let i = 0; i < 15; i++) {
     const child = spawn("tail", ["-f", "/dev/null"], { detached: true, stdio: "ignore" });
-    t.after(() => process.kill(-child.pid, "SIGKILL"));
+    // Waits for the exit: until it is reaped, the group still counts toward the cap.
+    t.after(() => new Promise((exited) => (child.once("exit", exited), process.kill(-child.pid, "SIGKILL"))));
     track({ child, pgid: child.pid, record: join(s.cwd, `other${i}.pid`), counted: true });
   }
   await s.session.prompt("go");
