@@ -4,12 +4,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createFindTool, createGrepTool, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { makeRepo, spyFFF } from "./fixtures/search/setup.mjs";
-import { searchExtension } from "../extensions/search/index.ts";
+import { direct, spyFFF, tempRepo } from "./fixtures/search/setup.mjs";
 
 process.env.PI_OFFLINE = "1"; // never download rg/fd
 const has = (...names) => names.some((n) => existsSync(join(getAgentDir(), "bin", n)) || !spawnSync(n, ["--version"]).error);
@@ -39,15 +37,11 @@ const FIND = [
 ];
 
 async function setup(t) {
-  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-parity-")));
-  makeRepo(cwd);
+  const cwd = tempRepo(t);
   const spy = spyFFF();
-  const tools = {};
-  const on = {};
-  searchExtension(spy.load)({ on: (e, h) => (on[e] = h), registerTool: (d) => (tools[d.name] = d) });
-  const ctx = { cwd, ui: { notify: () => assert.fail("fell back") } };
-  on.session_start({}, ctx);
-  t.after(() => (on.session_shutdown(), rmSync(cwd, { recursive: true, force: true })));
+  const { start, tools, ctx, notices } = direct(t, spy.load);
+  start(cwd);
+  t.after(() => assert.deepEqual(notices, [], "fell back"));
   const text = async (tool, args) => (await tool.execute("id", args, undefined, undefined, ctx)).content[0].text;
   // Result lines, sorted; the limit notice stays at the end.
   const lines = (s) => {

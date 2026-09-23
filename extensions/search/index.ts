@@ -2,7 +2,8 @@
 // One FileFinder per session, scanned in the background; each search waits up to
 // 5 s for the scan, else that call runs Pi's built-in tool. So does every call
 // when FFF cannot load or the session cwd is $HOME or /.
-import { realpathSync, statSync } from "node:fs";
+import { mkdirSync, realpathSync, statSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
@@ -69,37 +70,73 @@ function finish(lines: string[], notices: string[], details: Record<string, unkn
   return text(out, Object.keys(details).length > 0 ? details : undefined);
 }
 
-export function searchExtension(loadFinder: () => Promise<FinderClass> = async () => (await import("@ff-labs/fff-node")).FileFinder) {
+const realpath = (p: string) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+};
+
+// Resolves after ms, or quietly once stop aborts. Tests inject their own.
+const sleep = (ms: number, stop: AbortSignal) => delay(ms, undefined, { signal: stop }).catch(() => {});
+
+export function searchExtension(
+  loadFinder: () => Promise<FinderClass> = async () => (await import("@ff-labs/fff-node")).FileFinder,
+  { wait = sleep }: { wait?: (ms: number, stop: AbortSignal) => Promise<unknown> } = {},
+) {
   return (pi: ExtensionAPI) => {
-    let finder: Promise<Finder | null> = Promise.resolve(null);
+    // One index per session; closed flips synchronously on shutdown or session switch.
+    type Index = { finder: Promise<Finder | null>; closed: boolean };
+    let index: Index | undefined;
     let root = "";
     let noticed = false;
 
     async function open(cwd: string): Promise<Finder | null> {
-      if (cwd === resolve(homedir()) || dirname(cwd) === cwd) return null;
+      if (cwd === realpath(homedir()) || dirname(cwd) === cwd) return null;
       const FFF = await loadFinder();
       if (!FFF.isAvailable()) return null;
-      const opts = { basePath: cwd, frecencyDbPath: join(getAgentDir(), "fff", "frecency") };
-      let made = FFF.create(opts);
+      const db = join(getAgentDir(), "fff", "frecency");
+      mkdirSync(dirname(db), { recursive: true });
+      let made = FFF.create({ basePath: cwd, frecencyDbPath: db });
       // A locked or corrupt frecency db should cost ranking, not search.
       if (!made.ok) made = FFF.create({ basePath: cwd });
       return made.ok ? made.value : null;
     }
 
     function close() {
-      const f = finder;
-      finder = Promise.resolve(null);
-      void f.then((x) => x && !x.isDestroyed && x.destroy());
+      const i = index;
+      index = undefined;
+      if (!i) return;
+      i.closed = true;
+      void i.finder.then((f) => f && !f.isDestroyed && f.destroy());
     }
 
-    async function ready(): Promise<Finder | null> {
-      const f = await finder;
-      if (!f || f.isDestroyed) return null;
-      const scanned = await f.waitForScan(SCAN_WAIT_MS);
-      return scanned.ok && scanned.value ? f : null;
+    // The session's finder once scanned; null if loading, creating and scanning take over 5 s.
+    // FFF searches are synchronous, so a finder still open here stays open for the call.
+    async function ready(signal: AbortSignal | undefined): Promise<Finder | null> {
+      const i = index;
+      if (!i) return null;
+      const stop = new AbortController();
+      const abort = () => stop.abort();
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+      try {
+        const scanned = i.finder.then(async (f) => {
+          const r = f && !f.isDestroyed ? await f.waitForScan(SCAN_WAIT_MS) : null;
+          return r?.ok && r.value ? f : null;
+        });
+        const cancelled = new Promise<null>((r) => stop.signal.addEventListener("abort", () => r(null)));
+        const f = await Promise.race([scanned, cancelled, wait(SCAN_WAIT_MS, stop.signal).then(() => null)]);
+        if (signal?.aborted) throw new Error("Operation aborted");
+        return f && !i.closed && !f.isDestroyed ? f : null;
+      } finally {
+        signal?.removeEventListener("abort", abort);
+        stop.abort();
+      }
     }
 
-    // Absolute and index-relative forms of a tool's path argument; null when outside the index.
+    // Absolute and index-relative forms of a tool's path argument; null when FFF cannot express it.
     function scope(ctx: ExtensionContext, path: string | undefined) {
       let abs = resolve(ctx.cwd, path || ".");
       let isDir: boolean;
@@ -110,7 +147,7 @@ export function searchExtension(loadFinder: () => Promise<FinderClass> = async (
         throw new Error(`Path not found: ${abs}`);
       }
       const rel = posix(relative(root, abs));
-      if (rel.startsWith("..") || isAbsolute(rel) || /\s/.test(rel)) return null;
+      if (rel.startsWith("..") || isAbsolute(rel) || /[\s*?[\]{}!,]/.test(rel)) return null;
       return { abs, rel, isDir };
     }
 
@@ -125,8 +162,8 @@ export function searchExtension(loadFinder: () => Promise<FinderClass> = async (
     pi.on("session_start", (_event, ctx) => {
       close();
       noticed = false;
-      root = realpathSync(ctx.cwd);
-      finder = open(root).catch(() => null);
+      root = realpath(ctx.cwd);
+      index = { finder: open(root).catch(() => null), closed: false };
     });
     pi.on("session_shutdown", close);
 
@@ -137,10 +174,10 @@ export function searchExtension(loadFinder: () => Promise<FinderClass> = async (
         "Search file contents. Returns path:line: text per match, respecting .gitignore.",
       parameters: GREP_PARAMETERS as never,
       async execute(id, params: { pattern: string; path?: string; glob?: string; ignoreCase?: boolean; literal?: boolean; context?: number; limit?: number }, signal, onUpdate, ctx) {
-        const f = await ready();
+        const f = await ready(signal);
         const where = f && scope(ctx, params.path);
         const glob = params.glob?.replace(/^!/, "");
-        const unsafe = /\s/.test(glob ?? "") || (where && !where.isDir && (/[*?[\]{},]/.test(where.rel) || !/[a-z]/i.test(where.rel)));
+        const unsafe = /\s/.test(glob ?? "") || (where && !where.isDir && !/[a-z]/i.test(where.rel));
         if (!f || !where || unsafe) return fallback(createGrepTool, ctx, [id, params, signal, onUpdate]);
 
         // FFF reads leading query tokens as file constraints (globs, path/ segments).
@@ -207,7 +244,7 @@ export function searchExtension(loadFinder: () => Promise<FinderClass> = async (
         "Find files by name. A pattern with * ? [ or { is a glob; other text is a fuzzy name search. Git-changed and often-used files rank first. Respects .gitignore.",
       parameters: FIND_PARAMETERS as never,
       async execute(id, params: { pattern: string; path?: string; limit?: number }, signal, onUpdate, ctx) {
-        const f = await ready();
+        const f = await ready(signal);
         const where = f && scope(ctx, params.path);
         const { pattern } = params;
         if (!f || !where || !where.isDir || pattern.startsWith("/")) return fallback(createFindTool as never, ctx, [id, params as never, signal, onUpdate]);
@@ -219,21 +256,21 @@ export function searchExtension(loadFinder: () => Promise<FinderClass> = async (
         if (/[*?[{]/.test(pattern)) {
           // Like Pi's fd call: the glob may match at any depth under path.
           const g = pattern === "**" || pattern.startsWith("**/") ? pattern : `**/${pattern}`;
-          const r = f.glob(`${base}${g}`, { pageSize: limit });
+          let r = f.glob(`${base}${g}`, { pageSize: limit });
+          // Rank every match, not just the first page, so a changed file can come first.
+          if (r.ok && r.value.totalMatched > r.value.items.length) r = f.glob(`${base}${g}`, { pageSize: r.value.totalMatched });
           if (!r.ok) throw new Error(r.error);
           const dirty = (s: string) => (s === "clean" ? 0 : 1);
           items = [...r.value.items].sort((a, b) => dirty(b.gitStatus) - dirty(a.gitStatus) || b.totalFrecencyScore - a.totalFrecencyScore);
           total = r.value.totalMatched;
         } else {
-          const r = f.fileSearch(pattern, { pageSize: base ? Math.max(limit, 1000) : limit });
+          // FFF applies the leading path glob before ranking and paging.
+          const r = f.fileSearch(base ? `${base}** ${pattern}` : pattern, { pageSize: limit });
           if (!r.ok) throw new Error(r.error);
-          // ponytail: typo-tolerant matching pads results with weak hits; keep those scoring at
-          // least half the best. path filters one ranked page; make it an FFF constraint if hits go missing.
-          const best = r.value.scores[0]?.total ?? 0;
-          const all = r.value.items.filter((i, k) => i.relativePath.startsWith(base) && (r.value.scores[k]?.total ?? 0) * 2 >= best);
-          items = all.slice(0, limit);
-          total = all.length;
+          items = r.value.items;
+          total = r.value.totalMatched;
         }
+        items = items.slice(0, limit);
         if (items.length === 0) return text("No files found matching pattern");
 
         const notices: string[] = [];
