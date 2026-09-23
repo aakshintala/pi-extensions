@@ -46,9 +46,9 @@ test("a job is a FleetView row; its viewer follows the log and stops it", async 
   await tui.waitForScreen(screen(chat, [" ● main", "   shell sh job.sh · 0s · first"]));
 
   tui.keys("Down", "Down", "Enter");
-  await tui.waitForScreen(screen(view("0s", ["first"]), ["   main", " ● shell sh job.sh · 0s · first"]));
+  await tui.waitForScreen(screen(view("0s", ["first"]), ["   main", "›● shell sh job.sh · 0s · first"]));
   writeFileSync(join(tui.cwd, "go"), ""); // the viewer follows the new line
-  await tui.waitForScreen(screen(view("0s", ["first", "second"]), ["   main", " ● shell sh job.sh · 0s · second"]));
+  await tui.waitForScreen(screen(view("0s", ["first", "second"]), ["   main", "›● shell sh job.sh · 0s · second"]));
 
   const pgid = Number(readFileSync(join(tui.cwd, "pgid"), "utf8"));
   t.after(() => assert.deepEqual(liveGroup(pgid), [], "the job's own group is gone"));
@@ -57,7 +57,7 @@ test("a job is a FleetView row; its viewer follows the log and stops it", async 
   tui.type("y");
   await tui.waitForEvent("agent_end", 2); // the stop's notice starts a turn
   await tui.waitForScreen(
-    screen(view("stopped 0s", ["first", "second"]), ["   main", " ● shell sh job.sh · stopped 0s · stopped"]).replace(FOOTER[1], "↑72 ↓18 R47 W73 CH45.5% 0.1%/128k (auto)                               harness-1"),
+    screen(view("stopped 0s", ["first", "second"]), ["   main", "›● shell sh job.sh · stopped 0s · stopped"]).replace(FOOTER[1], "↑72 ↓18 R47 W73 CH45.5% 0.1%/128k (auto)                               harness-1"),
   );
   assert.deepEqual(liveGroup(pgid), []);
 });

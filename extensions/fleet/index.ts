@@ -255,9 +255,9 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     return { handled: true, render: true };
   });
 
-  // Opens a row in the viewer; the main row goes back to the chat.
+  // Opens a row in the viewer, or goes back to the chat for the main row. Focus stays on the row (#136).
   const choose = (row: Row) => {
-    focused = false;
+    focused = true;
     if (row.item) viewer.open(row.item);
     else viewer.close();
   };
@@ -280,8 +280,11 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   const unlisten = ctx.ui.onTerminalInput((data) => {
     if (data.startsWith("\x1b[<") || isKeyRelease(data)) return undefined;
     checkCtrlB(ctx);
-    // First, so at a stop confirmation Ctrl+B is "any other key" and cancels.
-    if (!focused && viewer.handleKey(data)) return { consume: true };
+    if (viewer.overlay()) focused = false; // the overlay covers FleetView and takes the keys
+    // First, so at a stop confirmation Ctrl+B is "any other key" and cancels. Esc in FleetView
+    // only returns to the editor, with the viewer still open; a second Esc there closes it.
+    const leave = focused && matchesKey(data, "escape") && !viewer.confirmation();
+    if (!leave && viewer.handleKey(data)) return { consume: true };
     if (matchesKey(data, "ctrl+b") && hint() && editorFocused(tui)) {
       registry.backgroundAll();
       return { consume: true };

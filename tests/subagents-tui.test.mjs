@@ -121,9 +121,9 @@ test("the viewer shows a running agent's transcript, follows it and its steer, a
   const calls = ["", "", " ⏺ thought · read 2 files", "", "", " $ echo hi", "", " hi", ""];
   const head = (state, keys = " · enter steers") => ` agent scout · ${state} · esc back · ctrl+q stop${keys}`;
   const footer = "↑49 ↓32 R2 W49 CH2.1% 0.1%/128k (auto)                       (harness) harness-1";
-  await tui.waitForScreen(viewing([head("0s"), "", ...TASK, ...calls], " ● agent scout · 0s · bash echo hi", footer));
+  await tui.waitForScreen(viewing([head("0s"), "", ...TASK, ...calls], "›● agent scout · 0s · bash echo hi", footer));
 
-  tui.type("look deeper"); // a steer: pending until the child's next step, then a user message
+  tui.type("look deeper"); // typing leaves FleetView for the editor // a steer: pending until the child's next step, then a user message
   tui.keys("Enter");
   await tui.waitForScreen(viewing([head("0s"), "", ...TASK, ...calls, "", " Steering: look deeper", ""], " ● agent scout · 0s · bash echo hi", footer));
 
@@ -153,8 +153,8 @@ test("a finished agent's transcript opens from its saved session, ctrl+o expands
   await tui.waitForEvent("agent_end", 2); // the parent's turn on the child's notice
   tui.keys("Down", "Down", "Enter");
   const content = [" agent scout · done 0s · esc back · ctrl+q stop · enter steers", "", ...TASK, "", "", " ⏺ thought · read 2 files", "", "", " $ echo hi", "", " hi", "", "", " found 3 notes", " STATUS: DONE", ""];
-  await tui.waitForScreen(viewing(content, " ● agent scout · done 0s · STATUS: DONE", "↑87 ↓34 R51 W88 CH38.9% 0.1%/128k (auto)                     (harness) harness-1"));
-  tui.keys("C-o"); // Pi's expand key opens the group, as in the main chat
+  await tui.waitForScreen(viewing(content, "›● agent scout · done 0s · STATUS: DONE", "↑87 ↓34 R51 W88 CH38.9% 0.1%/128k (auto)                     (harness) harness-1"));
+  tui.keys("C-o"); // Pi's expand key opens the group, as in the main chat; it leaves FleetView
   const reads = [" ⏺ Read(notes.md)", "   ⎿  Read 2 lines", "      one", "      two", "", " ⏺ Read(todo.md)", "   ⎿  Read 1 line", "      three"];
   const expanded = [...reads, "", "", " $ echo hi", "", " hi", "", "", " found 3 notes", " STATUS: DONE", ""];
   await tui.waitForScreen(viewing(expanded, " ● agent scout · done 0s · STATUS: DONE", "↑87 ↓34 R51 W88 CH38.9% 0.1%/128k (auto)                     (harness) harness-1"));
@@ -163,7 +163,7 @@ test("a finished agent's transcript opens from its saved session, ctrl+o expands
   writeFileSync(join(tui.agentDir, "settings.json"), JSON.stringify({ quietStartup: true, hideThinkingBlock: false, extensions: WITH_DISPLAY }));
   tui.keys("Down", "Down", "Enter");
   const shown = [...TASK, "", "", " ✻ Thinking", " Where are they?", "", " ⏺ thought · read 2 files", "", "", " $ echo hi", "", " hi", "", "", " found 3 notes", " STATUS: DONE", ""];
-  await tui.waitForScreen(viewing(shown, " ● agent scout · done 0s · STATUS: DONE", "↑87 ↓34 R51 W88 CH38.9% 0.1%/128k (auto)                     (harness) harness-1"));
+  await tui.waitForScreen(viewing(shown, "›● agent scout · done 0s · STATUS: DONE", "↑87 ↓34 R51 W88 CH38.9% 0.1%/128k (auto)                     (harness) harness-1"));
 });
 
 test("a running call's output shows as it comes, and ctrl+q then y in the viewer stops the agent", async (t) => {
@@ -176,7 +176,7 @@ test("a running call's output shows as it comes, and ctrl+q then y in the viewer
   tui.keys("Down", "Down", "Enter");
   const head = (state) => ` agent scout · ${state} · esc back · ctrl+q stop · enter steers`;
   const running = ["", ...TASK, "", "", "", ` $ ${command}`, "", " started"];
-  const row = ` ● agent scout · 0s · bash ${command}`;
+  const row = `›● agent scout · 0s · bash ${command}`;
   const footer = "↑49 ↓32 R2 W49 CH2.1% 0.1%/128k (auto)                       (harness) harness-1";
   await tui.waitForScreen(viewing([head("0s"), ...running, ""], row, footer));
   tui.keys("C-q");
@@ -184,5 +184,5 @@ test("a running call's output shows as it comes, and ctrl+q then y in the viewer
   tui.keys("y");
   await tui.waitForEvent("agent_end", 2); // the parent's turn on the child's notice
   const stopped = [head("stopped 0s"), ...running, "", "", " Command aborted", "", "", " Error: This operation was aborted", ""];
-  await tui.waitForScreen(viewing(stopped, " ● agent scout · stopped 0s · partial output kept", "↑83 ↓34 R51 W84 CH41.5% 0.1%/128k (auto)                     (harness) harness-1"));
+  await tui.waitForScreen(viewing(stopped, "›● agent scout · stopped 0s · partial output kept", "↑83 ↓34 R51 W84 CH41.5% 0.1%/128k (auto)                     (harness) harness-1"));
 });

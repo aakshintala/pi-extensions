@@ -136,10 +136,10 @@ test("Ctrl+B is not taken from an overlay, and cancels a stop confirmation", asy
 test("at a stop confirmation in the chat area, Ctrl+B cancels it and backgrounds nothing", async (t) => {
   const tui = await start(t, undefined, ["--tui-mode", "fullscreen"]);
   await tui.fx({ add: "j", kind: "shell", label: "build" }, { fg: "a" });
-  // Fullscreen: the item takes the chat area and Pi's editor keeps focus.
+  // Fullscreen: the item takes the chat area, FleetView keeps focus on its row (#136), and Pi's editor keeps TUI focus.
   const viewing = (below) => {
     const lines = [" shell build · 0s · esc back · ctrl+q stop"];
-    const bottom = [BORDER, "", BORDER, "   main", " ● shell build · 0s", ...below, ...FOOTER];
+    const bottom = [BORDER, "", BORDER, "   main", "›● shell build · 0s", ...below, ...FOOTER];
     return "\n" + [...lines, ...Array(ROWS - lines.length - bottom.length).fill(""), ...bottom].join("\n");
   };
   tui.keys("Down", "Down", "Enter");
@@ -149,7 +149,7 @@ test("at a stop confirmation in the chat area, Ctrl+B cancels it and backgrounds
   tui.keys("C-b");
   await tui.waitForScreen(viewing([HINT]));
   assert.deepEqual(tui.events().filter((e) => e.startsWith("bg:")), []);
-  tui.keys("C-b"); // with the confirmation gone, the editor has focus: Ctrl+B backgrounds
+  tui.keys("C-b"); // with the confirmation gone, Ctrl+B backgrounds
   await tui.waitForEvent("bg:a");
   await tui.waitForScreen(viewing([]));
 });

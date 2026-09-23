@@ -11,8 +11,9 @@ FleetView: one list below the editor of all background work (agents, shell jobs 
 
 ## Viewer
 
-- Enter or a click on a row shows that item in place of the chat. `●` marks the item on screen.
-- Enter on another row switches straight to it. Enter on `main`, or Esc, returns to the chat.
+- Enter or a click on a row shows that item in place of the chat. `●` marks the item on screen, and focus stays on its row (`›`).
+- Up, Down and Enter on another row switch straight to it. Enter on `main` returns to the chat, with focus on `main`.
+- Esc in FleetView returns to the prompt with the item still open, so typing steers it. A second Esc closes it.
 - A shell job or monitor shows its log file, read as it grows, with colours kept and other control sequences stripped. An agent shows its transcript.
 - Main-session output keeps going to the chat while you view an item, so you see it when you return.
 - The viewer follows new output. Scrolling up pauses it, and End jumps back to the end and follows again.
@@ -58,9 +59,9 @@ Until then Ctrl+B keeps moving the cursor, the hint never shows, and a warning n
 | Down or Left | Empty prompt | Focuses FleetView |
 | Up / Down | FleetView focused | Moves the selection |
 | Enter | FleetView focused | Opens the selected row |
-| Esc | FleetView focused | Returns to the prompt |
-| Click | Fullscreen mode | Opens the row |
-| Esc | Viewing an item | Returns to the chat |
+| Esc | FleetView focused | Returns to the prompt; an open item stays open |
+| Click | Fullscreen mode | Opens the row, like Enter |
+| Esc | Viewing an item, at the prompt | Returns to the chat |
 | Ctrl+Q, then y | Viewing an item | Stops it. Any other key cancels |
 | End | Viewing an item | Jumps to the end and follows again |
 | Ctrl+B | A foreground command runs | Moves every foreground command into the background |
