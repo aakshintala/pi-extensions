@@ -2,18 +2,19 @@
 
 Background subagents: each one is a copy of the current agent, running as its
 own saved Pi session in the same process. Its result comes back as a notice.
-It replaces `@tintinweb/pi-subagents`. Spec: #26. Built so far: the core
-(#52), nesting (#53) and the transcript viewer (#68). Worktrees and fork (#54)
-come later.
+It replaces `@tintinweb/pi-subagents`. Spec: #26. Built: the core (#52),
+nesting (#53), the transcript viewer (#68), and worktrees and fork (#54).
 
 ## Tools
 
-- `subagent_spawn({ description, prompt, model, thinking })` returns the
-  agent's id at once. `model` is `provider/id`: an enum of `enabledModels` when
+- `subagent_spawn({ description, prompt, model, thinking, isolation, fork? })`
+  returns the agent's id at once. `model` is `provider/id`: an enum of `enabledModels` when
   that is set, otherwise any model Pi knows. `thinking` is a Pi thinking level
   the model supports: Pi would clamp any other level silently, so it is
-  refused. Neither has a default or a fallback. Top-level spawns beyond
-  `maxConcurrent` queue and start when a slot frees.
+  refused. Neither has a default or a fallback. `isolation` is `none` or
+  `worktree` (see Worktrees). `fork: true` starts the child from a copy of the
+  conversation (see Children). Top-level spawns beyond `maxConcurrent` queue
+  and start when a slot frees.
 - `subagent_message({ id, message })`:
   - a running child reads it after its current step
   - a finished child resumes from its saved session and sends a new notice,
@@ -64,8 +65,11 @@ any agent.
 
 ## Children
 
-- A child starts with a fresh conversation in the parent's cwd. It inherits
-  (#26 story 8):
+- A child starts with a fresh conversation in the parent's cwd, or in its
+  worktree. With `fork: true` it starts from a copy of the parent's
+  conversation as the parent's model sees it at the spawn: after a compaction,
+  the summary and the kept messages. The spawn call that started it has no
+  result in the copy. It inherits (#26 story 8):
   - the parent's active tools, as its tool allowlist
   - the parent's `enabledModels`, so its own `subagent_spawn` offers the same
     models
@@ -80,11 +84,12 @@ any agent.
 - Its session is saved in a folder named after the parent session id, beside
   the parent's session file. The child's session id is its agent id. The first
   entry is the custom entry `rig.subagent` with `{ agentId, parentSessionId, depth }`,
+  plus `worktree` for a worktree child,
   and the session name is the description. Other extensions use the entry to
   detect a child session.
 - Pi writes a session file only after its first assistant message. A child
   stopped while queued, or before its first reply, leaves no file, so it
-  cannot be resumed.
+  cannot be resumed. A fork whose copy holds a reply is saved at the spawn.
 - The prompt ends with an instruction to finish on a `STATUS:` line: `DONE`,
   `DONE_WITH_CONCERNS`, `BLOCKED` or `NEEDS_CONTEXT`.
 - Stopping a child aborts it and stops the background work it owns. It then
@@ -103,6 +108,29 @@ any agent.
   models), so the user can still resume a finished child from FleetView after
   that child's parent session has closed.
 
+## Worktrees
+
+With `isolation: "worktree"` the child works in its own git worktree:
+
+- It is made at the spawn from the `HEAD` of the repository holding the
+  parent's cwd, on the new branch `subagent/<id>`, at
+  `<agent dir>/rig-worktrees/<id>`. The child's cwd is the parent's cwd mapped
+  into it. Nothing is committed for the child.
+- Outside a git repository, or in one with no commit, the spawn is refused
+  with an error, and nothing is created.
+- The spawn result and each notice give the path and branch. When the child
+  finishes, its notice also says what happened to the worktree:
+  - removed, with nothing uncommitted and no commit missing from every remote.
+    The branch is deleted too when it never moved.
+  - kept, with uncommitted changes (untracked files count) or unpushed commits.
+    A worktree is never removed with `--force`.
+- A resume runs in the same worktree, recreated at the same path on its branch
+  if it was removed. The worktree is saved in the child's `rig.subagent` entry,
+  so this holds after a restart.
+- A worktree child's own children work in its worktree by default.
+- A worktree child stopped while queued has its worktree settled the same way.
+  One given up on at the parent's shutdown keeps its worktree.
+
 ## Notices
 
 The model reads one notice per run:
@@ -114,6 +142,7 @@ Subagent 3fa9c1d2 (review auth) completed. STATUS: DONE
 <the child's full final message>
 ```
 
+- A worktree child's notice adds its `Worktree:` line after the counts.
 - A resumed child's notice adds `Session total:`, which covers every run of
   that session. The per-run line covers this run only.
 - Costs below a cent keep two significant digits, for example `$0.000030`.
@@ -137,9 +166,11 @@ the main chat:
 
 - Pi's own user, assistant and tool components. Each call is drawn with its
   tool's definition from the agent's session. Without a live session, it uses
-  the definitions of the child sessions this process has run, the rig's
-  renderers included, then Pi's built-ins. A call to a tool none of them knows
-  shows its raw arguments.
+  the definitions of the child sessions its tree of agents has run, the rig's
+  renderers included, then Pi's built-ins. They are held by the tree's root
+  session and go with it. So after a restart or `/reload`, until a child
+  session runs, a finished agent's calls draw with Pi's stock renderers,
+  ungrouped. A call to a tool none of them knows shows its raw arguments.
 - Tool calls group into one line as in the main chat, and Ctrl+O or a click
   opens a group. Thinking is hidden when Pi's `hideThinkingBlock` is on, read
   on each open.
@@ -155,7 +186,8 @@ the main chat:
   while the viewer is open, the viewer follows the new run.
 - Typing steers the agent. The steer shows as `Steering: …` until the agent
   reads it, then as a user message. Ctrl+Q, then y, stops it.
-- Compaction summaries are not drawn.
+- A compaction keeps the messages already drawn, as the main chat keeps its
+  scrollback. The compaction summary is not drawn.
 
 ## `rig.json` settings
 

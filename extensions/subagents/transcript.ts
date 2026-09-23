@@ -2,7 +2,9 @@
 // own message components, tool calls grouped as in the main chat (#56), and followed
 // live while the agent runs. It is pull-based: a render after the agent reports a change
 // appends the session entries added since the last one (a walk back from the leaf, never
-// a rescan) and redraws the streaming message, so it holds no listener. The viewer
+// a rescan) and redraws the streaming message, so it holds no listener. A compaction is
+// an entry appended after the last one drawn, so the earlier messages stay on screen, as
+// the main chat keeps its scrollback; the summary itself is not drawn. The viewer
 // builds one on each open and disposes it on close, which releases its tool groups.
 // It reads the agent's in-memory SessionManager only: no file is opened or written here.
 import {
@@ -40,22 +42,23 @@ export interface Source {
   partial: Map<string, { isError?: boolean }>;
   /** Bumped on every session event. */
   version: number;
+  /**
+   * The tool definitions of the child sessions its tree has run, the rig's own renderers
+   * included (they carry the group summaries), for drawing its calls when it has no live
+   * session. Held by the tree's root session, so they go with it.
+   */
+  root: { defs: Map<string, unknown> };
+}
+
+/** Records a child session's tool definitions in its tree's `defs` (call when it opens). */
+export function rememberTools(session: AgentSession, defs: Map<string, unknown>) {
+  for (const t of session.getAllTools()) defs.set(t.name, session.getToolDefinition(t.name));
 }
 
 /**
- * The tool definitions of every child session this process has run, the rig's own
- * renderers included (they carry the group summaries), for drawing an agent's calls
- * when it has no live session. Process-wide: a child restored after a restart and
- * still queued has none of its own, but the running children that fill the queue do.
+ * Built-ins, when no child session of the tree has run yet: after a restart or /reload,
+ * until one does, a finished agent's calls draw with Pi's stock renderers, ungrouped.
  */
-const DEFS: Map<string, unknown> = ((globalThis as any)[Symbol.for("pi-rig.subagents.toolDefinitions")] ??= new Map());
-
-/** Records a child session's tool definitions (call when it opens). */
-export function rememberTools(session: AgentSession) {
-  for (const t of session.getAllTools()) DEFS.set(t.name, session.getToolDefinition(t.name));
-}
-
-/** Built-ins, when no child session has run in this process. */
 const BUILT_INS: Record<string, (cwd: string) => unknown> = {
   bash: createBashToolDefinition,
   read: createReadToolDefinition,
@@ -118,7 +121,7 @@ class Transcript extends Container {
 
   private tool(call: any, m: any) {
     const src = this.source;
-    const definition = src.session?.getToolDefinition(call.name) ?? DEFS.get(call.name) ?? BUILT_INS[call.name]?.(src.cwd);
+    const definition = src.session?.getToolDefinition(call.name) ?? src.root.defs.get(call.name) ?? BUILT_INS[call.name]?.(src.cwd);
     const c = new ToolExecutionComponent(call.name, call.id, call.arguments, {}, definition as any, this.tui, src.cwd);
     c.setExpanded(this.expanded);
     this.tools.push(c);
@@ -154,7 +157,7 @@ class Transcript extends Container {
       this.saved.addChild(new Spacer(1));
       this.saved.addChild(new Text(this.ui.theme.fg("muted", text.split("\n").map(oneLine).join("\n")), this.pad, 0));
     }
-    // ponytail: compaction and branch summaries are not drawn; add Pi's components for them if children compact.
+    // ponytail: compaction and branch summaries are not drawn; add Pi's components for them if a summary is wanted on screen.
   }
 
   /** Draws the entries added since the last sync. The first sync draws the last OPEN_MESSAGES messages. */
