@@ -5,9 +5,11 @@
 // answer every child request; it may return a promise, to hold a child mid-run.
 // Otherwise (a real pi) replies come in order from <agent dir>/kid.json, each
 // `{ content, after? }`: faux content (text or blocks), sent once the file `after`
-// (relative to the agent dir) exists. File mode also stops the fleet clock at 0, and a
-// child session writes its agent id to <agent dir>/child-id, then reports event
-// "child_start" to $PI_HARNESS_EVENTS (tests/helpers/tui.mjs).
+// (relative to the agent dir) exists. kid.json is that list, or an object of such lists
+// keyed by the child's task (its spawn prompt), each read in its own order. File mode
+// also stops the fleet clock at 0, and a child session reports event "child_start" to
+// $PI_HARNESS_EVENTS (tests/helpers/tui.mjs); the first child to start first writes its
+// agent id to <agent dir>/child-id.
 //
 // In a parent (no rig.subagent entry), globalThis[Symbol.for("pi-rig.test.parentPrompt")],
 // when set, is merged into before_agent_start's systemPromptOptions; this fixture loads
@@ -36,9 +38,13 @@ function exists(path: string) {
   });
 }
 
-async function fromFile() {
-  const steps = JSON.parse(readFileSync(join(getAgentDir(), "kid.json"), "utf8"));
-  const step = steps[(g[STEP] = (g[STEP] ?? -1) + 1)];
+async function fromFile(context: any) {
+  const all = JSON.parse(readFileSync(join(getAgentDir(), "kid.json"), "utf8"));
+  const first = context.messages.find((m: any) => m.role === "user");
+  const text = typeof first.content === "string" ? first.content : first.content.map((c: any) => c.text ?? "").join("");
+  const task = Array.isArray(all) ? "" : text.split("\n\nEnd your final message")[0];
+  const counts = (g[STEP] ??= {});
+  const step = (Array.isArray(all) ? all : all[task])[(counts[task] = (counts[task] ?? -1) + 1)];
   if (step.after) await exists(join(getAgentDir(), step.after));
   const tools = Array.isArray(step.content) && step.content.some((b: any) => b.type === "toolCall");
   return fauxAssistantMessage(step.content, { stopReason: tools ? "toolUse" : "stop" });
@@ -50,7 +56,7 @@ export default function (pi: ExtensionAPI) {
     pi.on("session_start", (_event, ctx) => {
       const marker: any = ctx.sessionManager.getEntries().find((e: any) => e.customType === "rig.subagent");
       if (!marker) return;
-      writeFileSync(join(getAgentDir(), "child-id"), marker.data.agentId);
+      if (!existsSync(join(getAgentDir(), "child-id"))) writeFileSync(join(getAgentDir(), "child-id"), marker.data.agentId);
       appendFileSync(process.env.PI_HARNESS_EVENTS!, JSON.stringify({ event: "child_start" }) + "\n");
     });
   }

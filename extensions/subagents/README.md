@@ -2,9 +2,9 @@
 
 Background subagents: each one is a copy of the current agent, running as its
 own saved Pi session in the same process. Its result comes back as a notice.
-It replaces `@tintinweb/pi-subagents`. Spec: #26. This is the core (#52):
-nesting (#53), worktrees and fork (#54) and the transcript viewer (#68) come
-later.
+It replaces `@tintinweb/pi-subagents`. Spec: #26. Built so far: the core
+(#52) and nesting (#53). Worktrees and fork (#54) and the transcript viewer
+(#68) come later.
 
 ## Tools
 
@@ -12,8 +12,8 @@ later.
   agent's id at once. `model` is `provider/id`: an enum of `enabledModels` when
   that is set, otherwise any model Pi knows. `thinking` is a Pi thinking level
   the model supports: Pi would clamp any other level silently, so it is
-  refused. Neither has a default or a fallback. Spawns beyond `maxConcurrent` queue and
-  start when a slot frees.
+  refused. Neither has a default or a fallback. Top-level spawns beyond
+  `maxConcurrent` queue and start when a slot frees.
 - `subagent_message({ id, message })`:
   - a running child reads it after its current step
   - a finished child resumes from its saved session and sends a new notice,
@@ -22,18 +22,43 @@ later.
 
   Every message, like the spawn prompt, is sent as plain text: a leading
   `/name` is never run as a command or expanded as a template.
-- `subagent_stop({ id })` stops a child. Its notice carries its partial output,
-  marked incomplete.
+- `subagent_stop({ id })` stops a child or any agent below it, and every
+  agent under that one. Its notice carries its partial output, marked
+  incomplete.
 
-Only the session that spawned an agent can message or stop it; any other
-session gets `No subagent <id> of yours`. Children get none of the three tools
-until nesting (#53).
+Only the session that spawned an agent can message it; any other session gets
+`No subagent <id> of yours`. A stop of an agent outside the caller's subtree
+gets `No subagent <id> below you`. From FleetView the user can steer or stop
+any agent.
+
+## Nesting
+
+- The main session is depth 0 and its children depth 1. A child below
+  `maxDepth` has the same three tools, for its own subtree. A child at
+  `maxDepth` has none of them.
+- Nested children never queue and take no `maxConcurrent` slot, so a parent
+  waiting on its child cannot deadlock the queue.
+- `maxSessions` caps the sessions running in one tree: the main session and
+  every running agent below it. A nested spawn, or a nested resume, that would
+  pass the cap is refused with an error. A top-level spawn waits in the queue
+  until the tree has room.
+- A child that ends its run with its own children or jobs still running gets
+  one message listing them, then waits for each notice before it finishes
+  (the fleet extension's session-end rule). Its own notice comes after theirs.
+- Tokens and cost roll up: a child's notice counts its own replies plus those
+  of every agent that finished below it during the run. `Session total:`
+  counts the child's own session only.
+- In FleetView a nested agent is shown indented under its parent.
+- A child session opened outside its tree, for example with `pi --session`,
+  gets none of the tools.
 
 ## Children
 
 - A child starts with a fresh conversation in the parent's cwd. It inherits
   (#26 story 8):
   - the parent's active tools, as its tool allowlist
+  - the parent's `enabledModels`, so its own `subagent_spawn` offers the same
+    models
   - the parent's system prompt sections as of the parent's latest run: the
     custom prompt, appended prompt, context files (AGENTS.md) and skills
   - the extensions Pi discovers for that cwd and agent dir
@@ -95,5 +120,7 @@ Section `subagents`, edited in `/rig`:
 |---|---|---|
 | `maxConcurrent` | 10 | Top-level subagents running at once |
 | `maxInlineChars` | 16000 | Longest result sent inline; longer ones go to a file |
+| `maxDepth` | 2 | Deepest subagent level; agents there get no subagent tools |
+| `maxSessions` | 32 | Sessions running in one tree of agents, root included |
 
 No commands or keys.

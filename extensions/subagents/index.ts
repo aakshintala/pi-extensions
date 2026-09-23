@@ -1,8 +1,9 @@
-// Subagents core (spec #26, ticket #52): subagent_spawn, subagent_message and
-// subagent_stop for top-level children. Each child is a persisted Pi session in
-// this process, registered with the shared fleet as an `agent` item; its result
-// reaches the parent as a fleet notice. Nesting (#53), worktrees and fork (#54)
-// and the transcript viewer (#68) are later tickets.
+// Subagents (spec #26; core #52, nesting #53): subagent_spawn, subagent_message and
+// subagent_stop. Each child is a persisted Pi session in this process, registered
+// with the shared fleet as an `agent` item; its result reaches the parent as a fleet
+// notice. Every session runs this factory, so a child spawns its own children with
+// its own instance; the instances share one process-wide map of agents (the tree).
+// Worktrees and fork (#54) and the transcript viewer (#68) are later tickets.
 import { existsSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -37,15 +38,20 @@ const ITEM_STOP_MS = 5000;
 const SETTINGS = [
   { key: "maxConcurrent", type: "integer", min: 1, max: 64, default: 10, description: "Top-level subagents running at once" },
   { key: "maxInlineChars", type: "integer", min: 1000, max: 1_000_000, default: 16_000, description: "Longest result sent inline; longer ones go to a file" },
+  { key: "maxDepth", type: "integer", min: 1, max: 8, default: 2, description: "Deepest subagent level; agents there get no subagent tools" },
+  { key: "maxSessions", type: "integer", min: 2, max: 256, default: 32, description: "Sessions running in one tree of agents, root included" },
 ] as const;
 
 type Stats = { turns: number; tools: number; tokens: number; cost: number; ms: number };
 /** What a child inherits from its parent (#26 story 8), read when it starts. */
-type Inherit = { tools: string[]; prompt?: BuildSystemPromptOptions };
+type Inherit = { tools: string[]; prompt?: BuildSystemPromptOptions; models: ExtensionContext["scopedModels"] };
 
 type Agent = {
   id: string;
+  /** The parent's session id: the main session's, or its parent agent's id. */
   owner: string;
+  /** 1 for a child of the main session. */
+  depth: number;
   label: string;
   model: NonNullable<ExtensionContext["model"]>;
   thinking: string;
@@ -64,7 +70,30 @@ type Agent = {
   /** The parent is shutting down: the notice is saved in its session instead of delivered. */
   closing?: boolean;
   activity: string;
+  /** The current run's counts, which finished children add their tokens and cost to. */
+  stats?: Omit<Stats, "ms">;
+  /** Starts queued top-level agents of the instance that spawned this one. */
+  pump: () => void;
 };
+
+/** Every agent of every session in this process, by id; an agent's id is its session id. */
+const TREE = Symbol.for("pi-rig.subagents.tree");
+const tree: Map<string, Agent> = ((globalThis as any)[TREE] ??= new Map());
+
+/** The session at the top of `session`'s tree. */
+function rootOf(session: string) {
+  while (tree.has(session)) session = tree.get(session)!.owner;
+  return session;
+}
+
+/** Sessions running in `root`'s tree: the root and each running agent in it. */
+const sessions = (root: string) => 1 + [...tree.values()].filter((a) => a.state === "running" && rootOf(a.owner) === root).length;
+
+/** Whether `a` is below the session `session`. */
+function below(a: Agent, session: string) {
+  for (let x: Agent | undefined = a; x; x = tree.get(x.owner)) if (x.owner === session) return true;
+  return false;
+}
 
 export const isChild = (ctx: Pick<ExtensionContext, "sessionManager">) =>
   ctx.sessionManager.getEntries().some((e) => e.type === "custom" && e.customType === MARKER);
@@ -119,6 +148,9 @@ export default function (pi: ExtensionAPI) {
 
   const agents = new Map<string, Agent>();
   const queue: Agent[] = [];
+  /** This session's depth: 0 for the main session. */
+  let depth = 0;
+  let scope: ExtensionContext["scopedModels"] = [];
   /** The parent's prompt sections as of its latest run, for its children. */
   let promptOptions: BuildSystemPromptOptions | undefined;
   pi.on("before_agent_start", (event) => {
@@ -126,11 +158,28 @@ export default function (pi: ExtensionAPI) {
   });
 
   const running = () => [...agents.values()].filter((a) => a.state === "running").length;
+  const inherit = (): Inherit => ({ tools: pi.getActiveTools(), prompt: promptOptions, models: scope });
   function pump() {
-    while (queue.length && running() < setting("maxConcurrent")) {
+    while (queue.length && running() < setting("maxConcurrent") && sessions(queue[0].owner) < setting("maxSessions")) {
       const a = queue.shift()!;
-      a.run = run(a, { tools: pi.getActiveTools(), prompt: promptOptions });
+      a.run = run(a, inherit());
     }
+  }
+
+  /** A nested spawn or resume that would take the tree past maxSessions is refused: it never queues, so a parent waiting on its child cannot deadlock. */
+  function admit(owner: string) {
+    const n = depth > 0 ? sessions(rootOf(owner)) : 0;
+    if (n >= setting("maxSessions")) throw new Error(`Refused: your tree of agents already runs ${n} sessions, the most allowed. Wait for one to finish or stop one.`);
+  }
+
+  /** Top-level agents queue for a slot; nested ones start at once (admit first). */
+  function start(a: Agent) {
+    agents.set(a.id, a);
+    tree.set(a.id, a);
+    register(a);
+    if (depth > 0) return void (a.run = run(a, inherit()));
+    queue.push(a);
+    pump();
   }
 
   function register(a: Agent) {
@@ -139,6 +188,7 @@ export default function (pi: ExtensionAPI) {
       owner: a.owner,
       kind: "agent",
       label: a.label,
+      parentId: tree.has(a.owner) ? a.owner : undefined,
       status: a.state === "queued" ? "queued" : "running",
       activity: () => a.activity,
       // ponytail: the transcript viewer is #68; until then the item shows where the session lives.
@@ -188,6 +238,7 @@ export default function (pi: ExtensionAPI) {
       sessionManager: a.manager,
       resourceLoader,
       tools: inherit.tools,
+      scopedModels: inherit.models.length ? [...inherit.models] : undefined,
     });
     return session;
   }
@@ -196,7 +247,7 @@ export default function (pi: ExtensionAPI) {
     a.state = "running";
     fleet().update(a.id, { status: "running" });
     const began = fleet().now();
-    const stats = { turns: 0, tools: 0, tokens: 0, cost: 0 };
+    const stats = (a.stats = { turns: 0, tools: 0, tokens: 0, cost: 0 });
     let error: string | undefined;
     let from = 0;
     let text = "";
@@ -248,7 +299,10 @@ export default function (pi: ExtensionAPI) {
       } catch (e) {
         if (!isFinished(fleet().get(a.id)?.status ?? "completed")) report(a, "failed", `Error: ${(e as Error).message}`, `Subagent ${a.id} failed: ${(e as Error).message}`);
       }
-      pump();
+      // A finished agent anywhere in the tree may free room for the top level's queue.
+      let top = a;
+      while (tree.has(top.owner)) top = tree.get(top.owner)!;
+      top.pump();
     }
   }
 
@@ -279,6 +333,12 @@ export default function (pi: ExtensionAPI) {
     if (a.stopped) parts.push(body ? `Partial output, incomplete:\n${body}` : "No output.");
     else if (body) parts.push(body);
     const result = error ? `Error: ${error}` : a.stopped ? "partial output kept" : `STATUS: ${statusOf(text)}`;
+    // Tokens and cost roll up: the parent's run counts them, and passes them on when it finishes.
+    const parent = tree.get(a.owner);
+    if (parent?.state === "running" && parent.stats) {
+      parent.stats.tokens += s.tokens;
+      parent.stats.cost += s.cost;
+    }
     report(a, status, result, parts.join("\n\n"));
   }
 
@@ -310,12 +370,11 @@ export default function (pi: ExtensionAPI) {
       if (a.session && a.prompted) await a.session.prompt(text, { source: "extension", expandPromptTemplates: false, streamingBehavior: "steer" });
       else a.prompt += `\n\n${text}`;
     } else {
+      admit(a.owner);
       a.prompt = text;
       a.stopped = false;
       a.state = "queued";
-      register(a);
-      queue.push(a);
-      pump();
+      start(a);
     }
   }
 
@@ -336,8 +395,9 @@ export default function (pi: ExtensionAPI) {
     const saved = manager.buildSessionContext();
     const model = saved.model && c.modelRegistry.find(saved.model.provider, saved.model.modelId);
     if (!model) return undefined;
-    const a: Agent = { id, owner, label: manager.getSessionName() ?? id, model, thinking: saved.thinkingLevel, state: "done", prompt: "", cwd: c.cwd, manager, stopped: false, activity: "" };
+    const a: Agent = { id, owner, depth: depth + 1, label: manager.getSessionName() ?? id, model, thinking: saved.thinkingLevel, state: "done", prompt: "", cwd: c.cwd, manager, stopped: false, activity: "", pump };
     agents.set(id, a);
+    tree.set(id, a);
     return a;
   }
 
@@ -368,16 +428,14 @@ export default function (pi: ExtensionAPI) {
       const levels = getSupportedThinkingLevels(model as any) as string[];
       if (!levels.includes(p.thinking)) throw new Error(`${p.model} cannot think at "${p.thinking}". Use one of: ${levels.join(", ")}.`);
       const owner = c.sessionManager.getSessionId();
+      admit(owner);
       // The child's session id is its agent id, so a later process can find its file.
       const id = randomUUID().slice(0, 8);
       const manager = SessionManager.create(c.cwd, childDir(c), { id, parentSession: c.sessionManager.getSessionFile() });
       manager.appendCustomEntry(MARKER, { agentId: id, parentSessionId: owner });
       manager.appendSessionInfo(p.description);
-      const a: Agent = { id, owner, label: p.description, model, thinking: p.thinking, state: "queued", prompt: p.prompt, cwd: c.cwd, manager, stopped: false, activity: "" };
-      agents.set(id, a);
-      register(a);
-      queue.push(a);
-      pump();
+      const a: Agent = { id, owner, depth: depth + 1, label: p.description, model, thinking: p.thinking, state: "queued", prompt: p.prompt, cwd: c.cwd, manager, stopped: false, activity: "", pump };
+      start(a);
       return reply(`Subagent ${id} ${a.state === "queued" ? "queued" : "started"}.`, id);
     },
     ...toolRenderers({
@@ -410,12 +468,15 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "subagent_stop",
     label: "Stop",
-    description: "Stop a subagent. Its notice carries its partial output, marked incomplete.",
+    description: "Stop any agent below you: one of your subagents or one of theirs. Every agent under it stops too. Its notice carries its partial output, marked incomplete.",
     parameters: params({ id: str("Subagent id") }),
     async execute(_id: string, p: { id: string }, _signal: unknown, _update: unknown, c: ExtensionContext) {
-      const a = find(p.id, c);
+      const known = tree.get(p.id);
+      const a = known ? (below(known, c.sessionManager.getSessionId()) ? known : undefined) : restore(p.id, c);
+      if (!a) throw new Error(`No subagent ${p.id} below you.`);
       if (a.state === "done") return reply(`Subagent ${a.id} already finished.`, a.id);
-      await stop(a);
+      // Through its fleet item: an agent below a child belongs to that child's instance.
+      await fleet().get(a.id)?.stop();
       return reply(`Subagent ${a.id} stopped.`, a.id);
     },
     ...toolRenderers({
@@ -426,8 +487,10 @@ export default function (pi: ExtensionAPI) {
   } as any);
 
   pi.on("session_start", (_event, c) => {
-    // Nesting is #53: until then a child gets none of these tools.
-    if (isChild(c)) pi.setActiveTools(pi.getActiveTools().filter((t) => !TOOLS.includes(t)));
+    // A child session opened outside its tree (its parent is not running here) is treated as at the cap.
+    depth = tree.get(c.sessionManager.getSessionId())?.depth ?? (isChild(c) ? Infinity : 0);
+    scope = c.scopedModels;
+    if (depth >= setting("maxDepth")) pi.setActiveTools(pi.getActiveTools().filter((t) => !TOOLS.includes(t)));
     // Same name: Pi keeps one definition per name, so this replaces the base tool.
     else if (c.scopedModels.length) pi.registerTool(spawnTool(scoped(c)) as any);
   });
@@ -439,6 +502,7 @@ export default function (pi: ExtensionAPI) {
     for (const a of all) a.closing = true;
     await Promise.all(all.map(stop));
     await Promise.all(all.map((a) => a.run));
+    for (const a of all) tree.delete(a.id);
     agents.clear();
   });
 }

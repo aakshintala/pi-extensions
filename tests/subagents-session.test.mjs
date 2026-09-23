@@ -1,16 +1,17 @@
-// Subagents core (#52) in scripted SDK sessions, which run without the UI. The parent
+// Subagents core (#52) and nesting (#53) in scripted SDK sessions, which run without the UI. The parent
 // is a scripted session; each child is a real Pi session the extension creates, loading
 // the extensions listed in the sealed agent dir's settings.json, with replies from the
 // "kid" model (tests/fixtures/subagents/kid.ts).
 import "./fixtures/tool-display/pi-tui.mjs"; // lets the extension module load in plain node
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxText, fauxToolCall, scriptedSession } from "./helpers/session.mjs";
 import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
 import { fleet } from "../shared/fleet/index.ts";
+import { rigSettings } from "../shared/settings/index.ts";
 
 const path = (p) => fileURLToPath(new URL(p, import.meta.url));
 const EXTENSIONS = [path("./fixtures/subagents/kid.ts"), path("../extensions/fleet/index.ts"), path("../extensions/subagents/index.ts")];
@@ -100,6 +101,27 @@ function onWait(fn) {
     return off;
   };
 }
+
+/**
+ * Sets a `subagents` rig.json setting for this test; call after start(). The settings
+ * instance is per process, so its file may be in an earlier test's removed dir: that dir
+ * is removed again afterwards (the reset runs after the session's own cleanup).
+ */
+function setting(t, key, value) {
+  const rig = rigSettings("");
+  const section = rig.sections().find((s) => s.name === "subagents");
+  section.set(key, value);
+  t.after(() => {
+    section.reset(key);
+    const box = dirname(dirname(rig.path));
+    if (basename(box).startsWith("pi-rig-session-") && !existsSync(join(box, "cwd"))) rmSync(box, { recursive: true, force: true });
+  });
+}
+
+const idOf = (label) => fleet().items().find((i) => i.label === `do ${label}`)?.id;
+const noticed = (context, label, status = "completed") => context.messages.some((m) => m.role !== "assistant" && m.role !== "toolResult" && textOf(m).includes(`(do ${label}) ${status}`));
+/** Answers only when aborted, as a provider does. */
+const untilAborted = (options) => new Promise((resolve) => options.signal.addEventListener("abort", () => resolve(fauxAssistantMessage([], { stopReason: "aborted" }))));
 
 const STATS = /^\d+ turns? · \d+ tool uses? · [\d,]+ tokens? · \$0\.00 · 0s$/;
 
@@ -353,12 +375,13 @@ test("stop works on a queued child and on one mid-reply; a failed child reports 
   assert.deepEqual(results().slice(11).map(([, text]) => text), [`Subagent ${ids.slow} stopped.`, `Subagent ${ids.queued} stopped.`]);
 });
 
-test("a child gets none of the subagent tools", { timeout: 20_000 }, async (t) => {
+test("with maxDepth 1, a child gets none of the subagent tools", { timeout: 20_000 }, async (t) => {
   let tools;
   const { session } = await start(t, [calls(spawn("look")), says("waiting"), says("waiting"), says("ok")], (context) => {
     tools = getCurrentTools(context.messages).map((tool) => tool.name);
     return says("done")();
   });
+  setting(t, "maxDepth", 1);
   await session.prompt("go");
   assert.ok(tools.includes("read"));
   assert.deepEqual(tools.filter((name) => name.startsWith("subagent_")), []);
@@ -467,9 +490,8 @@ test("only the session that spawned a child can message or stop it", { timeout: 
   const id = started.details.id;
   await held;
   const other = asSession(ctx, "someone-else");
-  const refused = `No subagent ${id} of yours. Use an id that your subagent_spawn returned.`;
-  await assert.rejects(call("subagent_message", { id, message: "hi" }, other), { message: refused });
-  await assert.rejects(call("subagent_stop", { id }, other), { message: refused });
+  await assert.rejects(call("subagent_message", { id, message: "hi" }, other), { message: `No subagent ${id} of yours. Use an id that your subagent_spawn returned.` });
+  await assert.rejects(call("subagent_stop", { id }, other), { message: `No subagent ${id} below you.` });
   assert.equal((await call("subagent_stop", { id }, ctx)).content[0].text, `Subagent ${id} stopped.`);
 });
 
@@ -524,7 +546,178 @@ test("a child inherits the parent's active tools and prompt sections", { timeout
     { tools: ["read", "ls", ...["subagent_spawn", "subagent_message", "subagent_stop"]] },
   );
   await session.prompt("go");
-  assert.deepEqual(child.tools, ["ls", "read"]);
+  assert.deepEqual(child.tools, ["ls", "read", "subagent_message", "subagent_spawn", "subagent_stop"]);
   assert.match(child.prompt, /^PARENT CUSTOM PROMPT/);
   for (const text of ["PARENT APPENDED", "PARENT RULES"]) assert.ok(child.prompt.includes(text), text);
+});
+
+test("a child ending with a grandchild running is woken once, and its notice, counting the grandchild's tokens, comes after", { timeout: 20_000 }, async (t) => {
+  const listed = gate();
+  const tools = {};
+  const child = {};
+  let grandDoneAtNotice;
+  const root = (context) => {
+    if (!context.messages.some((m) => m.role === "toolResult")) return calls(spawn("C"))();
+    if (noticed(context, "C")) grandDoneAtNotice = fleet().get(idOf("G")).status;
+    return says("waiting")();
+  };
+  const { session, agentDir, notices } = await start(t, Array(6).fill(root), async (context, options) => {
+    const task = taskOf(context);
+    tools[task] = getCurrentTools(context.messages).map((tool) => tool.name).filter((name) => name.startsWith("subagent_"));
+    if (task === "G") {
+      await listed;
+      return says("G result\nSTATUS: DONE")();
+    }
+    child.id = options.sessionId;
+    child.context = context;
+    if (!context.messages.some((m) => m.role === "toolResult")) return calls(spawn("G"))();
+    if (lastText(context).startsWith("Your run is ending")) {
+      listed.open();
+      return says("still waiting on G")();
+    }
+    if (noticed(context, "G")) return says("C done\nSTATUS: DONE")();
+    return says("waiting on G")();
+  });
+  await session.prompt("go");
+
+  // Depth 1 keeps the tools; depth 2, the default maxDepth, has none.
+  assert.deepEqual(tools.C, ["subagent_spawn", "subagent_message", "subagent_stop"]);
+  assert.deepEqual(tools.G, []);
+  // The grandchild is shown under its parent.
+  assert.equal(fleet().get(idOf("G")).parentId, child.id);
+  // Woken once with the list, then continued by the grandchild's notice.
+  const users = child.context.messages.filter((m) => m.role !== "assistant" && m.role !== "toolResult").map(textOf);
+  assert.equal(users.filter((u) => u.startsWith("Your run is ending")).length, 1);
+  assert.ok(noticed(child.context, "G"));
+  assert.equal(grandDoneAtNotice, "completed");
+  const notice = notices().find((n) => n.startsWith(`Subagent ${child.id} `));
+  assert.match(notice, /\n\nC done\nSTATUS: DONE$/);
+
+  // Tokens roll up: the child's count is its own replies plus the grandchild's count.
+  const tokens = (text) => Number(/ · ([\d,]+) tokens? · /.exec(text)[1].replace(/,/g, ""));
+  const grand = users.find((u) => u.startsWith(`Subagent ${idOf("G")} `));
+  const dir = join(agentDir, "sessions", session.sessionId);
+  const file = readdirSync(dir).find((f) => f.endsWith(`_${child.id}.jsonl`));
+  const own = readFileSync(join(dir, file), "utf8").trim().split("\n").map(JSON.parse)
+    .filter((e) => e.type === "message" && e.message.role === "assistant")
+    .reduce((n, e) => n + e.message.usage.totalTokens, 0);
+  assert.ok(tokens(grand) > 0);
+  assert.equal(tokens(notice), own + tokens(grand));
+});
+
+test("nested children take no queue slot, and a nested spawn over maxSessions is refused", { timeout: 20_000 }, async (t) => {
+  const bothRunning = gate();
+  const tried = gate();
+  const started = new Set();
+  let refusal;
+  const root = (context) => (context.messages.some((m) => m.role === "toolResult") ? says("waiting")() : calls(spawn("C"))());
+  const { session, notices } = await start(t, Array(6).fill(root), async (context) => {
+    const task = taskOf(context);
+    if (task !== "C") {
+      started.add(task);
+      if (started.size === 2) bothRunning.open();
+      await tried; // both run until C has tried a third
+      return says(`${task} done`)();
+    }
+    const results = context.messages.filter((m) => m.role === "toolResult");
+    if (!results.length) return calls(spawn("G1"), spawn("G2"))();
+    if (results.length === 2) {
+      await bothRunning; // the only top-level slot is C's, yet both grandchildren run
+      return calls(spawn("G3"))();
+    }
+    if (results.length === 3 && context.messages.at(-1).role === "toolResult") {
+      refusal = [results[2].isError, textOf(results[2])];
+      tried.open();
+    }
+    return says("C done")();
+  });
+  setting(t, "maxConcurrent", 1);
+  setting(t, "maxSessions", 4); // root, C, G1 and G2
+  await session.prompt("go");
+  assert.deepEqual(refusal, [true, "Refused: your tree of agents already runs 4 sessions, the most allowed. Wait for one to finish or stop one."]);
+  assert.deepEqual([...started].sort(), ["G1", "G2"]);
+  assert.equal(idOf("G3"), undefined);
+  assert.match(notices().find((n) => n.includes("(do C)")), /completed/);
+});
+
+test("stop reaches any descendant and cascades down the chain; a stop outside the caller's subtree is refused", { timeout: 20_000 }, async (t) => {
+  const grandsRunning = gate();
+  const running = new Set();
+  let refusal;
+  let step = 0;
+  const root = (context) => {
+    if (step === 0) return step++, calls(spawn("A"), spawn("B"))();
+    if (step === 1 && noticed(context, "B")) return step++, calls(["subagent_stop", { id: idOf("A1") }])();
+    if (step === 2) return step++, calls(["subagent_stop", { id: idOf("A") }])();
+    return says("waiting")();
+  };
+  const { session, results, notices } = await start(t, Array(12).fill(root), async (context, options) => {
+    const task = taskOf(context);
+    if (task === "A1" || task === "A2") {
+      running.add(task);
+      if (running.size === 2) grandsRunning.open();
+      return untilAborted(options);
+    }
+    const last = context.messages.at(-1);
+    if (task === "A") return last.role === "user" && !noticed(context, "A1", "stopped") && !lastText(context).startsWith("Your run") ? calls(spawn("A1"), spawn("A2"))() : says("waiting")();
+    // B: tries to stop its sibling's child.
+    if (last.role !== "toolResult") {
+      await grandsRunning;
+      return calls(["subagent_stop", { id: idOf("A1") }])();
+    }
+    refusal = [last.isError, textOf(last)];
+    return says("B done\nSTATUS: DONE")();
+  });
+  await session.prompt("go");
+  const [a, a1, a2] = ["A", "A1", "A2"].map(idOf);
+  assert.deepEqual(refusal, [true, `No subagent ${a1} below you.`]);
+  assert.deepEqual(results().slice(2).map(([e, text]) => [e, text]), [[false, `Subagent ${a1} stopped.`], [false, `Subagent ${a} stopped.`]]);
+  assert.deepEqual([a, a1, a2].map((id) => fleet().get(id).status), ["stopped", "stopped", "stopped"]);
+  assert.match(notices().find((n) => n.startsWith(`Subagent ${a} `)), /^Subagent \w+ \(do A\) stopped\. STATUS: STOPPED\n/);
+});
+
+test("a top-level spawn queues while the tree is at maxSessions, and starts when room frees", { timeout: 20_000 }, async (t) => {
+  const { session, results, notices } = await start(t, [calls(spawn("one"), spawn("two")), ...Array(5).fill(says("waiting"))], says("done\nSTATUS: DONE"));
+  setting(t, "maxSessions", 2); // the root and one agent
+  await session.prompt("go");
+  assert.deepEqual(results().map(([, text]) => text.replace(/ \w{8} /, " ID ")), ["Subagent ID started.", "Subagent ID queued."]);
+  assert.equal(notices().filter((n) => / completed\. STATUS: DONE\n/.test(n)).length, 2);
+});
+
+test("with enabledModels set, a child's subagent_spawn offers only them too", { timeout: 20_000 }, async (t) => {
+  let model;
+  const { session } = await start(t, [calls(spawn("look")), says("waiting"), says("waiting"), says("ok")], (context) => {
+    model = getCurrentTools(context.messages).find((tool) => tool.name === "subagent_spawn")?.parameters.properties.model;
+    return says("done")();
+  }, {
+    before(session) {
+      session.setScopedModels([{ model: session.modelRuntime.getModel("kid", "kid-1") }]);
+    },
+  });
+  await session.prompt("go");
+  assert.deepEqual(model, { type: "string", enum: ["kid/kid-1"] });
+});
+
+test("a nested agent finishing frees room for a queued top-level spawn", { timeout: 20_000 }, async (t) => {
+  const [gRunning, dQueued, dStarted] = [gate(), gate(), gate()];
+  let cAtD;
+  const root = async (context) => {
+    const results = context.messages.filter((m) => m.role === "toolResult").map(textOf);
+    if (!results.length) return calls(spawn("C"))();
+    if (results.length === 1) return (await gRunning, calls(spawn("D"))());
+    if (/queued\.$/.test(results[1])) dQueued.open();
+    return says("waiting")();
+  };
+  const { session, results } = await start(t, Array(8).fill(root), async (context) => {
+    const task = taskOf(context);
+    if (task === "G") return (gRunning.open(), await dQueued, says("G done")());
+    if (task === "D") return (cAtD = fleet().get(idOf("C")).status, dStarted.open(), says("D done")());
+    if (!context.messages.some((m) => m.role === "toolResult")) return calls(spawn("G"))();
+    if (noticed(context, "G")) return (await dStarted, says("C done")());
+    return says("waiting")();
+  });
+  setting(t, "maxSessions", 3); // the root, C and G
+  await session.prompt("go");
+  assert.match(results()[1][1], /^Subagent \w+ queued\.$/);
+  assert.equal(cAtD, "running");
 });
