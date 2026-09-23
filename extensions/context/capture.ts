@@ -505,10 +505,12 @@ export function measureInjectedMessages(
 		// A request-only system message that amends one of the session's (same
 		// timestamp, original not sent) counts only the text the amendment added.
 		const amended = message.role === "system" && requestOnly
-			? baselineMessages.find((base): base is typeof message => base.role === "system" &&
+			? baselineMessages.find((base) => base.role === "system" &&
 				base.timestamp === message.timestamp && !requestSignatures.has(messageSignature(base)))
 			: undefined;
-		const added = amended === undefined ? undefined : addedText(systemMessageText(amended), systemMessageText(message));
+		const added = amended?.role === "system" && message.role === "system"
+			? addedText(systemMessageText(amended), systemMessageText(message))
+			: undefined;
 		if (added === "") continue;
 
 		const identity = message.role === "custom" ? message.customType : message.role;
