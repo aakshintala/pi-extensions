@@ -4,9 +4,9 @@
 import "./fixtures/tool-display/pi-tui.mjs"; // lets the extension modules load in plain node
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -50,6 +50,7 @@ function fakeTimers(t) {
   const pending = new Set();
   globalThis[TIMERS] = {
     setTimeout: (fn, ms) => {
+      if (ms === 10) return setTimeout(fn, ms); // a killed group's zombie wait runs in real time
       const h = { fn, ms };
       pending.add(h);
       return h;
@@ -78,6 +79,12 @@ function fakeTimers(t) {
     },
   };
 }
+
+/** SIGKILLs a detached child's group and resolves once node has reaped it, so its group is gone. */
+const killed = (child) =>
+  child.exitCode !== null || child.signalCode !== null
+    ? Promise.resolve()
+    : settles(new Promise((exited) => (child.once("exit", exited), process.kill(-child.pid, "SIGKILL"))), `child ${child.pid} to exit`);
 
 /** Resolves with `p`, or fails after 10 s, so a regression fails instead of hanging. */
 const settles = (p, what) => Promise.race([p, until(() => false, what)]);
@@ -151,6 +158,7 @@ test("run_in_background returns the job ID and log path at once; one notice when
   assert.deepEqual(got, [`Job ${id} completed (exit 0) after 0s. Log: ${log}`]);
   const item = fleet().get(id);
   assert.deepEqual([item.kind, item.label, item.status, item.view.log], ["shell", `echo started; ${hold("go")}; echo finished`, "completed", log]);
+  assert.equal(s.timers.has(1000), false, "its log and group check ends with it");
 });
 
 test("a command still running after autoBackgroundSeconds becomes a job; the setting comes from rig.json", async (t) => {
@@ -444,6 +452,308 @@ test("a Pi that exits without shutting down still kills its job groups", async (
   const [pgid, log] = r.stdout.trim().split("\n");
   t.after(() => rmSync(dirname(log), { recursive: true, force: true }));
   await until(() => liveGroup(Number(pgid)).length === 0, `group ${pgid} to be killed at exit`);
+});
+
+// Guards and crash clean-up (#49).
+
+test("a bare sleep is refused; sleep in a polling loop or in the background runs", async (t) => {
+  const s = await start(t, [
+    calls(["bash", { command: "echo a; sleep 1" }], ["bash", { command: "until true; do sleep 1; done; echo polled" }], ["bash", { command: "sleep 0 & echo bg" }]),
+    says("done"),
+  ]);
+  await s.session.prompt("go");
+  const r = s.results();
+  assert.deepEqual(r[0], [
+    true,
+    "Blocked: a bare sleep only waits. To wait for a condition, poll in a loop (until <check>; do sleep 1; done). " +
+      "To wait for a job, use jobs wait. For long work, set run_in_background; to react to output, use monitor.",
+  ]);
+  assert.deepEqual(r.slice(1), [
+    [false, "polled\n"],
+    [false, "bg\n"],
+  ]);
+});
+
+test("the sleep check reads shell structure, not the word", async () => {
+  const { blockingSleep } = await import("../extensions/jobs/guards.ts");
+  const cases = {
+    "sleep 5": true,
+    "sleep 5 && echo hi": true,
+    "echo a\nsleep 5": true,
+    "FOO=1 sleep 5 2>&1": true,
+    "sleep 5 &>/dev/null": true,
+    "if x; then sleep 5; fi": true,
+    "(sleep 5)": true,
+    "x | sleep 5": true,
+    "while x; do :; done; sleep 5": true,
+    "for i in 1 2; do sleep 1; done": true, // only while and until poll
+    "cat <<'EOF' | x\nsleep 5\nEOF\nsleep 1": true,
+    "{ sleep 1; }": true,
+    "f() { echo; }; sleep 1": true,
+    "command sleep 5": true,
+    "exec sleep 5": true,
+    "env -i FOO=1 sleep 5": true,
+    "nice -n 5 sleep 5": true,
+    "nohup sleep 5": true,
+    "timeout -s KILL 10 sleep 5": true,
+    "/bin/sleep 5": true,
+    "\\sleep 5": true,
+    "'sleep' 5": true,
+    "`sleep 5`": true,
+    "echo `sleep 5`": true,
+    "echo $(x; sleep 5)": true,
+    'x="$(sleep 5)"': true,
+    "until [ -e f ]; do sleep 0.05; done": false,
+    "until curl -s localhost:3000 >/dev/null; do\n  sleep 1\ndone": false,
+    "while x; do for i in 1 2; do sleep 1; done; done": false,
+    "sleep 60 &": false,
+    "echo sleep 5": false,
+    "echo 'sleep 5'": false,
+    'echo "a; sleep 5"': false,
+    "echo a \\; sleep 5": false,
+    "while x; do y=$(sleep 1); done": false,
+    "f() { sleep 1; }": false,
+    "function f { sleep 1; }": false,
+    "function f() {\n  sleep 1\n}\necho": false,
+    "command -v sleep": false,
+    "timeout 5 sleepy": false,
+    "cat <<EOF\nsleep 5\nEOF\necho": false,
+    "# sleep 5\necho": false,
+    "sleepy 5": false,
+  };
+  for (const [command, blocks] of Object.entries(cases)) assert.equal(blockingSleep(command), blocks, command);
+});
+
+test("only an unfinished prompt-shaped line counts as a prompt", async () => {
+  const { PROMPT } = await import("../extensions/jobs/guards.ts");
+  const lines = {
+    "Continue? [y/N] ": true,
+    "Password: ": true,
+    "[sudo] password for me:": true,
+    "Enter passphrase for key '/k': ": true,
+    "? Pick a template ": true,
+    "Are you sure? ": true,
+    "> ": true,
+    "Why?": false,
+    "password reset done": false,
+    "checked password policy: ok": false,
+    "Compiling foo": false,
+  };
+  for (const [line, prompt] of Object.entries(lines)) assert.equal(PROMPT.test(line), prompt, line);
+});
+
+test("a job whose log passes 5 GB is stopped, and its notice says why", async (t) => {
+  let id;
+  // Extends its log to just past 5 GB without writing it (a sparse file), then blocks.
+  const grow = `'${process.execPath}' -e 'require("fs").ftruncateSync(1, 5 * 1024 ** 3 + 1)'; ${FOREVER}`;
+  const s = await start(t, [calls(bg(grow)), (context) => ((id = s.jobId(lastText(context))), says("waiting")()), says("still waiting"), says("done")]);
+  const run = s.session.prompt("go");
+  await until(() => id && statSync(fleet().get(id).view.log).size > 5 * 1024 ** 3, "the log to grow");
+  await s.timers.fire(1000);
+  await s.timers.pumping(800, run);
+  const log = fleet().get(id).view.log;
+  assert.deepEqual(s.notices().filter((n) => n.startsWith("Job ")), [`Job ${id} stopped (exit 143) after 0s because its output passed 5 GB. Log: ${log}`]);
+});
+
+test("a job whose output stops on a prompt warns the agent once", async (t) => {
+  let id;
+  const s = await start(t, [
+    calls(bg(`printf 'working\\nContinue? [y/N] '; ${FOREVER}`), bg(`echo quiet; ${FOREVER}`)),
+    (context) => ((id = s.jobId(textOf(context.messages.at(-2)))), says("waiting")()),
+    says("warned"),
+    says("still waiting"),
+    says("done"),
+  ]);
+  const run = s.session.prompt("go");
+  await until(() => id && existsSync(fleet().get(id).view.log) && readFileSync(fleet().get(id).view.log, "utf8").endsWith("[y/N] "), "the prompt");
+  const warning = `Job ${id} may be waiting for input: its output stopped at "Continue? [y/N]". It gets no input; stop it and rerun it non-interactively.`;
+  const warnings = () => s.notices().filter((n) => n.includes("waiting for input"));
+  for (let i = 0; i < 10; i++) await s.timers.fire(1000); // one tick sees the output, nine see it unchanged
+  assert.deepEqual(warnings(), []);
+  await s.timers.fire(1000);
+  await until(() => warnings().length === 1, "the warning");
+  for (let i = 0; i < 12; i++) await s.timers.fire(1000);
+  for (const item of fleet().items()) if (item.kind === "shell") await s.timers.pumping(800, item.stop());
+  await run;
+  assert.deepEqual(warnings(), [warning]);
+});
+
+test("at most 16 jobs and monitors run at once; more starts are refused, foreground commands still run", async (t) => {
+  const s = await start(t, [
+    calls(bg(hold("go")), bg(hold("go")), ["bash", { command: "echo fine" }]),
+    () => (writeFileSync(join(s.cwd, "go"), ""), says("waiting")()),
+    says("done"),
+  ]);
+  // 15 groups tracked by others in this process, such as monitors or another session's jobs.
+  const { track } = await import("../shared/process-groups/index.ts");
+  for (let i = 0; i < 15; i++) {
+    const child = spawn("tail", ["-f", "/dev/null"], { detached: true, stdio: "ignore" });
+    // Waits for the exit: until it is reaped, the group still counts toward the cap.
+    t.after(() => killed(child));
+    track({ child, pgid: child.pid, record: join(s.cwd, `other${i}.pid`), counted: true });
+  }
+  await s.session.prompt("go");
+  const r = s.results();
+  assert.match(r[0][1], /^Started job/);
+  assert.deepEqual(r.slice(1), [
+    [true, "Not started: 16 jobs and monitors are running, the most allowed. Wait for one or stop one with jobs, then retry."],
+    [false, "fine\n"],
+  ]);
+});
+
+test("maxJobs in rig.json sets the limit", async (t) => {
+  writeFileSync(rig.path, JSON.stringify({ jobs: { maxJobs: 1 } }));
+  t.after(() => rmSync(rig.path, { force: true }));
+  const s = await start(t, [calls(bg(hold("go")), bg(hold("go"))), () => (writeFileSync(join(s.cwd, "go"), ""), says("waiting")()), says("done")]);
+  await s.session.prompt("go");
+  assert.match(s.results()[1][1], /^Not started: 1 jobs and monitors are running/);
+});
+
+/** A job's crash record: its group, and the start times of the group leader and of Pi. */
+const recordOf = (log) => join(dirname(log), `${/(\w+)\.log$/.exec(log)[1]}.pid`);
+const ps = (pid) => spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } }).stdout.trim();
+
+test("a shell's leftover processes whose output passes 5 GB are stopped, with a notice", async (t) => {
+  let id;
+  const grow = `'${process.execPath}' -e 'require("fs").ftruncateSync(1, 5 * 1024 ** 3 + 1)'; exec tail -f /dev/null`;
+  const s = await start(t, [calls(bg(`echo $$ > pgid; sh -c "${grow.replace(/"/g, '\\"')}" &`)), (context) => ((id = s.jobId(lastText(context))), says("waiting")()), says("noted"), says("done")]);
+  const run = s.session.prompt("go");
+  const pgid = await pgidIn(s);
+  await until(() => id && fleet().get(id)?.status === "completed" && statSync(fleet().get(id).view.log).size > 5 * 1024 ** 3, "the shell to exit and the log to grow");
+  await s.timers.fire(1000);
+  await s.timers.pumping(800, run);
+  await until(() => liveGroup(pgid).length === 0, "the leftover writer to be stopped");
+  await until(() => s.notices().filter((n) => n.startsWith("Job ")).length === 2, "the notice");
+  const log = fleet().get(id).view.log;
+  assert.deepEqual(s.notices().filter((n) => n.startsWith("Job ")), [
+    `Job ${id} completed (exit 0) after 0s. Log: ${log}\nIts shell exited, but processes it started are still running; stop ends them.`,
+    `Job ${id}: the processes its shell left running were stopped because its output passed 5 GB. Log: ${log}`,
+  ]);
+});
+
+test("each job's group and start time are recorded until its group is empty, lingering children included", async (t) => {
+  let id;
+  const s = await start(t, [
+    calls(bg(`echo $$ > pgid; sleep 60 & echo $! > child; ${hold("go")}`)),
+    (context) => ((id = s.jobId(lastText(context))), says("waiting")()),
+    says("still waiting"),
+    says("done"),
+  ]);
+  const run = s.session.prompt("go");
+  const pgid = await pgidIn(s);
+  const child = await pgidIn(s, "child");
+  const record = recordOf(fleet().get(id).view.log);
+  assert.equal(existsSync(record), true, "written when the job starts");
+  assert.deepEqual(JSON.parse(readFileSync(record, "utf8")), { pi: process.pid, piStart: ps(process.pid), pgid, start: ps(pgid) });
+  writeFileSync(join(s.cwd, "go"), "");
+  await run;
+  assert.equal(existsSync(record), true, "the shell exited, its sleep still runs");
+  process.kill(child, "SIGKILL");
+  await until(() => liveGroup(pgid).length === 0, "the sleep to die");
+  await s.timers.fire(1000);
+  assert.equal(existsSync(record), false, "the empty group is forgotten");
+});
+
+test("a hanging ps delays a spawn by at most its 1 s timeout, and no record is written", async (t) => {
+  const { startTimeSync, track } = await import("../shared/process-groups/index.ts");
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-jobs-ps-")));
+  const child = spawn("tail", ["-f", "/dev/null"], { detached: true, stdio: "ignore" });
+  const path = process.env.PATH;
+  t.after(() => {
+    process.env.PATH = path;
+    rmSync(bin, { recursive: true, force: true });
+    return killed(child);
+  });
+  writeFileSync(join(bin, "ps"), "#!/bin/sh\nexec sleep 5\n", { mode: 0o755 });
+  process.env.PATH = `${bin}:${path}`;
+  const began = Date.now();
+  assert.equal(startTimeSync(child.pid), undefined);
+  track({ child, pgid: child.pid, record: join(bin, "x.pid") });
+  const took = Date.now() - began;
+  assert.ok(took < 4500, `up to three ps runs (this one, Pi's and the leader's) took ${took} ms`); // 10-15 s without the timeout
+  assert.equal(existsSync(join(bin, "x.pid")), false, "an unknown start time writes no record");
+});
+
+test("a killed Pi's jobs and monitors are reaped on the next start; nothing else is", async (t) => {
+  const box = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-jobs-reap-")));
+  const strays = [];
+  t.after(() => {
+    for (const p of strays)
+      try {
+        process.kill(-p.pid, "SIGKILL");
+      } catch {}
+    rmSync(box, { recursive: true, force: true });
+  });
+  // A ps that fails for this test's own pid, as a ps run can.
+  const realPs = spawnSync("sh", ["-c", "command -v ps"], { encoding: "utf8" }).stdout.trim();
+  mkdirSync(join(box, "bin"));
+  writeFileSync(join(box, "bin", "ps"), `#!/bin/sh\nfor a; do last=$a; done\n[ "$last" = "${process.pid}" ] && exit 1\nexec ${realPs} "$@"\n`, { mode: 0o755 });
+  const env = { ...process.env, PI_CODING_AGENT_DIR: box, HOME: box, TMPDIR: box, PATH: `${join(box, "bin")}:${process.env.PATH}` };
+  const crash = spawnSync(process.execPath, [path("./fixtures/jobs/crash.mjs"), "kill"], { cwd: box, env, encoding: "utf8", timeout: 20_000 });
+  assert.equal(crash.signal, "SIGKILL", crash.stderr);
+  const [pgid, log, deadPi] = crash.stdout.trim().split("\n");
+  strays.push({ pid: Number(pgid) });
+  assert.notDeepEqual(liveGroup(Number(pgid)), [], "no exit handler ran");
+
+  // Unrelated groups with planted records.
+  const forge = (dir, record, { dirMode = 0o700, fileMode = 0o600 } = {}) => {
+    const p = spawn("tail", ["-f", "/dev/null"], { detached: true, stdio: "ignore" });
+    strays.push(p);
+    mkdirSync(join(box, dir), { mode: dirMode });
+    chmodSync(join(box, dir), dirMode);
+    const file = join(box, dir, "x.pid");
+    writeFileSync(file, typeof record === "string" ? record : JSON.stringify({ pgid: p.pid, ...record(p) }), { mode: fileMode });
+    chmodSync(file, fileMode);
+    return { p, file };
+  };
+  const dead = (p) => ({ pi: Number(deadPi), piStart: "gone", start: ps(p.pid) });
+  const monitor = forge("pi-monitor-x", dead);
+  const reused = forge("pi-jobs-reused", () => ({ pi: Number(deadPi), piStart: "gone", start: "Mon Jan  1 00:00:00 2001" }));
+  const live = forge("pi-jobs-live", (p) => ({ pi: process.pid, piStart: ps(process.pid), start: ps(p.pid) })); // its ps fails
+  const openDir = forge("pi-jobs-open", dead, { dirMode: 0o755 });
+  const openFile = forge("pi-jobs-openfile", dead, { fileMode: 0o644 });
+  const everything = forge("pi-jobs-one", (p) => ({ pi: Number(deadPi), piStart: "gone", pgid: 1, start: ps(1) }));
+  const malformed = forge("pi-jobs-bad", "{not json");
+  await until(() => [monitor, reused, live, openDir, openFile].every((f) => ps(f.p.pid)), "the strays");
+
+  const reap = spawnSync(process.execPath, [path("./fixtures/jobs/crash.mjs"), "reap"], { cwd: box, env, encoding: "utf8", timeout: 20_000 });
+  assert.equal(reap.status, 0, reap.stderr);
+  assert.equal(reap.stdout, "", "no signal to pid 1 or every process");
+  await until(() => liveGroup(Number(pgid)).length === 0, "the killed Pi's job to be reaped");
+  assert.equal(existsSync(recordOf(log)), false);
+  await until(() => liveGroup(monitor.p.pid).length === 0, "the killed Pi's monitor to be reaped");
+  assert.equal(existsSync(monitor.file), false);
+  for (const [f, what] of [
+    [reused, "a reused pid"],
+    [live, "a live Pi's job whose ps failed"],
+    [openDir, "a record in a directory others can write"],
+    [openFile, "a record others can write"],
+  ])
+    assert.notDeepEqual(liveGroup(f.p.pid), [], `${what} is left alone`);
+  assert.deepEqual(
+    [reused, live, openDir, openFile, everything, malformed].map((f) => existsSync(f.file)),
+    [false, true, true, true, false, false],
+    "a dead Pi's records and malformed ones are dropped; the rest are kept",
+  );
+});
+
+test("jobs stop ends the caller's monitors through their rows", async (t) => {
+  const s = await start(t, [
+    calls(["jobs", { action: "stop", id: "mine1234" }], ["jobs", { action: "stop", id: "theirs12" }], ["jobs", { action: "wait", id: "mine1234" }]),
+    says("done"),
+  ]);
+  const stops = [];
+  const monitor = (id, owner) =>
+    fleet().register({ id, owner, kind: "monitor", label: id, activity: () => "", view: { log: join(s.cwd, "rows", "x.log") }, stop: () => (stops.push(id), fleet().finish(id, "stopped", "stopped", null)) });
+  monitor("mine1234", s.session.sessionManager.getSessionId());
+  monitor("theirs12", "other");
+  await settles(s.session.prompt("go"), "the run to end"); // a monitor left running would hold it
+  assert.deepEqual(s.results(), [
+    [false, "Monitor mine1234 stopped."],
+    [true, "No job theirs12 of yours. Use an id from jobs list."],
+    [true, "No job mine1234 of yours. Use an id from jobs list."],
+  ]);
+  assert.deepEqual(stops, ["mine1234"]);
 });
 
 test("a stop whose SIGKILL is still pending does not report leftover processes (#122)", async (t) => {
