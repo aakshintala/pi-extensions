@@ -64,3 +64,9 @@ pi.registerTool({
   lines, expanded capped at 200), `errorLines`, `unifiedDiff` (from old/new
   text, no file reads, skipped over 100,000 characters) and `diffBody`.
 - Colours come only from theme keys; every line fits the width it is given.
+
+### `text/`
+
+`oneLine(s)` turns model or producer text into one plain line for the screen:
+7- and 8-bit CSI, OSC, DCS, SOS, PM and APC sequences are removed, and control
+characters and newlines collapse to a space. Used by `extensions/todo`.
