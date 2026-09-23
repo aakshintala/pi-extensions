@@ -113,9 +113,9 @@ function bounded(p: Promise<unknown>, ms: number) {
 
 export default function (pi: ExtensionAPI) {
   const rig = rigSettings(getAgentDir());
-  rig.declare("subagents", SETTINGS);
-  // A child session loads this extension too and redeclares the section; read the latest handle.
-  const setting = (key: string) => rig.sections().find((s) => s.name === "subagents")!.get(key) as number;
+  // One live section per name (#93): a child session's redeclaration returns this same handle.
+  const section = rig.declare("subagents", SETTINGS);
+  const setting = (key: string) => section.get(key) as number;
 
   const agents = new Map<string, Agent>();
   const queue: Agent[] = [];
