@@ -8,8 +8,10 @@
 - Esc restores Pi's exact prior state and saves nothing: the theme, its file
   watcher and automatic light/dark switching are untouched.
 - Preview swaps the active theme on the global Pi's theme module reads, the
-  way Pi's own picker previews. It is guarded: if Pi stops keeping the theme
-  there, moving through the list only moves the cursor.
+  way Pi's own picker previews. It runs only on Pi 0.87.x, where that global
+  was verified, and only when it holds a theme. Otherwise `/theme` has no live
+  preview: moving only moves the cursor, Esc changes nothing, and Enter still
+  applies the theme through Pi.
 - Without the TUI, `/theme` says so.
 
 ## Tools and settings
