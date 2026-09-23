@@ -77,13 +77,16 @@ export interface Fleet {
   now: () => number;
   /** The item the fleet extension's viewer shows, if any. Only that extension sets it. */
   viewing?: string;
+  /** Set while the queue extension edits one of its rows in Pi's editor: typed input then belongs to the queue. */
+  editing?: boolean;
 }
 
 /**
- * Whether typed input belongs to the fleet viewer: an item is open and the text is not
- * a slash command. Other `input` handlers let such input through, whatever the load order.
+ * Whether typed input belongs to the fleet viewer: an item is open, no queued row is being
+ * edited, and the text is not a slash command. Other `input` handlers let such input
+ * through, whatever the load order.
  */
-export const viewerTakes = (text: string) => !!fleet().viewing && !text.trimStart().startsWith("/");
+export const viewerTakes = (text: string) => !!fleet().viewing && !fleet().editing && !text.trimStart().startsWith("/");
 
 /** Running time as `5s`, `1m05s` or `1h02m`. */
 export function duration(ms: number) {

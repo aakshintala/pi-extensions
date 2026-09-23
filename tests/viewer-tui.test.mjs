@@ -359,3 +359,33 @@ for (const [order, extensions] of [
     );
   });
 }
+
+for (const [order, extensions] of [
+  ["fleet first", [...EXTENSIONS, QUEUE, GATE]],
+  ["queue first", [QUEUE, ...EXTENSIONS, GATE]],
+]) {
+  test(`editing a queued row while viewing an agent saves the row (${order})`, async (t) => {
+    const gate = [{ type: "toolCall", id: "g1", name: "gate", arguments: {} }];
+    const tui = await start(t, {
+      extensions,
+      replies: [gate, "done"],
+      before: async (tui) => {
+        tui.type("go");
+        tui.keys("Enter");
+        await tui.waitForEvent("gate_waiting");
+        tui.type("first");
+        tui.keys("Enter"); // queued for the main run
+      },
+    });
+    const working = "── ● Working " + "─".repeat(67);
+    const footer = ["~/cwd", "↑2 ↓2 W2 CH0.0% 0.0%/128k (auto)                                       harness-1"];
+    const opts = (above, editor = "") => ({ footer, border: working, above, editor });
+    tui.keys("Down", "Down", "Down", "Enter");
+    await tui.waitForScreen(screen(agentView([]), rows("b"), opts([" Steering (1) · next turn", "   first"])));
+    tui.keys("M-Up"); // edit the row in Pi's editor
+    await tui.waitForScreen(screen(agentView([]), rows("b"), opts([" Steering (1) · next turn", " › first"], "first")));
+    tui.type(" two");
+    tui.keys("Enter"); // saves the row; the agent gets nothing
+    await tui.waitForScreen(screen(agentView([]), rows("b"), opts([" Steering (1) · next turn", "   first two"])));
+  });
+}
