@@ -15,6 +15,9 @@
     "extensions": [
       "./extensions/*/index.ts",
       "./extensions/*.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "devDependencies": {
