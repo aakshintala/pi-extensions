@@ -5,7 +5,7 @@ import { gate, parseSkillsFromPrompt, report, sourceLabel } from "../audit/check
 const ok = { timedOut: false, shutdownObserved: true };
 const snap = (extra = {}) => ({
   activeTools: ["t"],
-  allTools: [{ name: "t", description: "x".repeat(40) }, { name: "inactive", description: "x".repeat(4000) }],
+  allTools: [{ name: "t", description: "x".repeat(40), sourceInfo: { path: "<builtin:t>" } }, { name: "inactive", description: "x".repeat(4000) }],
   commands: [],
   systemPrompt: "y".repeat(400),
   ...extra,
@@ -39,4 +39,17 @@ test("source labels", () => {
   assert.equal(sourceLabel("<builtin:read>"), "builtin");
   assert.equal(sourceLabel("/h/.pi/agent/npm/node_modules/@ff-labs/pi-fff/src/index.ts"), "@ff-labs/pi-fff");
   assert.equal(sourceLabel("/h/.pi/agent/local/pi-stamp/index.ts"), "pi-stamp");
+});
+
+test("gate enforces per-tool budgets for non-builtin tools", () => {
+  const rig = { name: "rig_tool", description: "x".repeat(40), sourceInfo: { path: "/repo/extensions/a/index.ts" } };
+  const s = snap({ activeTools: ["rig_tool"], allTools: [rig] });
+  assert.deepEqual(gate(s, ok, { maxPromptTokens: 200, tools: { rig_tool: 11 } }), []);
+  assert.match(gate(s, ok, { maxPromptTokens: 200, tools: { rig_tool: 10 } }).join(), /rig_tool over budget: 11 > 10/);
+  assert.match(gate(s, ok, { maxPromptTokens: 200 }).join(), /rig_tool has no budget/);
+  assert.match(gate(snap(), ok, { maxPromptTokens: 200, tools: { gone: 5 } }).join(), /budgeted tool gone is not active/);
+});
+
+test("a budget on a builtin tool is enforced", () => {
+  assert.match(gate(snap(), ok, { maxPromptTokens: 200, tools: { t: 1 } }).join(), /tool t over budget/);
 });

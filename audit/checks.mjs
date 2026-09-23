@@ -66,5 +66,15 @@ export function gate(snap, lifecycle, budgets) {
     failures.push(`prompt budget exceeded: ${totalTokens} > ${budgets.maxPromptTokens} tokens`);
   }
   if (duplicateModels.length > 0) failures.push(`duplicate models: ${duplicateModels.join(", ")}`);
+  // Every non-builtin active tool needs a per-tool ceiling in budgets.tools.
+  const toolBudgets = budgets.tools ?? {};
+  for (const t of report(snap).tools) {
+    const max = toolBudgets[t.name];
+    if (max === undefined && t.source !== "builtin") failures.push(`tool ${t.name} has no budget in budgets.json tools`);
+    else if (t.tokens > max) failures.push(`tool ${t.name} over budget: ${t.tokens} > ${max} tokens`);
+  }
+  for (const name of Object.keys(toolBudgets)) {
+    if (!(snap.activeTools ?? []).includes(name)) failures.push(`budgeted tool ${name} is not active`);
+  }
   return failures;
 }
