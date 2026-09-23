@@ -20,6 +20,7 @@ const PRICE = Symbol.for("pi-rig.test.kidPrice");
 const JOB_STARTED = Symbol.for("pi-rig.test.jobStarted");
 const SUBAGENT_TOOLS = ["subagent_spawn", "subagent_message", "subagent_stop"];
 const JOB_STOPPED = Symbol.for("pi-rig.test.jobStopped");
+const RUNTIME = Symbol.for("pi-rig.subagents.modelRuntime");
 
 const textOf = (m) => (typeof m.content === "string" ? m.content : m.content.map((c) => c.text ?? `call ${c.name}`).join(""));
 const lastText = (context) => textOf(context.messages.at(-1));
@@ -48,6 +49,7 @@ async function start(t, replies, kid, { tools, before } = {}) {
   let ctx;
   const capture = (pi) => pi.on("session_start", (_event, c) => (ctx = c));
   const s = await scriptedSession(t, { replies, extensions: [...EXTENSIONS, capture], tools });
+  globalThis[RUNTIME] = s.session.modelRuntime; // children share it, so none writes auth.json (#120)
   // Children discover their extensions from the agent dir, like a real install.
   writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ extensions: EXTENSIONS }));
   await before?.(s.session);
@@ -60,6 +62,7 @@ async function start(t, replies, kid, { tools, before } = {}) {
     for (const item of registry.items()) registry.finish(item.id, "stopped", "test over", null);
     registry.prune();
     delete globalThis[KID];
+    delete globalThis[RUNTIME];
     delete globalThis[JOB_STOPPED];
     delete globalThis[JOB_STARTED];
     delete globalThis[PRICE];

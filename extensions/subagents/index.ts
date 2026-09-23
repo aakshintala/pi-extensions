@@ -31,6 +31,8 @@ const USAGE = "rig.subagent.usage";
 /** Saved in an agent's session when its notice is sent: its next notice counts only the usage entries after it. */
 const REPORTED = "rig.subagent.reported";
 const NOTICE = "rig.notice"; // the fleet extension's notice type
+/** Tests set a ModelRuntime here for children to use; unset, Pi builds one per child. */
+const RUNTIME = Symbol.for("pi-rig.subagents.modelRuntime");
 const TOOLS = ["subagent_spawn", "subagent_message", "subagent_stop"];
 const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const STATUSES = ["DONE", "DONE_WITH_CONCERNS", "BLOCKED", "NEEDS_CONTEXT"];
@@ -281,6 +283,8 @@ export default function (pi: ExtensionAPI) {
       resourceLoader,
       tools: inherit.tools,
       scopedModels: inherit.models.length ? [...inherit.models] : undefined,
+      // Test seam (#120): tests share their in-memory runtime, so no child writes auth.json.
+      modelRuntime: (globalThis as any)[RUNTIME],
     });
     return session;
   }
