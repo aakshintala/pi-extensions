@@ -191,6 +191,8 @@ const hasImage = (result: unknown) =>
 
 interface Run {
   ids: string[];
+  /** Its message has thinking: the summary starts with "thought ·". */
+  thought?: boolean;
   /** Set when the message or its turn ended: what a call with no result counts as. */
   ended?: "cancelled" | "error";
 }
@@ -255,6 +257,7 @@ export class ToolGroups {
       if (b?.type === "toolCall" && typeof b.id === "string") runs.at(-1)!.push(b);
       else if (b?.type === "text" && b.text?.trim()) runs.push([]);
     }
+    const thought = message.content.some((b: any) => b?.type === "thinking" && b.thinking?.trim());
     const ended = message.stopReason === "aborted" ? "cancelled" : message.stopReason === "error" ? "error" : undefined;
     for (const blocks of runs.filter((r) => r.length)) {
       const ids = blocks.map((b) => b.id);
@@ -262,8 +265,9 @@ export class ToolGroups {
       const run: Run = old ?? { ids: [] };
       // A call revised out of the message leaves its group.
       for (const id of run.ids) if (!ids.includes(id)) this.forget(id);
-      const changed = ids.join() !== run.ids.join() || (ended && !run.ended);
+      const changed = ids.join() !== run.ids.join() || (ended && !run.ended) || thought !== !!run.thought;
       run.ids = ids;
+      run.thought = thought;
       run.ended ??= ended;
       for (const b of blocks) {
         const c = this.calls.get(b.id);
@@ -388,7 +392,7 @@ function summaryLine(theme: Theme, g: Group, width: number): string {
   const bad = calls.some((c) => c.status === "error" || c.status === "cancelled");
   const frame = SPINNER[g.session.frame % SPINNER.length];
   const bullet = live ? theme.fg("muted", frame) : theme.fg(bad ? "error" : "success", CALL);
-  return truncateToWidth(`${PAD}${bullet} ${summaryText(theme, calls)}`, width);
+  return truncateToWidth(`${PAD}${bullet} ${summaryText(theme, calls, g.calls[0].run.thought)}`, width);
 }
 
 const lineTotals = new WeakMap<object, { added: number; removed: number } | undefined>();

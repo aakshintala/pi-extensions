@@ -102,7 +102,7 @@ summary: { verb: "updated", many: "todos" }                                     
 - Call ids can repeat across sessions; each session indexes and removes only its
   own, and a renderer picks the session holding the call's arguments.
 - `summaryText(theme, calls, thought)` builds the text; `thought` starts it with
-  "thought ·" (#57).
+  "thought ·". Groups set it when their message has thinking (#57).
 
 ### `text/`
 
