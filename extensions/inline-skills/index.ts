@@ -8,6 +8,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
   type ParsedSkillBlock,
+  parseSkillBlock,
   SkillInvocationMessageComponent,
   VERSION,
 } from "@earendil-works/pi-coding-agent";
@@ -106,6 +107,13 @@ const textOf = (message: any): string =>
 
 /** Names of a leading skill block, Pi's own (`/skill:name`) or ours. */
 const blockNames = (text: string) => /^<skill name="([^"]+)"/.exec(text)?.[1].split(", ");
+
+/** The leading skill blocks' names and the text after them; no text when a block does not parse. */
+function leadingBlocks(text: string): { names: string[]; rest: string } {
+  const names: string[] = [];
+  for (let b; (b = parseSkillBlock(text)); text = b.userMessage ?? "") names.push(...b.name.split(", "));
+  return { names, rest: blockNames(text) ? "" : text };
+}
 
 function restoreLoaded(ctx: ExtensionContext): Set<string> {
   const loaded = new Set<string>();
@@ -233,7 +241,11 @@ export default function (pi: ExtensionAPI) {
   let unsubscribe: (() => void) | undefined;
   const skills = () => listSkills(pi);
   const commands = () => pi.getCommands().filter((c) => c.source !== "skill").map((c) => c.name.toLowerCase());
-  const toLoad = (text: string) => (blockNames(text) ? [] : namedSkills(text, skills, new Set([...loaded, ...starting]), commands));
+  const toLoad = (text: string) => {
+    const { names, rest } = leadingBlocks(text);
+    // After a leading block the text is no longer the start of the prompt, so commands do not win there.
+    return namedSkills(rest, skills, new Set([...loaded, ...starting, ...names]), rest === text ? commands : undefined);
+  };
 
   async function read(named: Skill[], ctx: ExtensionContext): Promise<ParsedSkillBlock[]> {
     const results = await Promise.allSettled(named.map(readSkill));

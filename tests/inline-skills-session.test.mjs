@@ -123,6 +123,16 @@ test("a /skill:name prompt counts its skill as loaded", async (t) => {
   assert.deepEqual(skillMessages(requests[1]), []);
 });
 
+test("a /skill:name prompt still loads the skills named after it", async (t) => {
+  const { session, requests } = await start(t, 1);
+  await session.prompt("/skill:tdd then /grilling and /tdd");
+  assert.ok(requests[0].some((m) => /^<skill name="tdd"[\s\S]*Body of tdd\.[\s\S]*\n\nthen \/grilling and \/tdd$/.test(m)));
+  assert.equal(skillMessages(requests[0]).length, 1);
+  const [message] = skillMessages(requests[0]);
+  assert.match(message, /Skill `grilling`[\s\S]*Body of grilling\./);
+  assert.doesNotMatch(message, /Skill `tdd`/, "tdd came with the /skill:tdd block");
+});
+
 test("skills upstream recorded as loaded in a branch are not loaded again", async (t) => {
   const { session, requests } = await start(t, 1, [["loaded-skill", { name: "tdd", source: "tool-result" }]]);
   await session.prompt("use /tdd and /grilling");
