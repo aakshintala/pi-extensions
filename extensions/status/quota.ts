@@ -48,6 +48,8 @@ export function createQuotaClient({ port, refreshMs, fetch: fetchFn = fetch, tim
       const res = await fetchFn(`http://127.0.0.1:${port()}/quotas`, { signal: p.controller.signal });
       const json = res.ok ? await res.json() : null;
       if (!Array.isArray(json?.providers)) throw new Error("bad feed");
+      // An aborted fetch (stop, invalidate) must not repopulate the cache.
+      if (p.controller.signal.aborted) return feed;
       feed = json as Feed;
       fetchedAt = now();
     } catch {

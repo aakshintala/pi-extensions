@@ -327,3 +327,18 @@ async function waitFor(cond) {
   for (let i = 0; i < 1000 && !cond(); i++) await new Promise((r) => setTimeout(r, 2));
   assert.ok(cond(), "condition never held");
 }
+
+test("a fetch aborted by invalidate never repopulates the cache", async () => {
+  // A fetch that ignores its abort signal: the old port's reply lands late.
+  let releaseOld;
+  const old = { providers: [{ id: "old", quotas: [] }] }, fresh = { providers: [{ id: "new", quotas: [] }] };
+  const replies = [new Promise((r) => (releaseOld = () => r(old))), Promise.resolve(fresh)];
+  const fetchFn = async () => ({ ok: true, json: () => replies.shift() });
+  const c = createQuotaClient({ port: () => 1, refreshMs: () => 60_000, timers: fakeTimers(), fetch: fetchFn });
+  const stale = c.get();
+  c.invalidate();
+  assert.equal((await c.get()).providers[0].id, "new");
+  releaseOld();
+  await stale;
+  assert.equal((await c.get()).providers[0].id, "new");
+});
