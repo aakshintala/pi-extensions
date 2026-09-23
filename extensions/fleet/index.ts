@@ -4,7 +4,8 @@
 // keeps a run without the UI alive until the work it started returns.
 import type { ExtensionAPI, ExtensionContext, MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
-import { fleet, isFinished, type Item, type Notice } from "../../shared/fleet/index.ts";
+import { duration, fleet, isFinished, type Item, type Notice } from "../../shared/fleet/index.ts";
+import { oneLine } from "../../shared/text/index.ts";
 
 /** Most lines FleetView takes, including the "… N more" line. */
 const MAX_LINES = 6;
@@ -31,18 +32,6 @@ function rows(items: readonly Item[]): Row[] {
   return out;
 }
 
-// CSI (7- and 8-bit); OSC, DCS, SOS, PM and APC strings (7- and 8-bit), ended by
-// BEL, ST (ESC \\ or 0x9c) or the end of the text; then any other escape pair.
-const SEQUENCE =
-  /(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1b[\]PX^_]|[\x90\x98\x9d-\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c|$)|\x1b[\s\S]?/g;
-
-/** One line of plain text: terminal sequences and control characters removed. */
-const clean = (s: string) =>
-  String(s ?? "")
-    .replace(SEQUENCE, "")
-    .replace(/[\x00-\x1f\x7f-\x9f]+/g, " ")
-    .trim();
-
 /** A producer's activity line; a producer that throws breaks only its own row. */
 function safeActivity(item: Item) {
   try {
@@ -52,36 +41,28 @@ function safeActivity(item: Item) {
   }
 }
 
-function duration(ms: number) {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`;
-  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
-}
-
 const ICON = { completed: ["success", "✓"], failed: ["error", "✗"], stopped: ["warning", "■"] } as const;
 
 /** One themed line per notice; a failed or stopped item's error follows in full. */
 const renderNotice: MessageRenderer = (message, { outputPad }, theme) => {
   const item = message.details as Notice["item"] | undefined;
   const content = typeof message.content === "string" ? message.content : message.content.map((c) => ("text" in c ? c.text : "")).join("");
-  if (!item) return new Text(theme.fg("muted", content), outputPad, 0);
+  if (!item) return new Text(theme.fg("muted", content.split("\n").map(oneLine).join("\n")), outputPad, 0);
   const [color, icon] = isFinished(item.status) ? ICON[item.status as keyof typeof ICON] : (["accent", "●"] as const);
   const state = isFinished(item.status) ? (item.status === "completed" ? "done " : `${item.status} `) : "";
-  const head = `${theme.fg(color, icon)} ${clean(item.kind)} ${clean(item.label)} · ${state}${duration(item.ms)}`;
+  const head = `${theme.fg(color, icon)} ${oneLine(item.kind)} ${oneLine(item.label)} · ${state}${duration(item.ms)}`;
   const body = isFinished(item.status) ? item.result ?? "" : content;
   if (item.status === "failed" || item.status === "stopped") {
-    const lines = body.split("\n").map(clean).filter(Boolean);
+    const lines = body.split("\n").map(oneLine).filter(Boolean);
     return new Text([head, ...lines.map((l) => "  " + theme.fg(color, l))].join("\n"), outputPad, 0);
   }
-  const first = clean(body.split("\n")[0] ?? "");
+  const first = oneLine(body.split("\n")[0] ?? "");
   return new Text(head + (first ? theme.fg("muted", ` · ${first}`) : ""), outputPad, 0);
 };
 
 /** The one message a run without the UI gets when it ends with work running. */
 function listing(items: Item[], now: number) {
-  const rows = items.map((i) => `- ${i.kind} ${i.label} (id ${i.id}): ${i.status}, ${duration(now - i.startedAt)}`);
+  const rows = items.map((i) => `- ${oneLine(i.kind)} ${oneLine(i.label)} (id ${oneLine(i.id)}): ${i.status}, ${duration(now - i.startedAt)}`);
   return [
     "Your run is ending with work still running:",
     ...rows,
@@ -117,8 +98,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Session end without the UI (#29): list running work once, then wait for each notice until none is left.
-  pi.on("agent_before_settle", async (_event, ctx) => {
-    if (ctx.hasUI) return;
+  pi.on("agent_before_settle", async (event, ctx) => {
+    // A queued message (such as a notice that just arrived) continues the run anyway.
+    if (ctx.hasUI || event.context.pendingMessages.length > 0) return;
     const registry = fleet();
     const owner = ctx.sessionManager.getSessionId();
     const running = () => registry.items().filter((i) => i.owner === owner && !isFinished(i.status));
@@ -126,9 +108,10 @@ export default function (pi: ExtensionAPI) {
     if (!listed) {
       listed = true;
       const content = listing(running(), registry.now());
-      return { entries: [{ type: "custom_message", customType: NOTICE, content, display: true }], continue: true };
+      return { entries: [...event.entries, { type: "custom_message", customType: NOTICE, content, display: true }], continue: true };
     }
     // No cap on the wait (spec #29): the command, shell timeout or caller's kill bounds it.
+    // Pi emits no event on a bare abort(), so an abort waits for the items too.
     await new Promise<void>((resolve) => {
       const unsubscribe = registry.subscribe(() => running().length === 0 && wake?.());
       wake = () => {
@@ -139,6 +122,10 @@ export default function (pi: ExtensionAPI) {
     });
     return undefined; // a delivered notice is queued, so the session continues
   });
+
+  // Session replacement aborts the run and waits for idle: end the wait first.
+  pi.on("session_before_switch", () => wake?.());
+  pi.on("session_before_fork", () => wake?.());
 
   pi.on("session_shutdown", () => {
     cleanup?.();
@@ -180,8 +167,8 @@ function mount(ctx: ExtensionContext): () => void {
         ? "queued"
         : (done ? (item.status === "completed" ? "done " : `${item.status} `) : "") +
           duration((item.endedAt ?? registry.now()) - item.startedAt);
-    const activity = clean(done && item.result !== undefined ? item.result : safeActivity(item));
-    const text = `${"  ".repeat(row.depth)}${clean(item.kind)} ${clean(item.label)} · ${state}${activity ? ` · ${activity}` : ""}`;
+    const activity = oneLine(done && item.result !== undefined ? item.result : safeActivity(item));
+    const text = `${"  ".repeat(row.depth)}${oneLine(item.kind)} ${oneLine(item.label)} · ${state}${activity ? ` · ${activity}` : ""}`;
     const color = item.status === "failed" ? "error" : done ? "muted" : "text";
     return theme.fg("accent", mark) + " " + theme.fg(color, text);
   }

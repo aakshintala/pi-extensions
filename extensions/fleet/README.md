@@ -21,6 +21,7 @@ Applies only to runs without the UI, which includes every child session.
 
 - When the run is about to end with items it owns still running or queued, the model gets one message listing them (kind, label, ID, status, running time), and the run continues.
 - After that, the run waits for each remaining item and continues with its notice, until none is left. The wait has no time limit.
+- Switching or forking the session ends the wait. A plain abort does not, because Pi reports no event for it: stop the items the session owns, or dispose the session through its shutdown path.
 
 Interactive sessions end their runs as usual: their work keeps running and its notices start new turns.
 
@@ -59,10 +60,11 @@ fleet().register({
 });
 fleet().update("job-1");                              // redraw the activity line
 fleet().update("job-1", { label: "npm test --watch" }); // ignored once finished
-fleet().finish("job-1", "completed", "12 tests passed");   // no notice
-fleet().finish("job-1", "failed", "exit 1\nError: boom",   // the user's summary: a failure's error, in full
-  "shell job-1 failed (exit 1). Log: /tmp/job-1.log");     // optional: the model's notice, in your own wording
-fleet().notify("job-1", "build 42 passed");               // a notice while running, such as a monitor line
+fleet().finish("job-1", "completed", "12 tests passed");  // notice: a default line built from the item
+fleet().finish("job-1", "failed", "exit 1\nError: boom",  // the user's summary: a failure's error, in full
+  "shell job-1 failed (exit 1). Log: /tmp/job-1.log");    // the model's notice, in your own wording
+fleet().finish("job-1", "completed", "done", null);       // no notice: the model already has the result
+fleet().notify("job-1", "build 42 passed");              // a notice while running, such as a monitor line
 ```
 
-A notice goes to the owner session only, and is dropped if that session has no fleet extension.
+A notice goes to the owner session only. One sent before that session attaches is held until it does. Once the session shuts down, or its delivery throws because it was disposed, its notices are dropped.
