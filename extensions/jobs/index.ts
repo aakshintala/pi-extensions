@@ -271,8 +271,9 @@ export default function (pi: ExtensionAPI) {
         const onAbort = () => void stop(j);
         o.signal?.addEventListener("abort", onAbort, { once: true });
         // The auto-background timer, Ctrl+B and a steer submitted meanwhile (through fleet) all move it here.
+        // A child that has exited but not settled yet (its exit event before settle's microtask) finishes inline.
         const move = (head: string) => {
-          if (j.status || !j.fg) return;
+          if (j.status || !j.fg || j.child.exitCode !== null || j.child.signalCode !== null) return;
           handle.head = head;
           drain();
           end();

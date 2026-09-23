@@ -1,6 +1,6 @@
 // A foreground bash command in a real pi (#51): Esc kills it, Ctrl+B moves it to the
 // background, and a steer submitted while it runs does too and is delivered as steering.
-// Each command writes its group id to ./pgid, then blocks until stopped.
+// Each command writes its group id to ./pgid, then waits on a child until stopped.
 import { test } from "node:test";
 import assert from "node:assert";
 import { existsSync, readFileSync } from "node:fs";
@@ -12,7 +12,8 @@ import { liveGroup, startTui } from "./helpers/tui.mjs";
 const path = (p) => fileURLToPath(new URL(p, import.meta.url));
 const EXTENSIONS = [path("../extensions/fleet/index.ts"), path("../extensions/jobs/index.ts"), path("../extensions/queue/index.ts"), path("./fixtures/jobs/clock.ts")];
 const COLS = 100;
-const COMMAND = "echo $$ > pgid; echo started; exec tail -f /dev/null";
+// The shell waits on a child, so only a signal to the whole group ends both.
+const COMMAND = "echo $$ > pgid; echo started; sleep 600 & wait";
 const run = [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: COMMAND } }];
 
 async function poll(ok, what) {
@@ -48,7 +49,7 @@ const screen = (chat, top, below, usage) => {
   return "\n" + [...lines, ...Array(ROWS - lines.length).fill("")].join("\n");
 };
 const CHAT = ["", " go", "", "", ` ⏺ Bash(${COMMAND})`];
-const RUNNING = screen([...CHAT, ""], WORKING, [" ctrl+b to run in background"], "↑2 ↓18 W2 CH0.0% 0.0%/128k (auto)");
+const RUNNING = screen([...CHAT, ""], WORKING, [" ctrl+b to run in background"], "↑2 ↓17 W2 CH0.0% 0.0%/128k (auto)");
 const ROW = [" ● main", `   shell ${COMMAND} · 0s · started`];
 
 /** The job ID and log path the result names, read off the screen once it shows. */
@@ -63,8 +64,8 @@ test("Esc during a foreground command kills its group", async (t) => {
   tui.keys("Escape");
   await tui.waitForEvent("agent_end");
   const chat = [...CHAT, "   ⎿  Error: started", "", "", "      Command aborted", "", " Error: This operation was aborted", ""];
-  await tui.waitForScreen(screen(chat, BORDER, [], "↑2 ↓18 W2 0.0%/128k (auto)"));
-  assert.deepEqual(liveGroup(tui.pgid), []);
+  await tui.waitForScreen(screen(chat, BORDER, [], "↑2 ↓17 W2 0.0%/128k (auto)"));
+  await poll(() => !liveGroup(tui.pgid).length, "the shell and its child to be gone"); // SIGKILL may follow SIGTERM by 800 ms
 });
 
 test("Ctrl+B moves a foreground command to the background; its result shows the job ID and log path", async (t) => {
@@ -73,7 +74,7 @@ test("Ctrl+B moves a foreground command to the background; its result shows the 
   tui.keys("C-b");
   await tui.waitForEvent("agent_end");
   const chat = [...CHAT, ...(await moved(tui)), "", " backgrounded", ""];
-  await tui.waitForScreen(screen(chat, BORDER, ROW, "↑55 ↓21 R2 W55 CH1.9% 0.1%/128k (auto)"));
+  await tui.waitForScreen(screen(chat, BORDER, ROW, "↑53 ↓20 R2 W53 CH1.9% 0.1%/128k (auto)"));
   assert.notDeepEqual(liveGroup(tui.pgid), [], "the job keeps running");
 });
 
@@ -85,7 +86,7 @@ test("a steer while a command runs moves it to the background and is delivered a
   await tui.waitForEvent("agent_end");
   // The steer comes after the tool result and before the reply to it; nothing was aborted.
   const chat = [...CHAT, ...(await moved(tui)), "", "", " hurry up", "", "", " steered", ""];
-  await tui.waitForScreen(screen(chat, BORDER, ROW, "↑58 ↓20 R2 W59 CH1.7% 0.1%/128k (auto)"));
+  await tui.waitForScreen(screen(chat, BORDER, ROW, "↑57 ↓19 R2 W57 CH1.8% 0.1%/128k (auto)"));
   assert.deepEqual(tui.events().filter((e) => e === "agent_start"), ["agent_start"], "one run");
   assert.notDeepEqual(liveGroup(tui.pgid), [], "the job keeps running");
 });
