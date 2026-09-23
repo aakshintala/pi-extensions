@@ -106,7 +106,8 @@ if (asJson) {
 } else {
   console.log(`pi ${version} (${live ? "live ~/.pi install" : "this package, hermetic"})`);
   console.log(`tokens ~${r.totalTokens}: system prompt ${r.systemPromptTokens} + tools ${r.toolTokens}`);
-  console.log(`tools ${r.tools.length}, commands ${r.commands}, skills ${r.skills}, models ${r.models}`);
+  console.log(`tools ${r.tools.length}, commands ${r.commands.length}, skills ${r.skills}, models ${r.models}`);
+  console.log(`commands: ${r.commands.join(" ")}`);
   if (r.duplicateModels.length > 0) console.log(`duplicate models: ${r.duplicateModels.join(", ")}`);
   for (const t of r.tools) console.log(`  ${String(t.tokens).padStart(5)}  ${t.name}  (${t.source})`);
 }

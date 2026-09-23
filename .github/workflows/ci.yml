@@ -19,6 +19,15 @@ jobs:
       - run: command -v tmux || (sudo apt-get update && sudo apt-get install -y tmux)
       - run: sudo apt-get update && sudo apt-get install -y ripgrep fd-find # parity with Pi's built-in grep and find
       - run: npm ci
-      - run: npm test
+      - name: npm test, leaving nothing in TMPDIR but the loader caches
+        run: |
+          d=$(mktemp -d)
+          TMPDIR=$d npm test
+          left=$(ls -A "$d" | grep -v -e '^jiti$' -e '^node-compile-cache$' || true)
+          if [ -n "$left" ]; then
+            echo "::error::tests left files in TMPDIR ($d):"
+            echo "$left"
+            exit 1
+          fi
       - run: npm run audit
       - run: npm run provenance

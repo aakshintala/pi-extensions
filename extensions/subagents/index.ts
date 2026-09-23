@@ -27,11 +27,11 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { duration, fleet, isFinished, type FinalStatus } from "../../shared/fleet/index.ts";
 import { rigSettings } from "../../shared/settings/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
+import { isChild, MARKER } from "../../shared/subagent/index.ts";
 import { toolRenderers, resultText } from "../../shared/tool-display/index.ts";
 import { rememberTools, transcript, type Source } from "./transcript.ts";
 import { checkWorktree, createWorktree, reopenWorktree, settleWorktree, type Worktree } from "./worktree.ts";
 
-const MARKER = "rig.subagent";
 /** Tokens and cost of a finished child, saved in its parent's session: the parent's next notice and `Session total:` count them. */
 const USAGE = "rig.subagent.usage";
 /** Saved in an agent's session when its notice is sent: its next notice counts only the usage entries after it. */
@@ -142,9 +142,6 @@ function prune(a: Agent) {
   a.parent.children.delete(a);
   if ("root" in a.parent) prune(a.parent as Agent);
 }
-
-export const isChild = (ctx: Pick<ExtensionContext, "sessionManager">) =>
-  ctx.sessionManager.getEntries().some((e) => e.type === "custom" && e.customType === MARKER);
 
 const str = (description: string) => ({ type: "string", description });
 const params = (properties: Record<string, unknown>, optional: string[] = []) =>

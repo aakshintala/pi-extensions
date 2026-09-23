@@ -198,3 +198,9 @@ if (pastOutputCap(log)) { /* stop it */ }
   undefined when `ps` fails or takes over 1 s. An unknown start time never
   kills: `track` writes no record, and `reap` keeps a record whose
   process still runs.
+
+### `subagent/`
+
+`isChild(ctx)` says whether a session is a subagent's: it holds the custom entry
+`MARKER` (`rig.subagent`), which `extensions/subagents` writes first in every
+child session. Used by `extensions/subagents` and `extensions/todo`.

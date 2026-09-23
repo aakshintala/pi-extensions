@@ -45,7 +45,7 @@ export function report(snap) {
     systemPromptTokens: systemPrompt,
     toolTokens: toolTotal,
     tools,
-    commands: (snap.commands ?? []).length,
+    commands: (snap.commands ?? []).map((c) => c.name).sort(),
     skills: parseSkillsFromPrompt(snap.systemPrompt).length,
     models: keys.length,
     duplicateModels: [...new Set(keys.filter((k, i) => keys.indexOf(k) !== i))],
@@ -76,6 +76,11 @@ export function gate(snap, lifecycle, budgets) {
     for (const c of ["usage", "context", "clear", "theme"]) if (!commands.includes(c)) failures.push(`/${c} is not registered`);
   }
   for (const c of commands.filter((c) => /^context[-:_ ]config$/.test(c))) failures.push(`/${c} is registered; /context has no config`);
+  // The registered command names match budgets.commands exactly (#69).
+  const seen = [...commands].sort().join(" ");
+  if (snap.commands && budgets.commands && seen !== [...budgets.commands].sort().join(" ")) {
+    failures.push(`commands are "${seen}", budgets.json expects "${[...budgets.commands].sort().join(" ")}"`);
+  }
   // Every non-builtin active tool needs a per-tool ceiling in budgets.tools.
   const toolBudgets = budgets.tools ?? {};
   for (const t of report(snap).tools) {

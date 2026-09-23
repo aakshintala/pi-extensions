@@ -78,3 +78,11 @@ test("gate requires /usage, /context, /clear and /theme and refuses a /context c
     "/context-config is registered; /context has no config",
   ]);
 });
+
+test("gate checks command names against budgets.commands", () => {
+  const expected = ["clear", "context", "rig", "theme", "usage"];
+  assert.deepEqual(gate(snap(), ok, { maxPromptTokens: 200, commands: expected }), []);
+  assert.deepEqual(gate(snap(), ok, { maxPromptTokens: 200, commands: [...expected, "quota"] }), [
+    'commands are "clear context rig theme usage", budgets.json expects "clear context quota rig theme usage"',
+  ]);
+});

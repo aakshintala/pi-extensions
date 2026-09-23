@@ -2,6 +2,7 @@
 // and is rebuilt from the active branch; nothing is written to disk.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import { isChild } from "../../shared/subagent/index.ts";
 import { oneLine } from "../../shared/text/index.ts"; // item text is model input
 import { resultText, toolRenderers } from "../../shared/tool-display/index.ts";
 
@@ -21,9 +22,6 @@ export const widgetLines = (todos: Todo[]): string[] => {
   if (open.length > MAX_OPEN_ROWS) lines.push(`… ${open.length - MAX_OPEN_ROWS} more`);
   return lines;
 };
-
-const isChild = (ctx: ExtensionContext) =>
-  ctx.sessionManager.getEntries().some((e: any) => e.type === "custom" && e.customType === "rig.subagent");
 
 const hasToolCall = (m: any) => Array.isArray(m?.content) && m.content.some((b: any) => b.type === "toolCall");
 
