@@ -1,4 +1,4 @@
-# pi-extensions
+# pi-rig
 
 Customized Pi extensions maintained as a lightweight monorepo.
 

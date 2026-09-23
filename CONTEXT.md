@@ -1,8 +1,11 @@
-# Pi extension system
+# pi-rig
 
 This context covers locally owned Pi extensions and the controls used to keep their runtime surface small, observable, and reviewable.
 
 ## Language
+
+**Rig**:
+This package: the user's own set of locally rebuilt Pi extensions, loaded as one package. Its command is `/rig` and its settings file is `~/.pi/agent/rig.json`. _Avoid_: pack, extension pack
 
 **Extension package**:
 A locally rebuilt collection of Pi customizations that the installation loads as its owned runtime. _Avoid_: plugin bundle, third-party package
