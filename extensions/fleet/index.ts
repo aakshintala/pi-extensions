@@ -70,6 +70,16 @@ function listing(items: Item[], now: number) {
   ].join("\n");
 }
 
+/**
+ * Whether a queued message will continue the run anyway: a user steer or follow-up, or
+ * one of our notices (always sent as a steer). A custom message sent with
+ * `triggerTurn: false` does not continue it.
+ * ponytail: another extension's custom steer is not told apart from that, so the wait
+ * holds it until the next notice; tell them apart if Pi ever exposes the steer queue.
+ */
+const continues = (pending: readonly { role: string; customType?: string }[]) =>
+  pending.some((m) => m.role !== "custom" || m.customType === NOTICE);
+
 export default function (pi: ExtensionAPI) {
   let cleanup: (() => void) | undefined;
   let detach: (() => void) | undefined;
@@ -99,8 +109,7 @@ export default function (pi: ExtensionAPI) {
 
   // Session end without the UI (#29): list running work once, then wait for each notice until none is left.
   pi.on("agent_before_settle", async (event, ctx) => {
-    // A queued message (such as a notice that just arrived) continues the run anyway.
-    if (ctx.hasUI || event.context.pendingMessages.length > 0) return;
+    if (ctx.hasUI || continues(event.context.pendingMessages)) return;
     const registry = fleet();
     const owner = ctx.sessionManager.getSessionId();
     const running = () => registry.items().filter((i) => i.owner === owner && !isFinished(i.status));

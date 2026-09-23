@@ -148,6 +148,23 @@ test("a run without the UI ending with work running wakes its model once, then w
   ]);
 });
 
+test("a custom message that does not continue the run still leaves the run waiting", { timeout: 10_000 }, async (t) => {
+  const { session, owner } = await start(t, [says("started"), says("waiting"), echo], {
+    onSettle(n) {
+      if (n !== 2) return;
+      session.sendCustomMessage({ customType: "other", content: "aside", display: true }, { triggerTurn: false });
+      onWait(() => fleet().finish("a", "completed", "built", "shell job a completed: built"));
+    },
+  });
+  add("a", owner);
+  await session.prompt("go");
+  assert.deepEqual(transcript(session).slice(-3), [
+    "custom: aside",
+    "custom: shell job a completed: built",
+    "assistant: saw: shell job a completed: built",
+  ]);
+});
+
 test("a result finished without a notice reaches the model as a default line", async (t) => {
   const { session, owner } = await start(t, [says("started"), says("waiting"), echo]);
   add("a", owner);

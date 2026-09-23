@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createFleet } from "./index.ts";
+import { createFleet, MAX_HELD } from "./index.ts";
 
 test("two separately loaded copies of the module share one registry", async () => {
   const a = await import("./index.ts?copy=a");
@@ -50,4 +50,24 @@ test("a sink that throws, such as a disposed session's, is detached", () => {
   fleet.notify("a", "one");
   fleet.notify("a", "two");
   assert.equal(calls, 1);
+});
+
+test("an owner that never attaches holds only its latest notices", () => {
+  const fleet = createFleet();
+  fleet.register(job("a", "s1"));
+  for (let i = 0; i <= MAX_HELD; i++) fleet.notify("a", `n${i}`);
+  const got = [];
+  fleet.attach("s1", (n) => got.push(n.text));
+  assert.equal(got.length, MAX_HELD);
+  assert.equal(got[0], "n1");
+});
+
+test("the default notice is one clean line", () => {
+  const fleet = createFleet();
+  fleet.now = () => 0;
+  fleet.register({ ...job("a", "s1"), label: "sc\u001b]0;pwned\u0007out\u001b[2J" });
+  const got = [];
+  fleet.attach("s1", (n) => got.push(n.text));
+  fleet.finish("a", "failed", "exit 1\n\u001b[31mError: boom\u001b[0m");
+  assert.deepEqual(got, ["shell scout (id a) failed after 0s: exit 1 Error: boom"]);
 });

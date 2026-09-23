@@ -67,4 +67,4 @@ fleet().finish("job-1", "completed", "done", null);       // no notice: the mode
 fleet().notify("job-1", "build 42 passed");              // a notice while running, such as a monitor line
 ```
 
-A notice goes to the owner session only. One sent before that session attaches is held until it does. Once the session shuts down, or its delivery throws because it was disposed, its notices are dropped.
+A notice goes to the owner session only. One sent before that session attaches is held until it does, up to the latest 50. Once the session shuts down, or its delivery throws because it was disposed, its notices are dropped.

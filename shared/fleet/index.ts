@@ -4,6 +4,11 @@
 // Producers never draw UI. Notices go to the session that owns the item, which
 // the fleet extension of that session delivers to its model.
 
+import { oneLine } from "../text/index.ts";
+
+/** Most notices held for one owner that has not attached; the oldest are dropped. */
+export const MAX_HELD = 50;
+
 export type Kind = "agent" | "shell" | "monitor";
 export type Status = "queued" | "running" | "completed" | "failed" | "stopped";
 export type FinalStatus = "completed" | "failed" | "stopped";
@@ -92,7 +97,7 @@ export function createFleet(): Fleet {
   const send = (owner: string, notice: Notice) => {
     const deliver = sinks.get(owner);
     if (!deliver) {
-      if (!gone.has(owner)) held.set(owner, [...(held.get(owner) ?? []), notice]);
+      if (!gone.has(owner)) held.set(owner, [...(held.get(owner) ?? []), notice].slice(-MAX_HELD));
       return;
     }
     try {
@@ -126,7 +131,7 @@ export function createFleet(): Fleet {
       Object.assign(item, { status, result, endedAt: fleet.now() });
       changed();
       if (notice === null) return;
-      fleet.notify(id, notice ?? `${item.kind} ${item.label} (id ${id}) ${status} after ${duration(item.endedAt! - item.startedAt)}: ${result}`);
+      fleet.notify(id, notice ?? `${oneLine(item.kind)} ${oneLine(item.label)} (id ${oneLine(id)}) ${status} after ${duration(item.endedAt! - item.startedAt)}: ${oneLine(result)}`);
     },
     notify(id, text) {
       const item = items.get(id);
