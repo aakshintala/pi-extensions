@@ -69,3 +69,34 @@ test("sessions that share a call id keep their own groups", async () => {
   assert.deepEqual(parentCalls.flatMap((b) => draw(b).render(80)), [" ⠋ Read 2 files"], "after the child shuts down");
   parent("session_shutdown");
 });
+
+// #40: "A call that returned an error before the abort counts as failed." Esc while
+// the model is only thinking after a real error must not hide that error.
+test("a real error stays failed and shown when Esc comes during a thinking-only reply, live and after reopen", async () => {
+  const { default: toolDisplay } = await import("./index.ts");
+  const on = {};
+  toolDisplay({ registerTool() {}, on: (name, f) => (on[name] = f) });
+  const branch = [];
+  const piCtx = { sessionManager: { getBranch: () => branch } };
+  const emit = (name, event = {}) => on[name]?.(event, piCtx);
+  const call = { type: "toolCall", id: "enoent1", name: "read", arguments: { path: "missing.txt" } };
+  const failure = { content: [{ type: "text", text: "ENOENT: no such file or directory, access 'missing.txt'" }] };
+  const saved = [
+    { role: "assistant", stopReason: "toolUse", content: [call] },
+    { role: "toolResult", toolCallId: call.id, isError: true, ...failure },
+    { role: "assistant", stopReason: "aborted", content: [{ type: "thinking", thinking: "Let me" }] },
+  ];
+  emit("session_start");
+  emit("message_end", { message: saved[0] });
+  emit("tool_execution_end", { toolCallId: call.id, isError: true, result: failure });
+  emit("message_end", { message: saved[2] });
+  emit("agent_end");
+  const draw = () => RENDERERS.read.renderCall(call.arguments, theme, { ...ctx(call.arguments), toolCallId: call.id, invalidate() {} }).render(80);
+  const want = [" ⏺ Read 1 file · 1 failed", " ⏺ Read(missing.txt)"];
+  assert.deepEqual(draw(), want, "live");
+  emit("session_shutdown");
+  branch.push(...saved.map((message) => ({ type: "message", message })));
+  emit("session_start");
+  assert.deepEqual(draw(), want, "after reopen");
+  emit("session_shutdown");
+});

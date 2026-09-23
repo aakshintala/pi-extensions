@@ -224,16 +224,6 @@ test("a group still on screen after its session is reset draws without throwing"
   assert.doesNotThrow(() => line.render(80));
 });
 
-test("groups: errors in a turn that ends aborted before the model replied are cancels", (t) => {
-  const g = new td.ToolGroups();
-  t.after(() => g.reset());
-  g.track({ role: "assistant", stopReason: "toolUse", content: [toolCall("t1"), toolCall("t2")] });
-  g.settle("t1", false, { content: [] });
-  g.settle("t2", true, { content: [{ type: "text", text: "killed" }] });
-  g.track({ role: "assistant", stopReason: "aborted", content: [] });
-  assert.deepEqual(draw(["t1", "t2"]), [" ⏺ Read 2 files · 1 cancelled"]);
-});
-
 test("groups: an error before the user's abort of a later reply, or of a new prompt, stays failed", (t) => {
   const g = new td.ToolGroups();
   t.after(() => g.reset());

@@ -17,10 +17,10 @@ Collapses each run of tool calls into one summary line, and draws the built-in
   or a tool without a summary, starts a new group.
 - **Failed calls always shown** under their group, and so are calls that
   returned an image (Pi draws images outside the tool's renderers).
-- **Cancelled.** When a turn is aborted (Esc), calls with no result, calls whose
-  error ends in Pi's `Operation aborted` or `Command aborted`, and calls that
-  errored while the turn was being aborted count as `cancelled` in the error
-  colour. They are counted, not shown. An error before the abort stays failed.
+- **Cancelled.** When a turn is aborted (Esc), calls with no result and calls
+  whose error ends in Pi's `Operation aborted` or `Command aborted` count as
+  `cancelled` in the error colour. They are counted, not shown. Any other
+  returned error stays failed and shown.
 - **Ctrl+O** (`app.tools.expand`) shows every call on its own. In fullscreen
   mode, a click on a group opens or closes that group only (Pi sends mouse
   clicks only in fullscreen mode).

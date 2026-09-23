@@ -193,8 +193,6 @@ interface Run {
   ids: string[];
   /** Set when the message or its turn ended: what a call with no result counts as. */
   ended?: "cancelled" | "error";
-  /** The turn was aborted before the model replied to these results: errors are cancels. */
-  aborted?: boolean;
 }
 
 class Call {
@@ -212,8 +210,7 @@ class Call {
     this.args = args;
   }
   state(): CallState {
-    if (this.status === "pending" && this.run.ended) return this.run.ended;
-    return this.status === "error" && this.run.aborted ? "cancelled" : this.status;
+    return this.status === "pending" && this.run.ended ? this.run.ended : this.status;
   }
   /** Failures show under the summary; so do images, which Pi draws outside the renderers. */
   alwaysShown() {
@@ -250,24 +247,9 @@ export class ToolGroups {
   private early = new Map<string, { outcome: Outcome; image: boolean }>();
   frame = 0;
 
-  /** Runs of the last message with calls, until the model replies or the user prompts. */
-  private lastRuns: Run[] = [];
-
-  /** Registers the groups in a message (call on every update and at its end). */
+  /** Registers the groups in an assistant message (call on every update and at its end). */
   track(message: any): void {
-    if (message?.role === "user") this.lastRuns = [];
     if (message?.role !== "assistant" || !Array.isArray(message.content)) return;
-    // Saved data has no abort flag. An aborted reply with no content means Esc came
-    // while the calls ran (or before the model said anything), so their errors are
-    // cancels. An error before an abort of a later reply stays a failure.
-    const empty = !message.content.some((b: any) => b?.type === "toolCall" || (b?.type === "text" && b.text?.trim()));
-    if (message.stopReason === "aborted" && empty) {
-      for (const run of this.lastRuns) {
-        run.aborted = true;
-        this.refresh(run);
-      }
-    }
-    if (message.stopReason !== "aborted" || !empty) this.lastRuns = [];
     const runs: any[][] = [[]];
     for (const b of message.content) {
       if (b?.type === "toolCall" && typeof b.id === "string") runs.at(-1)!.push(b);
@@ -288,7 +270,6 @@ export class ToolGroups {
         if (c) Object.assign(c, { run, args: b.arguments });
         else this.add(new Call(b.id, run, b.arguments));
       }
-      this.lastRuns.push(run);
       if (changed) this.refresh(run);
     }
   }
@@ -317,7 +298,6 @@ export class ToolGroups {
     for (const id of this.calls.keys()) unindex(id, this);
     this.calls.clear();
     this.early.clear();
-    this.lastRuns = [];
   }
 
   /** Advances the spinner and redraws the summary line of each running group. */
