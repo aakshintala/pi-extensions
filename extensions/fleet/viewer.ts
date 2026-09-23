@@ -1,0 +1,288 @@
+// The viewer frame (spec #29, #45): one item's transcript or log in place of
+// Pi's chat container, or in a full-size overlay when Pi's layout is not the
+// tested one. The frame, not the producer, handles closing, stop with
+// confirmation and steer, so they work the same for every item.
+import { getMarkdownTheme, UserMessageComponent, VERSION, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  Container,
+  Input,
+  matchesKey,
+  Text,
+  truncateToWidth,
+  wrapTextWithAnsi,
+  type Component,
+  type TUI,
+  type TuiMouseEvent,
+} from "@earendil-works/pi-tui";
+import { unwatchFile, watchFile } from "node:fs";
+import { duration, fleet, isFinished, type Item } from "../../shared/fleet/index.ts";
+import { oneLine } from "../../shared/text/index.ts";
+import { logSource } from "./log.ts";
+
+/** The Pi version the chat-area swap was tested on (umbrella #1: guarded patch). */
+export const TESTED_PI = "0.87.1";
+/** How often an open log is checked for new output, in ms. */
+const LOG_POLL_MS = 200;
+
+/**
+ * Pi's chat container and its parent. Pi mounts `documentContainer`
+ * (header, loaded resources, chat) as the TUI's first child in both modes.
+ * Nothing when the version or the shape differs: the viewer then uses an overlay.
+ */
+export function findChat(tui: TUI, version = VERSION) {
+  if (version !== TESTED_PI) return;
+  const doc = (tui as unknown as Container).children?.[0];
+  const kids = doc instanceof Container ? doc.children : undefined;
+  if (kids?.length === 3 && kids.every((k) => k instanceof Container)) return { parent: doc as Container, chat: kids[2] };
+}
+
+/** The item's header line: kind, label, status, running time and the frame's keys. */
+function header(ctx: ExtensionContext, id: string): Component {
+  return {
+    render(width) {
+      const item = fleet().get(id);
+      if (!item) return [];
+      const theme = ctx.ui.theme;
+      const state =
+        item.status === "queued"
+          ? "queued"
+          : (isFinished(item.status) ? (item.status === "completed" ? "done " : `${item.status} `) : "") +
+            duration((item.endedAt ?? fleet().now()) - item.startedAt);
+      const keys = `esc back · ctrl+q stop${item.steer ? " · enter steers" : ""}`;
+      return [truncateToWidth(` ${theme.fg("accent", `${oneLine(item.kind)} ${oneLine(item.label)}`)} · ${state} ${theme.fg("dim", `· ${keys}`)}`, width)];
+    },
+    invalidate() {},
+  };
+}
+
+/** A log file's lines, wrapped to the width. */
+function logView(lines: () => string[]): Component {
+  return {
+    render: (width) => lines().flatMap((l) => (l ? wrapTextWithAnsi(" " + l, width) : [""])),
+    invalidate() {},
+  };
+}
+
+/**
+ * The full-size overlay: a scrolled window over the content and a steer line.
+ * It follows the end until scrolled up; End (or scrolling to the end) resumes.
+ */
+class OverlayFrame implements Component {
+  private top: number | undefined; // first content line shown; undefined follows the end
+  private width = 80; // of the last render
+  readonly input = new Input({ prompt: "› " });
+  private readonly tui: TUI;
+  private readonly head: Component;
+  private readonly content: Component;
+  private readonly confirm: () => string | undefined; // shown in place of the steer line
+
+  constructor(tui: TUI, head: Component, content: Component, confirm: () => string | undefined) {
+    this.tui = tui;
+    this.head = head;
+    this.content = content;
+    this.confirm = confirm;
+    this.input.focused = true;
+  }
+
+  private window() {
+    return Math.max(1, this.tui.terminal.rows - 2);
+  }
+
+  private scroll(by: number | "end") {
+    const size = this.window();
+    const last = Math.max(0, this.content.render(this.width).length - size);
+    const top = by === "end" ? last : Math.max(0, Math.min(last, (this.top ?? last) + by));
+    this.top = top >= last ? undefined : top;
+    this.tui.requestRender();
+  }
+
+  render(width: number) {
+    this.width = width;
+    const size = this.window();
+    const lines = this.content.render(width);
+    const last = Math.max(0, lines.length - size);
+    const top = Math.min(this.top ?? last, last);
+    const shown = lines.slice(top, top + size);
+    while (shown.length < size) shown.push("");
+    const confirm = this.confirm();
+    const bottom = confirm !== undefined ? [" " + confirm] : this.input.render(width);
+    return [...this.head.render(width).slice(0, 1), ...shown, ...bottom].map((l) => truncateToWidth(l, width));
+  }
+
+  handleInput(data: string) {
+    const page = this.window() - 1;
+    if (matchesKey(data, "pageUp")) this.scroll(-page);
+    else if (matchesKey(data, "pageDown")) this.scroll(page);
+    else if (matchesKey(data, "home")) this.scroll(-Infinity);
+    else if (matchesKey(data, "end")) this.scroll("end");
+    else {
+      this.input.handleInput(data);
+      this.tui.requestRender();
+    }
+  }
+
+  handleMouse(event: TuiMouseEvent) {
+    if (event.type !== "wheel" || !event.wheelDelta) return undefined;
+    this.scroll(event.wheelDelta);
+    return { handled: true };
+  }
+
+  invalidate() {
+    this.content.invalidate();
+  }
+}
+
+export interface Viewer {
+  /** The id of the item on screen, if any. */
+  active(): string | undefined;
+  /** Shows the item in the chat area, in place of the main chat or another item. */
+  open(item: Item): void;
+  /** Back to the main chat. Releases the item's file watcher. Safe to call twice. */
+  close(): void;
+  /** Esc, Ctrl+Q and the stop confirmation; true when consumed. */
+  handleKey(data: string): boolean;
+  /** Editor text while an item is open: its steer, echoed in the viewer. */
+  steer(text: string): void;
+  /** Whether the viewer is an overlay, which owns the arrow keys. */
+  overlay(): boolean;
+  /** The stop confirmation, for FleetView to show below the editor. */
+  confirmation(): string | undefined;
+}
+
+export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined): Viewer {
+  let open:
+    | {
+        id: string;
+        content: Container;
+        release: () => void;
+        frame?: OverlayFrame;
+        confirm?: string;
+      }
+    | undefined;
+
+  const render = () => tui()?.requestRender();
+
+  const echo = (component: Component) => {
+    open?.content.addChild(component);
+    render();
+  };
+  // Runs a producer's stop or steer; a throw or rejection is shown in the viewer.
+  const attempt = (what: string, run: () => void | Promise<void>) => {
+    const failed = (e: unknown) => echo(new Text(ctx.ui.theme.fg("error", ` ${what} failed: ${oneLine((e as Error)?.message ?? e)}`), 0, 0));
+    try {
+      void Promise.resolve(run()).catch(failed);
+    } catch (e) {
+      failed(e);
+    }
+  };
+
+  const viewer: Viewer = {
+    active: () => open?.id,
+    overlay: () => !!open?.frame,
+    confirmation: () => (open?.frame ? undefined : open?.confirm),
+
+    open(item) {
+      viewer.close();
+      const t = tui();
+      if (!t) return;
+      const content = new Container();
+      const head = header(ctx, item.id);
+      let stopWatch = () => {};
+      let body: Component;
+      if ("log" in item.view) {
+        const path = item.view.log;
+        const source = logSource(path);
+        // Every render reads what was appended; the watcher asks for a render when the file changes.
+        const poll = () => render();
+        watchFile(path, { interval: LOG_POLL_MS }, poll);
+        stopWatch = () => unwatchFile(path, poll);
+        body = logView(() => (source.read(), source.lines()));
+      } else {
+        try {
+          body = item.view.transcript() as Component;
+        } catch (e) {
+          body = new Text(ctx.ui.theme.fg("error", ` transcript failed: ${oneLine((e as Error)?.message ?? e)}`), 0, 0);
+        }
+      }
+      content.addChild(body);
+
+      const found = findChat(t);
+      if (found) {
+        // The chat-area swap: main-session output keeps going to the detached chat.
+        const shown = new Container();
+        shown.addChild(head);
+        shown.addChild(content);
+        const kids = found.parent.children;
+        // Either way the chat area starts at its end, following new output (fullscreen only).
+        const swap = (from: Component, to: Component) => {
+          const i = kids.indexOf(from);
+          if (i >= 0) kids[i] = to;
+          found.parent.invalidate();
+          (t as { scrollToBottom?: () => void }).scrollToBottom?.();
+        };
+        swap(found.chat, shown);
+        open = { id: item.id, content, release: () => (stopWatch(), swap(shown, found.chat)) };
+      } else {
+        let done: (() => void) | undefined;
+        const state: NonNullable<typeof open> = { id: item.id, content, release: () => (stopWatch(), done?.()) };
+        open = state;
+        void ctx.ui.custom<void>(
+          (overlayTui, _theme, _keys, finish) => {
+            done = () => finish();
+            const frame = new OverlayFrame(overlayTui, head, content, () => state.confirm);
+            frame.input.onSubmit = (text) => {
+              frame.input.setValue("");
+              if (text.trim()) viewer.steer(text);
+            };
+            state.frame = frame;
+            return frame;
+          },
+          { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left" } },
+        );
+      }
+      render();
+    },
+
+    close() {
+      if (!open) return;
+      const { release } = open;
+      open = undefined;
+      release();
+      render();
+    },
+
+    handleKey(data) {
+      if (!open) return false;
+      const item = fleet().get(open.id);
+      if (open.confirm !== undefined) {
+        const yes = data === "y" || data === "Y";
+        open.confirm = undefined;
+        if (yes && item) attempt("stop", () => item.stop());
+        render();
+        return true;
+      }
+      if (matchesKey(data, "escape")) {
+        viewer.close();
+        return true;
+      }
+      if (matchesKey(data, "ctrl+q") && item && !isFinished(item.status)) {
+        open.confirm = `Stop ${oneLine(item.kind)} ${oneLine(item.label)}? y stops it, any other key cancels.`;
+        render();
+        return true;
+      }
+      return false;
+    },
+
+    steer(text) {
+      const item = open && fleet().get(open.id);
+      if (!item) return;
+      if (!item.steer) {
+        echo(new Text(ctx.ui.theme.fg("warning", ` ${oneLine(item.kind)} ${oneLine(item.label)} takes no steering. Esc returns to the main chat.`), 0, 0));
+        return;
+      }
+      echo(new UserMessageComponent(text, getMarkdownTheme()));
+      attempt("steer", () => item.steer!(text));
+    },
+  };
+  return viewer;
+}

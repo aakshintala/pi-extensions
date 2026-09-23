@@ -1,11 +1,13 @@
 // FleetView (spec #29, #44): the list of background work below the editor.
 // Items come from the shared registry (shared/fleet); this extension is the
-// only one that draws them. It also delivers the session's notices (#46) and
+// only one that draws them. Enter or a click opens an item in the viewer frame
+// (#45, viewer.ts). It also delivers the session's notices (#46) and
 // keeps a run without the UI alive until the work it started returns.
 import type { ExtensionAPI, ExtensionContext, MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
 import { duration, fleet, isFinished, type Item, type Notice } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
+import { createViewer, type Viewer } from "./viewer.ts";
 
 /** Most lines FleetView takes, including the "… N more" line. */
 const MAX_LINES = 6;
@@ -82,6 +84,7 @@ const continues = (pending: readonly { role: string; customType?: string }[]) =>
 
 export default function (pi: ExtensionAPI) {
   let cleanup: (() => void) | undefined;
+  let viewer: Viewer | undefined; // the open session's viewer frame, TUI mode only
   let detach: (() => void) | undefined;
   let wake: (() => void) | undefined; // ends a session-end wait
   let listed = false; // this run's end already listed its running work
@@ -89,13 +92,23 @@ export default function (pi: ExtensionAPI) {
   pi.registerMessageRenderer(NOTICE, renderNotice);
 
   pi.on("input", (event) => {
+    // While an item is open, what the user types steers it; the main session gets nothing.
+    if (viewer?.active() && event.source === "interactive") {
+      viewer.steer(event.text);
+      return { action: "handled" };
+    }
     if (event.source !== "extension") fleet().prune();
+    return undefined;
   });
 
   pi.on("session_start", (_event, ctx) => {
     cleanup?.();
     detach?.();
-    if (ctx.mode === "tui") cleanup = mount(ctx);
+    if (ctx.mode === "tui") {
+      const mounted = mount(ctx);
+      viewer = mounted.viewer;
+      cleanup = mounted.cleanup;
+    }
     // Idle: starts a turn. Mid-turn (and at settle): steers into it, so notices arriving together share one turn.
     detach = fleet().attach(ctx.sessionManager.getSessionId(), (notice) => {
       pi.sendMessage({ customType: NOTICE, content: notice.text, display: true, details: notice.item }, { triggerTurn: true, deliverAs: "steer" });
@@ -139,20 +152,22 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", () => {
     cleanup?.();
     cleanup = undefined;
+    viewer = undefined;
     detach?.();
     detach = undefined;
     wake?.();
   });
 }
 
-function mount(ctx: ExtensionContext): () => void {
+function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   const registry = fleet();
   let tui: TUI | undefined;
   let focused = false;
   let selected = 0;
   let top = 0; // first row shown
   let timer: ReturnType<typeof setInterval> | undefined;
-  const active = MAIN; // the item in the chat area; the viewer (#45) changes it
+  const viewer = createViewer(ctx, () => tui);
+  const active = () => viewer.active() ?? MAIN; // the item in the chat area
 
   const current = () => rows(registry.items());
 
@@ -167,7 +182,7 @@ function mount(ctx: ExtensionContext): () => void {
 
   function line(row: Row, index: number, theme: Theme) {
     const id = row.item?.id ?? MAIN;
-    const mark = (focused && index === selected ? "›" : " ") + (id === active ? "●" : " ");
+    const mark = (focused && index === selected ? "›" : " ") + (id === active() ? "●" : " ");
     if (!row.item) return theme.fg("accent", mark) + " main";
     const item = row.item;
     const done = isFinished(item.status);
@@ -190,6 +205,8 @@ function mount(ctx: ExtensionContext): () => void {
       const { start, end, hidden } = window(all);
       const out = all.slice(start, end).map((row, i) => line(row, start + i, theme));
       if (hidden) out.push(theme.fg("dim", `   … ${hidden} more`));
+      const confirm = viewer.confirmation();
+      if (confirm) out.push(theme.fg("warning", ` ${confirm}`));
       return out.map((l) => truncateToWidth(l, width));
     },
     invalidate() {},
@@ -200,10 +217,17 @@ function mount(ctx: ExtensionContext): () => void {
     const { start, end } = window(all);
     const index = start + event.y;
     if (index >= end) return undefined;
-    focused = true;
     selected = index;
+    choose(all[index]);
     return { handled: true, render: true };
   });
+
+  // Opens a row in the viewer; the main row goes back to the chat.
+  const choose = (row: Row) => {
+    focused = false;
+    if (row.item) viewer.open(row.item);
+    else viewer.close();
+  };
 
   const redraw = () => {
     const running = registry.items().some((i) => !isFinished(i.status));
@@ -218,7 +242,10 @@ function mount(ctx: ExtensionContext): () => void {
   const unsubscribe = registry.subscribe(redraw);
 
   const unlisten = ctx.ui.onTerminalInput((data) => {
-    if (data.startsWith("\x1b[<") || isKeyRelease(data) || current().length === 1) return undefined;
+    if (data.startsWith("\x1b[<") || isKeyRelease(data)) return undefined;
+    if (!focused && viewer.handleKey(data)) return { consume: true };
+    // The overlay covers FleetView and takes every other key.
+    if (current().length === 1 || viewer.overlay()) return undefined;
     if (!focused) {
       if (!(matchesKey(data, "down") || matchesKey(data, "left")) || ctx.ui.getEditorText() !== "") return undefined;
       focused = true;
@@ -226,6 +253,7 @@ function mount(ctx: ExtensionContext): () => void {
     } else if (matchesKey(data, "up")) selected = Math.max(0, selected - 1);
     else if (matchesKey(data, "down")) selected = Math.min(current().length - 1, selected + 1);
     else if (matchesKey(data, "escape")) focused = false;
+    else if (matchesKey(data, "enter")) choose(current()[selected]);
     else {
       focused = false; // any other key goes back to the editor
       tui?.requestRender();
@@ -246,13 +274,15 @@ function mount(ctx: ExtensionContext): () => void {
   redraw();
 
   let done = false;
-  return () => {
+  const cleanup = () => {
     if (done) return;
     done = true;
+    viewer.close();
     unsubscribe();
     unlisten();
     if (timer) clearInterval(timer);
     timer = undefined;
     tui = undefined;
   };
+  return { viewer, cleanup };
 }
