@@ -497,14 +497,24 @@ export function measureInjectedMessages(
 	const baseline = messageSignatureCounts(baselineMessages);
 	const occurrences = new Map<string, number>();
 	const items: InjectionItem[] = [];
+	const requestSignatures = new Set(messages.map(messageSignature));
 	for (const [index, message] of messages.entries()) {
 		const requestOnly = !consumeMessageSignature(baseline, message);
 		if (message.role !== "custom" && !requestOnly) continue;
 
+		// A request-only system message that amends one of the session's (same
+		// timestamp, original not sent) counts only the text the amendment added.
+		const amended = message.role === "system" && requestOnly
+			? baselineMessages.find((base): base is typeof message => base.role === "system" &&
+				base.timestamp === message.timestamp && !requestSignatures.has(messageSignature(base)))
+			: undefined;
+		const added = amended === undefined ? undefined : addedText(systemMessageText(amended), systemMessageText(message));
+		if (added === "") continue;
+
 		const identity = message.role === "custom" ? message.customType : message.role;
 		const occurrence = occurrences.get(identity) ?? 0;
 		occurrences.set(identity, occurrence + 1);
-		const { text, jsonSpan } = messagePreview(message);
+		const { text, jsonSpan } = added === undefined ? messagePreview(message) : { text: added, jsonSpan: undefined };
 		items.push({
 			id: message.role === "custom"
 				? `message:${message.customType}:${occurrence}`
@@ -514,14 +524,29 @@ export function measureInjectedMessages(
 			source: message.role === "custom" ? messageSource(message.customType) : AGGREGATE_SOURCE,
 			label: message.role === "custom" ? "message" : `${message.role} message`,
 			chars: text.length,
-			tokens: message.role === "system" ? textTokens(systemMessageText(message)) : estimateTokens(message),
+			tokens: message.role === "system" ? textTokens(text) : estimateTokens(message),
 			text,
 			jsonSpan,
 			requestOnly: requestOnly || undefined,
-			systemMessage: message.role === "system" ? { message: copySystemMessage(message), index } : undefined,
+			// An amendment is counted as its added text, never replayed as a whole prompt.
+			systemMessage: message.role === "system" && added === undefined
+				? { message: copySystemMessage(message), index }
+				: undefined,
 		});
 	}
 	return items;
+}
+
+/** The text `after` adds to `before`: what remains once their common prefix and suffix are removed. */
+function addedText(before: string, after: string): string {
+	let prefix = 0;
+	while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
+	let suffix = 0;
+	while (
+		suffix < before.length - prefix && suffix < after.length - prefix &&
+		before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+	) suffix++;
+	return after.slice(prefix, after.length - suffix);
 }
 
 /**

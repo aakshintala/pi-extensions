@@ -130,3 +130,15 @@ test("a probe that arrives after its 5 s timeout is still aborted and leaves no 
   console.log(session.isIdle, JSON.stringify(session.sessionManager.getEntries().map(e=>[e.type,e.message?.role,e.message?.content,e.message?.stopReason,e.message?.errorMessage])));
   assert.deepEqual(transcript(session), ["user: hello", "assistant: hi"]);
 });
+
+test("a clause appended to Pi's own system message counts once, as only the clause", async (t) => {
+  const { session } = await scriptedSession(t, {
+    extensions: [root("tests/fixtures/context/amend.ts"), CONTEXT],
+    replies: [fauxAssistantMessage("hi")],
+  });
+  const screens = attachUi(session);
+  await session.prompt("hello");
+  await session.prompt("/context injections");
+  // "\n- Say thanks." is 14 characters: 4 tokens, not the whole prompt again.
+  assert.match(screens[0], /unattributed \.+ 4\n {2}└─ system message \.+ 4\n/);
+});
