@@ -24,7 +24,6 @@ const settings = rigSettings(getAgentDir()).declare("jobs", [
 ]);
 settings.get("maxJobs");
 settings.onChange((key, value) => { /* apply */ });
-// in session_start: rigSettings(getAgentDir()).notifyWarnings(ctx.ui);
 ```
 
 - Types: `boolean`, `integer` (optional `min`/`max`), `enum` (`values`).
@@ -32,6 +31,11 @@ settings.onChange((key, value) => { /* apply */ });
   warning and uses the default. `notifyWarnings(ui)` sends each once.
 - `set`/`reset` validate, re-read the file, change only that key, keep only
   non-default keys, and write atomically (temp file, then rename).
-- Redeclaring a section (on `/reload`) re-reads the file and drops the
-  section's old listeners. There is no file watcher and no project file.
-- `sections()` lists declared sections for the `/rig` menu.
+- Redeclaring a section (on `/reload`) re-reads the file, drops the
+  section's old listeners and retires the old handle: its `set`/`reset`
+  throw. There is no file watcher and no project file.
+- `sections()` lists declared sections for the `/rig` menu, and
+  `problem(setting, value)` returns why a value is invalid (or nothing).
+- `/rig` itself is registered by `extensions/rig`, which also sends the
+  load warnings at session start; other extensions need not call
+  `notifyWarnings`.

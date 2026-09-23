@@ -69,7 +69,7 @@ export function gate(snap, lifecycle, budgets) {
   // Spec #32: /rig is the rig's only settings command.
   const commands = (snap.commands ?? []).map((c) => c.name);
   if (snap.commands && !commands.includes("rig")) failures.push("/rig is not registered");
-  for (const c of commands.filter((c) => /^(agents|tasks|bg)/.test(c))) failures.push(`/${c} is registered; settings belong in /rig`);
+  for (const c of commands.filter((c) => /^(agents|tasks)$|^bg/.test(c))) failures.push(`/${c} is registered; settings belong in /rig`);
   // Every non-builtin active tool needs a per-tool ceiling in budgets.tools.
   const toolBudgets = budgets.tools ?? {};
   for (const t of report(snap).tools) {

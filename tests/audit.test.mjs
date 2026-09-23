@@ -58,7 +58,7 @@ test("gate requires /rig and refuses /agents, /tasks and /bg* commands", () => {
   const names = (...n) => snap({ commands: n.map((name) => ({ name })) });
   assert.deepEqual(gate(names("rig", "other"), ok, { maxPromptTokens: 200 }), []);
   assert.deepEqual(gate(names("other"), ok, { maxPromptTokens: 200 }), ["/rig is not registered"]);
-  assert.deepEqual(gate(names("rig", "agents", "tasks", "bg-list"), ok, { maxPromptTokens: 200 }), [
+  assert.deepEqual(gate(names("rig", "agents", "tasks", "bg-list", "agents-report", "tasks-help"), ok, { maxPromptTokens: 200 }), [
     "/agents is registered; settings belong in /rig",
     "/tasks is registered; settings belong in /rig",
     "/bg-list is registered; settings belong in /rig",
