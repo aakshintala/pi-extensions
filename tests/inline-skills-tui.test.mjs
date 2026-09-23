@@ -58,7 +58,9 @@ test("Tab opens the list at any point; start-of-message / and paths stay Pi's", 
     "  setup-grill                     Install the grill skills.",
     "  tdd                             Test-driven development.",
   ]));
-  tui.keys("Escape", "C-u");
+  tui.keys("Escape"); // alone: Escape followed at once by another key reads as Alt+key
+  await tui.waitForScreen(idle("x /"));
+  tui.keys("C-u");
   tui.type("try /m");
   tui.keys("Tab");
   await tui.waitForScreen(idle("try /markup"));
