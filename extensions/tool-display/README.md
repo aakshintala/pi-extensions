@@ -84,4 +84,28 @@ Expanded, each call looks like this:
   render; a `/reload` with a subagent session up runs the reloaded code. If
   something else wraps the same method later, the patch goes inert instead.
 
+## Your prompts
+
+Pi already marks your own prompts with two theme keys, so the rig adds no code
+and no patch for them:
+
+- `userMessageBg`: the background behind each prompt.
+- `userMessageText`: the prompt's text colour.
+
+Recommended values, the ones Pi's built-in themes use:
+
+| Theme | `userMessageBg` | `userMessageText` |
+| ----- | --------------- | ----------------- |
+| dark  | `#343541`       | `text`            |
+| light | `#e8e8e8`       | `text`            |
+
+Set them in your theme file. A theme switch picks up the new theme's values.
+The fleet viewer's transcript (`extensions/fleet/viewer.ts:332`) draws prompts
+with the same Pi component, so they look the same there.
+
+Where Pi 0.87.1 reads them (in `dist/modes/interactive/`):
+
+- `components/user-message.js:29` (`userMessageBg`) and `:31` (`userMessageText`)
+- `theme/dark.json:16,40-41` and `theme/light.json:15,39-40`
+
 No commands, keys or settings.
