@@ -370,3 +370,38 @@ test("the footer mirrors the quota client: new feeds, failures, and port changes
   // Quotas cost prompt tokens only through get_quotas: nothing shapes the prompt or context.
   for (const name of ["before_agent_start", "context", "input"]) assert.equal(pi.handlers[name], undefined, name);
 });
+
+test("a hung quota fetch that times out drops a stale feed from the footer, as the client does", async () => {
+  let clock = 0;
+  let mode = "ok";
+  let fetches = 0;
+  const timers = { ...fakeTimers(), setInterval: () => 0, clearInterval() {} };
+  const fetch = (_url, init) => {
+    fetches++;
+    if (mode === "ok") return Promise.resolve(Response.json(FEED));
+    if (mode === "fail") return Promise.reject(new TypeError("fetch failed"));
+    return new Promise((_, reject) => init.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+  };
+  const pi = fakePi();
+  status(pi, { fetch, now: () => clock, quotaTimers: timers, gitDirty: async () => null });
+  const s = session(pi, { trusted: false });
+  const quotas = () => s.lines()[1].split("  │  ").find((p) => p.startsWith("Q"));
+  try {
+    await s.emit("session_start");
+    await settle(() => quotas()?.startsWith("Q <text>claude"), "first feed shown");
+
+    mode = "hang";
+    clock = 61_000; // the feed is now stale
+    await s.emit("session_shutdown");
+    await s.emit("session_start");
+    await settle(() => fetches === 2);
+    assert.match(quotas(), /^Q <text>claude/, "still shown while the fetch hangs");
+    timers.fire(); // the client's 5 s timeout aborts the fetch
+    await settle(() => quotas() === "Q unavailable", "the stale feed is dropped on timeout");
+    mode = "fail";
+    await pi.commands.quota.handler("", s.ctx);
+    assert.match(s.notes.at(-1), /unavailable/, "/quota agrees");
+  } finally {
+    await s.emit("session_shutdown");
+  }
+});

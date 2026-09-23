@@ -3,9 +3,9 @@
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { rigSettings, type Section } from "../../shared/settings/index.ts";
 import { registerFooter, type FooterDeps } from "./footer.ts";
-import { registerQuota, type Feed } from "./quota.ts";
+import { registerQuota, type ClientOptions, type Feed } from "./quota.ts";
 
-export type StatusDeps = FooterDeps & { fetch?: typeof fetch };
+export type StatusDeps = FooterDeps & { fetch?: typeof fetch; quotaTimers?: ClientOptions["timers"] };
 
 export default function (pi: ExtensionAPI, deps: StatusDeps = {}) {
   const rig = rigSettings(getAgentDir());
@@ -20,9 +20,10 @@ export default function (pi: ExtensionAPI, deps: StatusDeps = {}) {
 
 /**
  * Registers the quota client with a fetch that mirrors its cache into the
- * footer: a new feed replaces it, a failure keeps it while it is younger than
- * the refresh interval and then shows it as unavailable, an aborted fetch
- * changes nothing, and a port change clears it, as the client does.
+ * footer: a new feed replaces it; a failed or aborted fetch (timeout, shutdown)
+ * keeps it while it is younger than the refresh interval and then shows it as
+ * unavailable; a feed that arrives after an abort is ignored; and a port change
+ * clears it, as the client does.
  */
 function mirrorQuotas(pi: ExtensionAPI, settings: Section, footer: { quotas(feed: Feed | null | undefined): void }, deps: StatusDeps) {
   // ponytail: copies the client's cache rules; a feed listener on the client replaces this once PR #87 frees quota.ts.
@@ -34,6 +35,7 @@ function mirrorQuotas(pi: ExtensionAPI, settings: Section, footer: { quotas(feed
     settings,
     {
       now,
+      ...(deps.quotaTimers && { timers: deps.quotaTimers }),
       async fetch(url, init) {
         const aborted = () => init?.signal?.aborted;
         try {
@@ -46,7 +48,8 @@ function mirrorQuotas(pi: ExtensionAPI, settings: Section, footer: { quotas(feed
           }
           return res;
         } catch (e) {
-          if (!aborted() && now() - fetchedAt >= (settings.get("quotaRefreshSeconds") as number) * 1000) footer.quotas(null);
+          // Aborts (timeout, shutdown) too: the client drops a stale feed on any failed fetch.
+          if (now() - fetchedAt >= (settings.get("quotaRefreshSeconds") as number) * 1000) footer.quotas(null);
           throw e;
         }
       },
