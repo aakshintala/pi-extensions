@@ -135,3 +135,36 @@ test("an aborted turn reads the same live and after the session is reopened", as
   await session.extensionRunner.emit({ type: "session_start", reason: "resume" });
   assert.deepEqual(transcript(), live);
 });
+
+test("Esc during a shell command reads as cancelled, live and after the session is reopened", async (t) => {
+  initTheme("dark", false);
+  const { createBashToolDefinition } = await import("@earendil-works/pi-coding-agent");
+  const { toolRenderers } = await import("../shared/tool-display/index.ts");
+  // Pi's own bash, drawn in the shared style with a summary, as the rig's bash will be.
+  const bash = (pi) => {
+    pi.registerTool({
+      ...createBashToolDefinition(process.cwd()),
+      ...toolRenderers({ title: "Bash", arg: (a) => a.command, result: () => ({ summary: "ran", body: [] }), summary: { verb: "ran", one: "shell command" } }),
+    });
+    pi.on("tool_execution_update", (_e, ctx) => ctx.abort()); // Esc once the command has printed
+  };
+  const { session, cwd } = await scriptedSession(t, {
+    replies: [fauxAssistantMessage(fauxToolCall("bash", { command: "echo started; sleep 30" }), { stopReason: "toolUse" }), fauxAssistantMessage(fauxText("ok"))],
+    extensions: [toolDisplay, bash],
+    tools: ["bash"],
+  });
+  await session.prompt("go");
+  const call = session.messages.find((m) => m.role === "assistant").content[0];
+  const result = session.messages.find((m) => m.role === "toolResult");
+  assert.match(result.content[0].text, /Command aborted$/);
+  const transcript = () => {
+    const c = new ToolExecutionComponent("bash", call.id, call.arguments, {}, session.getToolDefinition("bash"), { requestRender() {} }, cwd);
+    c.updateResult({ content: result.content, details: result.details, isError: result.isError });
+    return c.render(80).map(plain);
+  };
+  const live = transcript();
+  assert.deepEqual(live, ["", " ⏺ Ran 1 shell command · 1 cancelled"]);
+  await session.extensionRunner.emit({ type: "session_shutdown", reason: "resume" });
+  await session.extensionRunner.emit({ type: "session_start", reason: "resume" });
+  assert.deepEqual(transcript(), live);
+});

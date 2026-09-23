@@ -89,7 +89,11 @@ summary: { verb: "updated", many: "todos" }                                     
   transcript built from saved messages, call `track(assistantMessage)` and
   `settle(toolCallId, isError, result)` for each result in order, then `endRun()`;
   `reset()` forgets the session's calls. `outcomeOf(isError, result)` classifies a
-  result: Pi's `Operation aborted` is `cancelled`, any other error `error`.
+  result: an error ending in Pi's `Operation aborted` or `Command aborted` is
+  `cancelled`, any other error `error`. Errors followed by an empty aborted reply
+  (Esc while the calls ran) are `cancelled` too.
+- Call ids can repeat across sessions; each session indexes and removes only its
+  own, and a renderer picks the session holding the call's arguments.
 - `summaryText(theme, calls, thought)` builds the text; `thought` starts it with
   "thought ·" (#57).
 
