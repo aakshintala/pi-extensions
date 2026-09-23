@@ -57,7 +57,11 @@ function menu(sections: Section[], theme: Theme, notify: (e: unknown) => void, r
   });
   // Runs a change, then shows the value the section now holds.
   // ponytail: SettingsList keeps its selection private, and a click or wheel moves it, so read it.
-  const current = () => sections[tab].settings[(lists[tab] as unknown as { selectedIndex: number }).selectedIndex];
+  // A missing or out-of-range index gives undefined, and r, e and the hint then do nothing.
+  const current = (): Setting | undefined => {
+    const i = (lists[tab] as unknown as { selectedIndex?: unknown }).selectedIndex;
+    return Number.isInteger(i) ? sections[tab].settings[i as number] : undefined;
+  };
   function apply(section: Section, key: string, change: () => void) {
     try {
       change();
@@ -84,8 +88,8 @@ function menu(sections: Section[], theme: Theme, notify: (e: unknown) => void, r
       ];
     },
     invalidate: () => lists.forEach((l) => l.invalidate()),
-    // The list starts below the tab row and a blank line.
-    handleMouse: (event) => (typing ? undefined : lists[tab].handleMouse({ ...event, y: event.y - 2 })),
+    // The list starts below the tab row and a blank line. An open editor takes no clicks.
+    handleMouse: (event) => (typing || editing ? undefined : lists[tab].handleMouse({ ...event, y: event.y - 2 })),
     handleInput(data) {
       const s = current();
       if (typing) typing.handleInput(data);
@@ -102,7 +106,7 @@ function menu(sections: Section[], theme: Theme, notify: (e: unknown) => void, r
         tab = (tab + (matchesKey(data, "left") ? sections.length - 1 : 1)) % sections.length;
       } else if (data === "r") {
         const section = sections[tab];
-        apply(section, s.key, () => section.reset(s.key));
+        if (s) apply(section, s.key, () => section.reset(s.key));
       } else lists[tab].handleInput(data);
       render();
     },

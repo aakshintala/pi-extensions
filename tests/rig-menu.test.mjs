@@ -172,3 +172,45 @@ test("/rig: an edit clears the open-enum editor's refusal", async (t) => {
   await tui.waitForEvent("beta.tone=7");
   assert.deepEqual(file(), { beta: { tone: "7" } });
 });
+
+test("/rig: a click below the last row selects nothing, and r still resets the selected row", async (t) => {
+  const { tui } = await openRig(t, ["--tui-mode", "fullscreen"]);
+  await tui.waitForScreen(bottom(alpha()));
+  const modeRow = tui.screen().split("\n").indexOf("  mode     fast") + 1;
+  tui.click(4, modeRow);
+  await tui.waitForEvent("alpha.mode=slow");
+  const mode = { cursor: 2, mode: "slow", description: "Alpha mode. Default: fast." };
+  await tui.waitForScreen(bottom(alpha(mode)));
+  tui.click(4, modeRow + 1); // the blank row under the list
+  tui.keys("r");
+  await tui.waitForEvent("alpha.mode=fast");
+  await tui.waitForScreen(bottom(alpha({ ...mode, mode: "fast" })));
+  assert.deepEqual(tui.events(), ["session_start", "alpha.mode=slow", "alpha.mode=fast"]);
+});
+
+test("/rig: clicks do not reach the list behind an open editor", async (t) => {
+  const { tui, file } = await openRig(t, ["--tui-mode", "fullscreen"]);
+  await tui.waitForScreen(bottom(alpha()));
+  // The list sits two rows under the tab row; the editor is drawn there instead.
+  const tabRow = (tabs) => tui.screen().split("\n").indexOf(tabs) + 1;
+  // Integer editor: a click where `mode` sits in the list.
+  tui.keys("Down", "Enter");
+  const count = bottom(countEditor("", ""));
+  await tui.waitForScreen(count);
+  tui.click(4, tabRow(" [alpha]  beta") + 4);
+  tui.type("7");
+  await tui.waitForScreen(bottom(countEditor("7", "")));
+  tui.keys("Escape");
+  await tui.waitForScreen(bottom(alpha({ cursor: 1, description: "How many alphas. Default: 10." })));
+  // Open-enum editor: a click where `tone` sits in the list.
+  tui.keys("Right", "Down", "e");
+  const tone = (input) => bottom(editor(" alpha  [beta]", "tone", "Beta tone. Default: low.", input, ""));
+  await tui.waitForScreen(tone(""));
+  tui.click(4, tabRow("  alpha  [beta]") + 3);
+  tui.type("7");
+  await tui.waitForScreen(tone("7"));
+  tui.keys("Enter");
+  await tui.waitForEvent("beta.tone=7");
+  assert.deepEqual(tui.events(), ["session_start", "beta.tone=7"]);
+  assert.deepEqual(file(), { beta: { tone: "7" } });
+});
