@@ -22,8 +22,9 @@ jobs:
       - name: npm test, leaving nothing in TMPDIR but the loader caches
         run: |
           d=$(mktemp -d)
-          TMPDIR=$d npm test
-          left=$(ls -A "$d" | grep -v -e '^jiti$' -e '^node-compile-cache$' || true)
+          TMPDIR=$d npm test || exit $?
+          all=$(ls -A "$d") || exit 1
+          left=$(printf '%s\n' "$all" | grep -v -e '^jiti$' -e '^node-compile-cache$' -e '^$' || true)
           if [ -n "$left" ]; then
             echo "::error::tests left files in TMPDIR ($d):"
             echo "$left"

@@ -50,7 +50,7 @@ export default function (pi: ExtensionAPI) {
         sourceInfo: t.sourceInfo,
       })),
     );
-    grab("commands", () => pi.getCommands().map((c) => ({ name: c.name, source: c.source })));
+    grab("commands", () => pi.getCommands().map((c) => ({ name: c.name, source: c.source, path: c.sourceInfo?.path })));
     grab("models", () => ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id })));
     grab("systemPrompt", () => ctx.getSystemPrompt());
 
