@@ -4,6 +4,7 @@
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { fleet, viewerTakes } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts"; // row text is user input
 
 type Lane = "steer" | "followUp";
@@ -32,6 +33,11 @@ export default function (pi: ExtensionAPI) {
   let paused = false; // after an abort, until the next submission or Option+Up
   let running: "compact" | "reload" | undefined; // a command row is executing
   let edit: { id: number; draft: string } | undefined;
+  // Every change of `edit` goes through here: the fleet viewer leaves typed input alone while a row is edited.
+  const setEdit = (next: typeof edit) => {
+    edit = next;
+    fleet().editing = !!next;
+  };
   let modes: Record<Lane, Mode> = { steer: "one-at-a-time", followUp: "one-at-a-time" };
   let ctx: ExtensionContext | undefined;
   let tui: any; // from the widget factory
@@ -91,7 +97,7 @@ export default function (pi: ExtensionAPI) {
     const row = rows.find((r) => r.id === edit!.id);
     if (row && text !== undefined) row.text = text;
     ctx.ui.setEditorText(edit.draft);
-    edit = undefined;
+    setEdit(undefined);
     draw();
     if (ctx.isIdle()) dispatchIdle();
   };
@@ -106,7 +112,7 @@ export default function (pi: ExtensionAPI) {
     rows = rows.filter((r) => !batch.includes(r));
     if (edit && batch.some((r) => r.id === edit!.id)) {
       ctx?.ui.setEditorText(edit.draft);
-      edit = undefined;
+      setEdit(undefined);
       ctx?.ui.notify("The queued message you were editing was delivered", "info");
     }
     draw();
@@ -184,7 +190,7 @@ export default function (pi: ExtensionAPI) {
     paused = false;
     if (!edit) {
       const latest = rows.reduce((a, b) => (b.id > a.id ? b : a));
-      edit = { id: latest.id, draft: c.ui.getEditorText() };
+      setEdit({ id: latest.id, draft: c.ui.getEditorText() });
       c.ui.setEditorText(latest.text);
       return draw();
     }
@@ -287,7 +293,7 @@ export default function (pi: ExtensionAPI) {
     unsubscribeKeys?.();
     if (ctx?.hasUI) ctx.ui.setWidget(WIDGET, undefined);
     rows = [];
-    edit = undefined;
+    setEdit(undefined);
     paused = false;
     running = undefined;
     ctx = tui = reloadRow = reloadDraft = unsubscribeKeys = undefined;
@@ -300,6 +306,8 @@ export default function (pi: ExtensionAPI) {
       endEdit(event.text);
       return { action: "handled" };
     }
+    // Steering the item the fleet viewer shows, whichever extension loaded first.
+    if (viewerTakes(event.text)) return { action: "continue" };
     paused = false;
     if (!event.streamingBehavior) return { action: "continue" };
     rows.push({ id: nextId++, lane: event.streamingBehavior, text: event.text, ...(event.images?.length && { images: event.images }) });

@@ -4,11 +4,20 @@
 //   {"act": id, "text"}                       new activity line
 //   {"update": id, ...fields}                 registry.update(id, fields)
 //   {"add": ..., "throws": true}              activity() throws
+//   {"add": ..., "log": path}                 viewer shows that log file (default /dev/null)
+//   {"add": ..., "transcript": text}          viewer shows a transcript component with that text
+//   {"add": ..., "steer": true}               steer handler: activity becomes "steered: <text>"
+//                                             stop always finishes the item as stopped
+//   {"watchers": true}                        reports event "watchers:<n>", the process's file watchers
+//   {"mismatch": true}                        adds a fourth child to Pi's document container
+//   {"unmount": true}                         replaces the document container's chat slot with an empty container
+//   {"prune": true}                           registry.prune()
 //   {"finish": id, "status", "result", "notice"?}  notice: the model's line; none if absent
 //   {"notify": id, "text"}
 //   {"clock": seconds}                        the registry's clock (starts at 0)
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Container, Text, type TUI } from "@earendil-works/pi-tui";
 import { fleet } from "../../../shared/fleet/index.ts";
 
 export default function (pi: ExtensionAPI) {
@@ -34,8 +43,14 @@ export default function (pi: ExtensionAPI) {
               if (op.throws) throw new Error("producer bug");
               return activity.get(op.add) ?? "";
             },
-            view: { log: "/dev/null" },
-            stop() {},
+            view: "transcript" in op ? { transcript: () => new Text(op.transcript, 1, 0) } : { log: op.log ?? "/dev/null" },
+            stop: () => registry.finish(op.add, "stopped", "stopped by user", null),
+            steer: op.steer
+              ? (text: string) => {
+                  activity.set(op.add, `steered: ${text}`);
+                  registry.update(op.add);
+                }
+              : undefined,
           });
         } else if ("act" in op) {
           activity.set(op.act, op.text);
@@ -45,7 +60,21 @@ export default function (pi: ExtensionAPI) {
           registry.update(update, change);
         } else if ("finish" in op) registry.finish(op.finish, op.status, op.result, op.notice ?? null);
         else if ("notify" in op) registry.notify(op.notify, op.text);
-        else if ("clock" in op) {
+        else if ("watchers" in op) {
+          const n = process.getActiveResourcesInfo().filter((r) => r === "StatWatcher").length;
+          appendFileSync(process.env.PI_HARNESS_EVENTS!, JSON.stringify({ event: `watchers:${n}` }) + "\n");
+        } else if ("mismatch" in op || "unmount" in op) {
+          ctx.ui.setWidget(
+            "fx-" + Object.keys(op)[0],
+            (tui: TUI) => {
+              const doc = tui.children[0] as Container;
+              if ("mismatch" in op) doc.addChild(new Container());
+              else doc.children[2] = new Container();
+              return new Container();
+            },
+            { placement: "belowEditor" },
+          );
+        } else if ("prune" in op) registry.prune(); else if ("clock" in op) {
           now = op.clock;
           for (const item of registry.items()) registry.update(item.id);
         }

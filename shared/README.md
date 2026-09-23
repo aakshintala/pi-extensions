@@ -111,6 +111,11 @@ summary: { verb: "updated", many: "todos" }                                     
 characters and newlines collapse to a space. Used by `extensions/todo` and
 `extensions/fleet`.
 
+`keepSgr(s)` removes the same sequences except SGR (colours and styles), for
+text shown with its colours. `unfinished(s)` gives where a sequence cut off by
+the end of `s` starts, for text that arrives in pieces. Both are used by the
+fleet viewer's log.
+
 ### `fleet/`
 
 The background-work registry (#29). Items carry an `owner` session id.
@@ -118,3 +123,8 @@ The background-work registry (#29). Items carry an `owner` session id.
 owner's fleet extension. That extension delivers them, and it keeps a run
 without the UI alive until its items return. A `finish` with no notice sends a
 default line; a `null` notice sends nothing. See `extensions/fleet/README.md`.
+
+`fleet().viewing` is the item the fleet viewer shows. `viewerTakes(text)` says
+whether typed input belongs to it (an item is open and the text is not a slash
+command); another extension's `input` handler lets such input through, so the
+routing does not depend on load order.

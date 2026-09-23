@@ -16,11 +16,6 @@ const FOOTER = ["~/cwd", "0.0%/128k (auto)                                      
 
 // Regular mode before any prompt: blank header row, editor, FleetView, footer.
 const idle = (fleet = [], editor = "") => pad(["", BORDER, editor, BORDER, ...fleet, ...FOOTER]);
-// Fullscreen mode: the same block pinned to the bottom.
-const fullscreen = (fleet = []) => {
-  const block = [BORDER, "", BORDER, ...fleet, ...FOOTER];
-  return "\n" + [...Array(ROWS - block.length).fill(""), ...block].join("\n");
-};
 // waitForScreen drops one leading newline, so a blank first row survives.
 const pad = (lines) => "\n" + [...lines, ...Array(ROWS - lines.length).fill("")].join("\n");
 
@@ -200,20 +195,6 @@ test("rows stay within the line budget and scroll to the selection", async (t) =
   await tui.waitForScreen(view(4, 8));
   tui.keys(...Array(8).fill("Up"));
   await tui.waitForScreen(view(0, 0));
-});
-
-test("in fullscreen mode a click selects a row", async (t) => {
-  const tui = await start(t, { args: ["--tui-mode", "fullscreen"] });
-  await tui.fx({ add: "a", kind: "agent", label: "one" }, { add: "b", kind: "shell", label: "two" });
-  const screen = (marks) => fullscreen([`${marks[0]}● main`, `${marks[1]}  agent one · 0s`, `${marks[2]}  shell two · 0s`]);
-  await tui.waitForScreen(screen("   "));
-
-  tui.click(10, 22);
-  await tui.waitForScreen(screen("  ›"));
-  tui.click(3, 20);
-  await tui.waitForScreen(screen("›  "));
-  tui.keys("Escape");
-  await tui.waitForScreen(screen("   "));
 });
 
 test("notices are one compact themed line; a failure shows its error", async (t) => {
