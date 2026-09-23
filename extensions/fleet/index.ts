@@ -3,8 +3,9 @@
 // only one that draws them. Enter or a click opens an item in the viewer frame
 // (#45, viewer.ts). It also delivers the session's notices (#46) and
 // keeps a run without the UI alive until the work it started returns.
-import type { ExtensionAPI, ExtensionContext, MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
+import { getKeybindings, isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
+import { join } from "node:path";
 import { duration, fleet, isFinished, viewerTakes, type Item, type Notice } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
 import { createViewer, type Viewer } from "./viewer.ts";
@@ -13,6 +14,39 @@ import { createViewer, type Viewer } from "./viewer.ts";
 const MAX_LINES = 6;
 const MAIN = "main";
 const NOTICE = "rig.notice";
+const BLOCKED = Symbol.for("pi-rig.fleet.ctrlBBlocked");
+
+/**
+ * Ctrl+B backgrounds only once the user frees it from Pi's default cursor-left binding (#29).
+ * Read live: /reload re-reads keybindings.json after session_start.
+ */
+const ctrlBFree = () => !getKeybindings().getKeys("tui.editor.cursorLeft").includes("ctrl+b");
+
+/**
+ * Warns when Ctrl+B becomes blocked, never twice in a row. Checked at session start and on
+ * every key: /reload re-reads keybindings.json only after session_start, so a change shows
+ * at the next key. The state lives on globalThis so a reload does not repeat the warning.
+ */
+function checkCtrlB(ctx: ExtensionContext) {
+  const g = globalThis as { [BLOCKED]?: boolean };
+  const blocked = !ctrlBFree();
+  if (blocked && !g[BLOCKED]) {
+    ctx.ui.notify(`Ctrl+B moves the cursor left, so it cannot background commands. Add "tui.editor.cursorLeft": ["left"] to ${join(getAgentDir(), "keybindings.json")}`, "warning");
+  }
+  g[BLOCKED] = blocked;
+}
+
+/**
+ * Whether Pi's main editor has focus, so no picker, dialog or overlay owns the key. Same
+ * structural lookup as extensions/queue: the only child of Pi's editor container, the
+ * root's fifth child in Pi 0.87 (interactive-mode.js mountInteractiveTui), with Pi's
+ * submit handler wired on.
+ */
+function editorFocused(tui: TUI | undefined) {
+  const editor = (tui?.children?.[4] as { children?: unknown[] } | undefined)?.children?.[0] as Record<string, unknown> | undefined;
+  const isEditor = ["onSubmit", "getText", "handleInput"].every((k) => typeof editor?.[k] === "function");
+  return isEditor && tui!.getFocusedComponent?.() === editor;
+}
 
 type Row = { item?: Item; depth: number };
 
@@ -106,6 +140,7 @@ export default function (pi: ExtensionAPI) {
     cleanup?.();
     detach?.();
     if (ctx.mode === "tui") {
+      checkCtrlB(ctx);
       const mounted = mount(ctx);
       viewer = mounted.viewer;
       cleanup = mounted.cleanup;
@@ -172,10 +207,12 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
 
   const current = () => rows(registry.items());
 
-  // Rows shown, as indices into current(), plus the hidden count. A stop confirmation takes one line of the budget.
+  const hint = () => registry.foregrounds() > 0 && ctrlBFree();
+
+  // Rows shown, as indices into current(), plus the hidden count. A stop confirmation and the Ctrl+B hint each take one line of the budget.
   function window(all: Row[]) {
     selected = Math.min(selected, all.length - 1);
-    const budget = MAX_LINES - (viewer.confirmation() ? 1 : 0);
+    const budget = MAX_LINES - (viewer.confirmation() ? 1 : 0) - (hint() ? 1 : 0);
     if (all.length <= budget) return { start: 0, end: all.length, hidden: 0 };
     const size = budget - 1;
     top = Math.max(0, Math.min(Math.max(top, selected - size + 1), selected, all.length - size));
@@ -202,13 +239,17 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   const view = {
     render(width: number) {
       const all = current();
-      if (all.length === 1) return [];
       const theme = ctx.ui.theme;
-      const { start, end, hidden } = window(all);
-      const out = all.slice(start, end).map((row, i) => line(row, start + i, theme));
-      if (hidden) out.push(theme.fg("dim", `   … ${hidden} more`));
-      const confirm = viewer.confirmation();
-      if (confirm) out.push(theme.fg("warning", ` ${confirm}`));
+      const out: string[] = [];
+      if (all.length > 1) {
+        const { start, end, hidden } = window(all);
+        out.push(...all.slice(start, end).map((row, i) => line(row, start + i, theme)));
+        if (hidden) out.push(theme.fg("dim", `   … ${hidden} more`));
+        const confirm = viewer.confirmation();
+        if (confirm) out.push(theme.fg("warning", ` ${confirm}`));
+      }
+      // Last, so a click's row index still counts from the first row.
+      if (hint()) out.push(theme.fg("dim", " ctrl+b to run in background"));
       return out.map((l) => truncateToWidth(l, width));
     },
     invalidate() {},
@@ -216,6 +257,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   const region = new MouseRegion(view, (event) => {
     if (event.type !== "click" || event.button !== "left") return undefined;
     const all = current();
+    if (all.length === 1) return undefined; // only the Ctrl+B hint is showing
     const { start, end } = window(all);
     const index = start + event.y;
     if (index >= end) return undefined;
@@ -248,7 +290,13 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
 
   const unlisten = ctx.ui.onTerminalInput((data) => {
     if (data.startsWith("\x1b[<") || isKeyRelease(data)) return undefined;
+    checkCtrlB(ctx);
+    // First, so at a stop confirmation Ctrl+B is "any other key" and cancels.
     if (!focused && viewer.handleKey(data)) return { consume: true };
+    if (matchesKey(data, "ctrl+b") && hint() && editorFocused(tui)) {
+      registry.backgroundAll();
+      return { consume: true };
+    }
     // The overlay covers FleetView and takes every other key.
     if (current().length === 1 || viewer.overlay()) return undefined;
     if (!focused) {

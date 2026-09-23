@@ -71,3 +71,35 @@ test("the default notice is one clean line", () => {
   fleet.finish("a", "failed", "exit 1\n\u001b[31mError: boom\u001b[0m");
   assert.deepEqual(got, ["shell scout (id a) failed after 0s: exit 1 Error: boom"]);
 });
+
+test("an owner's detach drops its foreground commands, and a detached owner's are ignored", () => {
+  const fleet = createFleet();
+  const detach = fleet.attach("s1", () => {});
+  fleet.attach("s2", () => {});
+  const called = [];
+  fleet.foreground("s1", () => called.push("s1"));
+  fleet.foreground("s2", () => called.push("s2"));
+  detach();
+  fleet.foreground("s1", () => called.push("late"));
+  assert.equal(fleet.foregrounds(), 1);
+  fleet.backgroundAll();
+  assert.deepEqual(called, ["s2"]);
+});
+
+test("backgroundAll calls each command once from one snapshot and drops one that throws", () => {
+  const fleet = createFleet();
+  const called = [];
+  fleet.foreground("s1", () => {
+    called.push("bad");
+    throw new Error("producer bug");
+  });
+  fleet.foreground("s1", () => {
+    called.push("good");
+    fleet.foreground("s1", () => called.push("added during the press"));
+  });
+  fleet.backgroundAll();
+  assert.deepEqual(called, ["bad", "good"]);
+  assert.equal(fleet.foregrounds(), 2); // "good" (not ended by its handler) and the new one
+  fleet.backgroundAll();
+  assert.deepEqual(called, ["bad", "good", "good", "added during the press"]);
+});

@@ -15,6 +15,9 @@
 //   {"finish": id, "status", "result", "notice"?}  notice: the model's line; none if absent
 //   {"notify": id, "text"}
 //   {"clock": seconds}                        the registry's clock (starts at 0)
+//   {"fg": id}                                a foreground command: Ctrl+B reports event "bg:<id>" and ends it
+//   {"fg": id, "throws": true}                Ctrl+B reports event "bg:<id>", then throws without ending it
+//   {"fgEnd": id}                             ends that foreground command
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, Text, type TUI } from "@earendil-works/pi-tui";
@@ -22,6 +25,7 @@ import { fleet } from "../../../shared/fleet/index.ts";
 
 export default function (pi: ExtensionAPI) {
   const activity = new Map<string, string>();
+  const foreground = new Map<string, () => void>();
   let now = 0;
 
   pi.registerCommand("fx", {
@@ -74,7 +78,15 @@ export default function (pi: ExtensionAPI) {
             },
             { placement: "belowEditor" },
           );
-        } else if ("prune" in op) registry.prune(); else if ("clock" in op) {
+        } else if ("fg" in op) {
+          const end = registry.foreground(ctx.sessionManager.getSessionId(), () => {
+            appendFileSync(process.env.PI_HARNESS_EVENTS!, JSON.stringify({ event: `bg:${op.fg}` }) + "\n");
+            if (op.throws) throw new Error("producer bug");
+            end();
+          });
+          foreground.set(op.fg, end);
+        } else if ("fgEnd" in op) foreground.get(op.fgEnd)?.();
+        else if ("prune" in op) registry.prune(); else if ("clock" in op) {
           now = op.clock;
           for (const item of registry.items()) registry.update(item.id);
         }
