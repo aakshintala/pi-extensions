@@ -44,12 +44,12 @@ export default function (pi: ExtensionAPI) {
 
   const ordered = () => [...rows.filter((r) => r.lane === "steer"), ...rows.filter((r) => r.lane === "followUp")];
 
+  // Always set, even empty (it then renders no lines), so `tui` is known before the first row.
   const draw = () => {
     if (!ctx?.hasUI) return;
     ctx.ui.setWidget(
       WIDGET,
-      rows.length
-        ? (t, theme) => {
+      (t, theme) => {
             tui = t;
             return {
               invalidate() {},
@@ -80,8 +80,7 @@ export default function (pi: ExtensionAPI) {
                 return lines;
               },
             };
-          }
-        : undefined,
+          },
     );
   };
 
@@ -159,8 +158,8 @@ export default function (pi: ExtensionAPI) {
       });
       return;
     }
-    const editor = tui?.getFocusedComponent?.();
-    if (typeof editor?.onSubmit !== "function") return fail("Pi's editor is not focused");
+    if (!editorFocused()) return fail("Pi's editor is not focused");
+    const editor = tui.getFocusedComponent();
     running = "reload";
     rows = rows.filter((r) => r !== row);
     draw();
@@ -172,21 +171,64 @@ export default function (pi: ExtensionAPI) {
     }, 0);
   }
 
-  // Esc while editing, and Enter on /compact or /reload, which Pi would run directly.
+  // Option+Up selects the most recent row, then moves up; Option+Down moves down. The
+  // row being left keeps what was typed into it.
+  const select = (step: number) => {
+    const c = ctx!;
+    paused = false;
+    if (!edit) {
+      const latest = rows.reduce((a, b) => (b.id > a.id ? b : a));
+      edit = { id: latest.id, draft: c.ui.getEditorText() };
+      c.ui.setEditorText(latest.text);
+      return draw();
+    }
+    const order = ordered();
+    const i = order.findIndex((r) => r.id === edit!.id);
+    order[i].text = c.ui.getEditorText().trim() || order[i].text;
+    const next = order[(i + step + order.length) % order.length];
+    edit.id = next.id;
+    c.ui.setEditorText(next.text);
+    draw();
+  };
+
+  const remove = () => {
+    const order = ordered();
+    const i = order.findIndex((r) => r.id === edit!.id);
+    rows = rows.filter((r) => r.id !== edit!.id);
+    const next = ordered()[Math.min(i, rows.length - 1)];
+    if (!next) return endEdit();
+    edit!.id = next.id;
+    ctx!.ui.setEditorText(next.text);
+    draw();
+  };
+
+  // Keys are read here rather than through registerShortcut: overriding Pi's Option+Up
+  // that way prints an "[Extension issues]" warning at every start. Only while Pi's editor
+  // has focus, so pickers keep their own Option+Up/Down.
+  const editorFocused = () => typeof tui?.getFocusedComponent?.()?.onSubmit === "function";
+
   const onKey = (data: string) => {
-    if (!ctx) return;
-    const text = ctx.ui.getEditorText();
-    if (edit && matchesKey(data, "escape")) {
-      endEdit();
-      return { consume: true };
-    }
-    if (!matchesKey(data, "enter") || !commandOf({ text })) return;
-    if (edit) {
-      endEdit(text.trim());
-      return { consume: true };
-    }
-    if (ctx.isIdle()) return;
-    rows.push({ id: nextId++, lane: "followUp", text: text.trim() });
+    if (!ctx || !rows.length || !editorFocused()) return;
+    const handled = (() => {
+      if (matchesKey(data, "alt+up")) return select(-1), true;
+      if (edit && matchesKey(data, "alt+down")) return select(1), true;
+      if (edit && matchesKey(data, "alt+x")) return remove(), true;
+      if (edit && matchesKey(data, "escape")) return endEdit(), true;
+      // Enter on /compact or /reload: Pi would run it directly, even mid-run or mid-edit.
+      const text = ctx!.ui.getEditorText().trim();
+      if (!matchesKey(data, "enter") || !commandOf({ text })) return false;
+      if (edit) return endEdit(text), true;
+      return false;
+    })();
+    return handled ? { consume: true } : undefined;
+  };
+
+  // Enter on /compact or /reload while the agent works queues a command row.
+  const onCommandKey = (data: string) => {
+    if (!ctx || ctx.isIdle() || edit || !matchesKey(data, "enter") || !editorFocused()) return;
+    const text = ctx.ui.getEditorText().trim();
+    if (!commandOf({ text })) return;
+    rows.push({ id: nextId++, lane: "followUp", text });
     paused = false;
     ctx.ui.setEditorText("");
     draw();
@@ -209,7 +251,7 @@ export default function (pi: ExtensionAPI) {
         }, 0);
       }
     }
-    if (c.hasUI) unsubscribeKeys = c.ui.onTerminalInput(onKey);
+    if (c.hasUI) unsubscribeKeys = c.ui.onTerminalInput((data) => onKey(data) ?? onCommandKey(data));
     draw();
   });
 
@@ -239,11 +281,11 @@ export default function (pi: ExtensionAPI) {
     return { action: "handled" };
   });
 
-  const aborted = (m: any) => m?.role === "assistant" && m.stopReason === "aborted";
+  const aborted = (m: any, c: ExtensionContext) => c.signal?.aborted || (m?.role === "assistant" && m.stopReason === "aborted");
 
   pi.on("turn_end", (event, c) => {
     ctx = c;
-    if (aborted(event.message)) paused = rows.length > 0;
+    if (aborted(event.message, c)) paused = rows.length > 0;
     atBoundary("steer");
     draw();
   });
@@ -251,7 +293,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", (event, c) => {
     ctx = c;
     const last: any = event.messages.at(-1);
-    if (aborted(last)) paused = rows.length > 0;
+    if (aborted(last, c)) paused = rows.length > 0;
     // Pi decides on retry or compaction after agent_end; a follow-up now would hide that.
     if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "length")) return;
     atBoundary(ready("steer").length ? "steer" : "followUp");
@@ -261,42 +303,5 @@ export default function (pi: ExtensionAPI) {
     ctx = c;
     draw();
     dispatchIdle();
-  });
-
-  const select = (step: number) => (c: ExtensionContext) => {
-    ctx = c;
-    if (!rows.length) return c.ui.notify("No queued messages", "info");
-    paused = false;
-    const order = ordered();
-    if (!edit) {
-      const latest = rows.reduce((a, b) => (b.id > a.id ? b : a));
-      edit = { id: latest.id, draft: c.ui.getEditorText() };
-      c.ui.setEditorText(latest.text);
-      return draw();
-    }
-    const i = order.findIndex((r) => r.id === edit!.id);
-    order[i].text = c.ui.getEditorText().trim() || order[i].text;
-    const next = order[(i + step + order.length) % order.length];
-    edit.id = next.id;
-    c.ui.setEditorText(next.text);
-    draw();
-  };
-
-  pi.registerShortcut("alt+up", { description: "Edit queued messages (previous)", handler: select(-1) });
-  pi.registerShortcut("alt+down", { description: "Next queued message", handler: select(1) });
-  pi.registerShortcut("alt+x", {
-    description: "Delete the selected queued message",
-    handler: (c) => {
-      ctx = c;
-      if (!edit) return;
-      const order = ordered();
-      const i = order.findIndex((r) => r.id === edit!.id);
-      rows = rows.filter((r) => r.id !== edit!.id);
-      const next = ordered()[Math.min(i, rows.length - 1)];
-      if (!next) return endEdit();
-      edit.id = next.id;
-      c.ui.setEditorText(next.text);
-      draw();
-    },
   });
 }
