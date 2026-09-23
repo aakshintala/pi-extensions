@@ -32,10 +32,11 @@ test("an agent's row shows its live activity, then its completion notice", async
   ], "   agent scout · 0s · read notes.md", "↑44 ↓28 R2 W44 CH2.3% 0.1%/128k (auto)                       (harness) harness-1"));
 
   writeFileSync(join(agentDir, "go"), ""); // the child's next reply
+  await tui.waitForEvent("agent_end", 2); // the parent's turn on the child's notice
   await tui.waitForScreen(screen([
     " go", "", "", " ⏺ Agent(scout)", started, "", " spawned", "",
     " ✓ agent scout · done 0s · STATUS: DONE", "", " read it", "",
-  ], "   agent scout · done 0s · STATUS: DONE", "↑82 ↓30 R46 W83 CH36.4% 0.1%/128k (auto)                     (harness) harness-1"));
+  ], "   agent scout · done 0s · STATUS: DONE", "↑82 ↓30 R46 W82 CH36.7% 0.1%/128k (auto)                     (harness) harness-1"));
 });
 
 const ROWS = 24;
