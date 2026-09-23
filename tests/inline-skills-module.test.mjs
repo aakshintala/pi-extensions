@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import "./fixtures/tool-display/pi-tui.mjs";
 const ext = await import("../extensions/inline-skills/index.ts");
-const { namedSkills, patchEditor, skillMessage, skillProvider } = ext;
+const { namedSkills, patchEditor, skillMessage, skillProvider, stripFrontmatter } = ext;
 
 const skill = (name) => ({ name, description: `${name} skill`, path: `/s/${name}/SKILL.md` });
 const SKILLS = ["grilling", "grill-with-docs", "setup-grill", "tdd"].map(skill);
@@ -22,6 +22,14 @@ test("token detection: boundaries, case, second slash, colon, dedup and loaded",
 test("a message with no `/` never lists skills", () => {
   const skills = () => assert.fail("skills listed for a message without a slash");
   assert.deepEqual(namedSkills("an ordinary prompt", skills, new Set()), []);
+});
+
+test("frontmatter is stripped, with or without a newline after it", () => {
+  assert.equal(stripFrontmatter("---\nname: x\n---\nbody"), "body");
+  assert.equal(stripFrontmatter("---\nname: x\n---body"), "body");
+  assert.equal(stripFrontmatter("---\nname: x\n---"), "");
+  assert.equal(stripFrontmatter("no frontmatter"), "no frontmatter");
+  assert.equal(stripFrontmatter("---\nunclosed"), "---\nunclosed");
 });
 
 test("skill message: fenced bodies, names in details", () => {

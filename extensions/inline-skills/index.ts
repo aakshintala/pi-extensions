@@ -47,12 +47,12 @@ export function namedSkills(text: string, skills: () => Skill[], loaded: Set<str
   return [...out.values()];
 }
 
-function stripFrontmatter(content: string): string {
+export function stripFrontmatter(content: string): string {
   if (!content.startsWith("---")) return content;
   const end = content.indexOf("\n---", 3);
   if (end === -1) return content;
-  const after = content.indexOf("\n", end + 4);
-  return after === -1 ? "" : content.slice(after + 1);
+  const rest = content.slice(end + 4); // the closing `---` may have the body on its line
+  return rest.startsWith("\n") ? rest.slice(1) : rest;
 }
 
 // Body goes in a backtick fence longer than any backtick run inside it, so no body can close it.
