@@ -11,10 +11,14 @@ Collapses each run of tool calls into one summary line, and draws the built-in
    ⎿  Error: Could not find the exact text in a.txt. …
 ```
 
-- **Groups.** Consecutive calls in one assistant message share one summary
+- **Groups span responses (#133).** Consecutive calls share one summary line,
+  across assistant responses, so an agent run of tool-only responses is one
   line. Every call counts under its verb; `+a −r` comes from finished edits and
-  writes. It updates live, with a spinner while calls run. Text between calls,
-  or a tool without a summary, starts a new group.
+  writes. It updates live, with a spinner while calls run. Inside a group, the
+  calls after the first and the tool-only responses between them draw no rows.
+- **What splits a group:** assistant text, your prompt, a steer or follow-up,
+  a custom message or notice drawn in the chat, a tool without a summary (such
+  as `ask_user`), and the end of the agent run. Hidden thinking does not.
 - **Failed calls always shown** under their group, and so are calls that
   returned an image (Pi draws images outside the tool's renderers).
 - **Cancelled.** When a turn is aborted (Esc), calls with no result and calls
@@ -25,7 +29,8 @@ Collapses each run of tool calls into one summary line, and draws the built-in
   mode, a click on a group opens or closes that group only (Pi sends mouse
   clicks only in fullscreen mode).
 - **Resumed sessions group the same way**: groups come from the saved
-  assistant messages, and cancels and failures are told apart from saved data.
+  messages, and cancels and failures are told apart from saved data. So do
+  subagent transcripts.
 - **Per session.** Each session has its own groups, so an in-process subagent
   session never touches its parent's.
 - **Text order (limit).** Pi draws all of an assistant message's text before its
@@ -64,13 +69,15 @@ Expanded, each call looks like this:
 
 - **Hidden thinking renders nothing.** With thinking hidden (Ctrl+T), Pi's
   "Thinking..." label and its blank line are gone, in messages with and
-  without text. A group whose message has thinking starts with `thought ·`:
+  without text. A group starts with `thought ·` when any of its responses
+  had thinking:
 
   ```
-   ⏺ thought · read 1 file
+   ⏺ thought · read 5 files, ran 7 shell commands
   ```
 
-- **Shown thinking** starts with a `✻ Thinking` label line.
+- **Shown thinking** starts with a `✻ Thinking` label line. It does not split
+  a group, so a later response's thinking shows below the group's summary.
 - **Screen only.** Saved sessions and the model's context are unchanged.
 - **Guarded Pi patch** (one of the rig's three, #1). It wraps
   `AssistantMessageComponent.prototype.updateContent` on Pi 0.87.x only, and

@@ -133,6 +133,8 @@ class Transcript extends Container {
   }
 
   private add(message: any) {
+    // A message drawn between two runs of calls splits them, as in the main chat.
+    if (message.role !== "assistant") this.groups.track(message);
     if (message.role === "user") {
       const text = userText(message);
       if (!text) return;

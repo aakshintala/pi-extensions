@@ -153,11 +153,12 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
   };
 }
 
-// ---- Groups (#56) ----
-// Consecutive calls to tools with a summary, in one assistant message, form a group.
+// ---- Groups (#56, #133) ----
+// Consecutive calls to tools with a summary form a group, across assistant messages
+// with nothing drawn between them.
 // Its first call draws one summary line and the others draw nothing, until Ctrl+O
 // (context.expanded) or a click on the group opens it. Failed calls and calls with
-// images always show. Groups come from the message itself, so a transcript rebuilt
+// images always show. Groups come from the messages alone, so a transcript rebuilt
 // from saved messages groups the same way as the live chat.
 //
 // Each session owns one ToolGroups (its extension creates it and drives it from Pi's
@@ -189,11 +190,10 @@ export const outcomeOf = (isError: boolean, result: unknown): Outcome =>
 const hasImage = (result: unknown) =>
   Array.isArray((result as any)?.content) && (result as any).content.some((c: any) => c?.type === "image");
 
+/** Consecutive calls across assistant messages with nothing drawn between them. */
 interface Run {
   ids: string[];
-  /** Its message has thinking: the summary starts with "thought ·". */
-  thought?: boolean;
-  /** Set when the message or its turn ended: what a call with no result counts as. */
+  /** Set when a message or its turn ended: what a call with no result counts as. */
   ended?: "cancelled" | "error";
 }
 
@@ -203,6 +203,9 @@ class Call {
   open = false;
   summary?: Summary;
   invalidate?: () => void;
+  /** Its message's first call id, and whether that message has thinking. */
+  msg = "";
+  thought = false;
   id: string;
   run: Run;
   args: unknown;
@@ -240,6 +243,9 @@ const unindex = (id: string, groups: ToolGroups) => {
   else INDEX.delete(id);
 };
 
+/** Messages Pi draws in the chat, besides assistant messages (a custom one when `display` is set). */
+const SPLITS = new Set(["user", "bashExecution", "compactionSummary", "branchSummary"]);
+
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /** One session's tool groups. */
@@ -247,35 +253,68 @@ export class ToolGroups {
   private calls = new Map<string, Call>();
   /** Results that arrived before their call was registered. */
   private early = new Map<string, { outcome: Outcome; image: boolean }>();
+  /** Each assistant message's calls, by its first call, and the run open before it. */
+  private msgs = new Map<string, { ids: string[]; before?: Run }>();
+  /** The run a next message of calls only continues; a message drawn in the chat or the end of the agent run closes it. */
+  private tail?: Run;
   frame = 0;
 
-  /** Registers the groups in an assistant message (call on every update and at its end). */
+  /**
+   * Feeds one message, in order: an assistant message registers its calls (call on
+   * every update and at its end); a message drawn in the chat ends the open run.
+   */
   track(message: any): void {
+    if (SPLITS.has(message?.role) || (message?.role === "custom" && message.display)) return void (this.tail = undefined);
     if (message?.role !== "assistant" || !Array.isArray(message.content)) return;
     const runs: any[][] = [[]];
+    let text = false;
     for (const b of message.content) {
       if (b?.type === "toolCall" && typeof b.id === "string") runs.at(-1)!.push(b);
-      else if (b?.type === "text" && b.text?.trim()) runs.push([]);
+      else if (b?.type === "text" && b.text?.trim()) (text = true), runs.push([]);
     }
+    const segments = runs.filter((r) => r.length);
+    if (!segments.length) {
+      if (text) this.tail = undefined;
+      return;
+    }
+    // A message is known by its first call: each streaming update is a new object.
+    const key = segments[0][0].id as string;
+    const msg = this.msgs.get(key) ?? this.msgs.set(key, { ids: [], before: this.tail }).get(key)!;
+    const all = segments.flat().map((b) => b.id as string);
+    // A call revised out of the message leaves its group.
+    for (const id of msg.ids) if (!all.includes(id)) this.forget(id);
+    msg.ids = all;
+    // Pi draws all of a message's text above its calls, so only a message without
+    // text continues the run before it.
+    const join = text ? undefined : msg.before;
     const thought = message.content.some((b: any) => b?.type === "thinking" && b.thinking?.trim());
     const ended = message.stopReason === "aborted" ? "cancelled" : message.stopReason === "error" ? "error" : undefined;
-    for (const blocks of runs.filter((r) => r.length)) {
-      const ids = blocks.map((b) => b.id);
+    const mine = (id: string) => this.calls.get(id)?.msg === key;
+    const used = new Set<Run>();
+    for (const [i, blocks] of segments.entries()) {
+      const ids = blocks.map((b) => b.id as string);
       const old = this.calls.get(ids[0])?.run;
-      const run: Run = old ?? { ids: [] };
-      // A call revised out of the message leaves its group.
-      for (const id of run.ids) if (!ids.includes(id)) this.forget(id);
-      const changed = ids.join() !== run.ids.join() || (ended && !run.ended) || thought !== !!run.thought;
-      run.ids = ids;
-      run.thought = thought;
+      const run: Run = i === 0 && join ? join : old && !used.has(old) && old.ids.every(mine) ? old : { ids: [] };
+      used.add(run);
+      const next = [...run.ids.filter((id) => !mine(id)), ...ids];
+      let changed = next.join() !== run.ids.join() || (ended && !run.ended);
+      run.ids = next;
       run.ended ??= ended;
       for (const b of blocks) {
         const c = this.calls.get(b.id);
-        if (c) Object.assign(c, { run, args: b.arguments });
-        else this.add(new Call(b.id, run, b.arguments));
+        if (!c) {
+          this.add(Object.assign(new Call(b.id, run, b.arguments), { msg: key, thought }));
+          continue;
+        }
+        if (c.run !== run) this.leave(c);
+        changed ||= c.thought !== thought;
+        Object.assign(c, { run, args: b.arguments, thought });
       }
       if (changed) this.refresh(run);
+      this.tail = run;
     }
+    // An aborted or failed message ends the agent run.
+    if (ended) this.tail = undefined;
   }
 
   /** Records a call's result (Pi's tool_execution_end, or a saved toolResult message). */
@@ -287,8 +326,9 @@ export class ToolGroups {
     this.refresh(c.run);
   }
 
-  /** The turn is over: calls still without a result are cancelled. */
+  /** The agent run is over: the open run closes, and calls still without a result are cancelled. */
   endRun(): void {
+    this.tail = undefined;
     for (const run of new Set([...this.calls.values()].map((c) => c.run))) {
       if (!run.ended && run.ids.some((id) => this.calls.get(id)?.status === "pending")) {
         run.ended = "cancelled";
@@ -302,6 +342,8 @@ export class ToolGroups {
     for (const id of this.calls.keys()) unindex(id, this);
     this.calls.clear();
     this.early.clear();
+    this.msgs.clear();
+    this.tail = undefined;
   }
 
   /** Advances the spinner and redraws the summary line of each running group. */
@@ -369,8 +411,16 @@ export class ToolGroups {
   }
 
   private forget(id: string) {
+    const c = this.calls.get(id);
+    if (c) this.leave(c);
     this.calls.delete(id);
     unindex(id, this);
+  }
+
+  /** Takes a call out of its run (it moved to another, or left the message). */
+  private leave(c: Call) {
+    c.run.ids = c.run.ids.filter((id) => id !== c.id);
+    this.refresh(c.run);
   }
 
   private refresh(run: Run) {
@@ -392,7 +442,7 @@ function summaryLine(theme: Theme, g: Group, width: number): string {
   const bad = calls.some((c) => c.status === "error" || c.status === "cancelled");
   const frame = SPINNER[g.session.frame % SPINNER.length];
   const bullet = live ? theme.fg("muted", frame) : theme.fg(bad ? "error" : "success", CALL);
-  return truncateToWidth(`${PAD}${bullet} ${summaryText(theme, calls, g.calls[0].run.thought)}`, width);
+  return truncateToWidth(`${PAD}${bullet} ${summaryText(theme, calls, g.calls.some((c) => c.thought))}`, width);
 }
 
 const lineTotals = new WeakMap<object, { added: number; removed: number } | undefined>();

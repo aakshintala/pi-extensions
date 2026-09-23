@@ -237,3 +237,52 @@ test("groups: an error before the user's abort of a later reply, or of a new pro
   g.track({ role: "assistant", stopReason: "aborted", content: [] });
   assert.deepEqual(draw(["u2"]), [" ⏺ Read 1 file · 1 failed", " ⏺ Read(u2)"]);
 });
+
+// #133: a run spans assistant messages until something drawn in the chat, or the end of the agent run.
+const said = (...content) => ({ role: "assistant", stopReason: "toolUse", content });
+const thinking = { type: "thinking", thinking: "hmm" };
+
+test("groups span tool-only messages; thinking in any of them leads the summary; streaming updates are new objects", (t) => {
+  const g = new td.ToolGroups();
+  t.after(() => g.reset());
+  g.track(said(toolCall("m1")));
+  g.track(said(thinking)); // a later message, still streaming its thinking
+  g.track(said(thinking, toolCall("m2")));
+  g.track(said(thinking, toolCall("m2"), toolCall("m3")));
+  g.track(said(toolCall("m4")));
+  for (const id of ["m1", "m2", "m3", "m4"]) g.settle(id, false, { content: [] });
+  g.endRun();
+  assert.deepEqual(draw(["m1", "m2", "m3", "m4"]), [" ⏺ thought · read 4 files"]);
+});
+
+test("groups: text, a message drawn in the chat, a call without a summary and the end of the agent run each split a run", (t) => {
+  const g = new td.ToolGroups();
+  t.after(() => g.reset());
+  const steps = [
+    [said(toolCall("p1"))],
+    [said({ type: "text", text: "Next:" }, toolCall("p2"))], // text, drawn above its calls
+    [{ role: "user", content: "steer" }, said(toolCall("p3"))],
+    [{ role: "custom", display: true, content: "notice" }, said(toolCall("p4"))],
+    [{ role: "custom", display: false, content: "hidden" }, { role: "system", content: "tools" }, said(toolCall("p5"))], // not drawn: joins p4
+    [said(toolCall("p6", "ask_user"))],
+    [said(toolCall("p7"))],
+    [said(toolCall("p8")), "end", said(toolCall("p9"))],
+  ];
+  for (const step of steps) for (const m of step) m === "end" ? g.endRun() : g.track(m);
+  const grouped = ["p1", "p2", "p3", "p4", "p5", "p7", "p8", "p9"];
+  for (const id of grouped) g.settle(id, false, { content: [] });
+  draw(grouped); // p6 is drawn by its own tool
+  const shown = grouped.map((id) => draw([id]).join());
+  assert.deepEqual(shown, [" ⏺ Read 1 file", " ⏺ Read 1 file", " ⏺ Read 1 file", " ⏺ Read 2 files", "", " ⏺ Read 2 files", "", " ⏺ Read 1 file"]);
+});
+
+test("groups: a message that gains text after joining a run leaves it", (t) => {
+  const g = new td.ToolGroups();
+  t.after(() => g.reset());
+  g.track(said(toolCall("j1")));
+  g.track(said(toolCall("j2")));
+  assert.deepEqual(draw(["j1", "j2"]), [" ⠋ Read 2 files"]);
+  g.track(said(toolCall("j2"), { type: "text", text: "Done." }));
+  assert.deepEqual(draw(["j1"]), [" ⠋ Read 1 file"]);
+  assert.deepEqual(draw(["j2"]), [" ⠋ Read 1 file"]);
+});

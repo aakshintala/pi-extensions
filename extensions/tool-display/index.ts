@@ -5,6 +5,7 @@ import {
   createReadToolDefinition,
   createWriteToolDefinition,
   type ExtensionAPI,
+  sessionEntryToContextMessages,
   VERSION,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -79,9 +80,9 @@ export default function (pi: ExtensionAPI, piVersion: string = VERSION) {
     pi.registerTool({ ...def, ...RENDERERS[def.name] } as any);
   }
 
-  // Groups (#56) come from assistant messages: live from message events, and from the
-  // saved branch at session start and after /tree, so a resumed transcript groups the
-  // same way. Each session (each instance of this extension) has its own groups.
+  // Groups (#56, #133) come from the messages in order: live from message events, and
+  // from the saved branch at session start and after /tree, so a resumed transcript
+  // groups the same way. Each session (each instance of this extension) has its own groups.
   const groups = new ToolGroups();
   let timer: ReturnType<typeof setInterval> | undefined;
   const stopSpinner = () => {
@@ -90,8 +91,7 @@ export default function (pi: ExtensionAPI, piVersion: string = VERSION) {
   };
   const load = (branch: any[]) => {
     groups.reset();
-    for (const entry of branch) {
-      const m = entry?.type === "message" ? entry.message : undefined;
+    for (const m of branch.flatMap((e) => sessionEntryToContextMessages(e))) {
       if (m?.role === "toolResult") groups.settle(m.toolCallId, m.isError, m);
       else groups.track(m);
     }

@@ -100,3 +100,12 @@ test("a closed transcript leaves no calls behind to group another session's call
   const context = { toolCallId: "k1", args, cwd: "/w", expanded: false, isPartial: false, isError: false, invalidate() {} };
   assert.deepEqual(plain(RENDERERS.read.renderCall(args, theme, context).render(60)), [" ⏺ Read(mine.md)"]);
 });
+
+test("a saved run of tool-only responses is one group until the next prompt, as in the main chat (#133)", () => {
+  const a = agent();
+  const steps = [said([read("s1", "a.md")]), result("s1", "one"), said([read("s2", "b.md")]), result("s2", "two"), user("next"), said([read("s3", "c.md")]), result("s3", "three")];
+  for (const m of steps) a.manager.appendMessage(m);
+  const view = transcript(a, tui, ui);
+  assert.deepEqual(plain(view.render(60)), [" ⏺ Read 2 files", " next", " ⏺ Read 1 file"]);
+  view.dispose();
+});
