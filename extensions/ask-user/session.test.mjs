@@ -13,24 +13,31 @@ const call = (questions) => [
   fauxAssistantMessage(fauxText("ok")),
 ];
 
-// A UI whose custom() runs each panel on the next key script.
-function fakeUi(scripts) {
+// A UI whose custom() runs each panel on the next key script; `frames` holds each
+// panel's renders at WIDTH, before and after each key. `onOpen` runs once the panel is up.
+const WIDTH = 40;
+function fakeUi(scripts, frames, onOpen) {
   const theme = { fg: (_c, s) => s, bg: (_c, s) => s, bold: (s) => s };
   const custom = (factory) =>
     new Promise((resolve) => {
       const component = factory({ requestRender() {} }, theme, undefined, resolve);
-      for (const key of scripts.shift()) component.handleInput(key);
+      const renders = [component.render(WIDTH)];
+      for (const key of scripts.shift()) component.handleInput(key), renders.push(component.render(WIDTH));
+      frames.push(renders.flat());
+      onOpen?.();
     });
   return new Proxy({ custom }, { get: (t, k) => t[k] ?? (() => {}) });
 }
 
-async function ask(t, questionSets, scripts, { ui = true, entries = [] } = {}) {
+async function ask(t, questionSets, scripts, { ui = true, entries = [], frames = [], onOpen } = {}) {
   const { session } = await scriptedSession(t, { replies: questionSets.flatMap(call), extensions: [EXTENSION], tools: ["ask_user"] });
   for (const [type, data] of entries) session.sessionManager.appendCustomEntry(type, data);
-  if (ui) await session.bindExtensions({ uiContext: fakeUi(scripts), mode: "tui" });
+  if (ui) await session.bindExtensions({ uiContext: fakeUi(scripts, frames, onOpen && (() => onOpen(session))), mode: "tui" });
   for (const _ of questionSets) await session.prompt("ask");
   return session;
 }
+// Visible text of a rendered line: escape sequences (cursor marker, inverse video) removed.
+const plain = (line) => line.replace(/\x1b_[^\x07]*\x07|\x1b\[[0-9;]*m/g, "");
 const results = (session) => session.messages.filter((m) => m.role === "toolResult").map((m) => [m.isError, m.content[0].text]);
 
 const Q = (header, extra = {}) => ({
@@ -100,4 +107,58 @@ test("a session holding rig.subagent has no ask_user", async (t) => {
 test("a normal session has ask_user", async (t) => {
   const session = await ask(t, [], []);
   assert.equal(session.getActiveToolNames().includes("ask_user"), true);
+});
+
+test("model text is shown and returned as one plain line", async (t) => {
+  const frames = [];
+  const q = { question: "Pick\none\x1b[2J", header: "h\x1b[31m\ni", options: [{ label: "A\x1b[2J\nB", description: "d\ne" }, { label: "C" }] };
+  await ask(t, [[q, q]], [[K.enter, K.tab, K.esc]], { frames }); // answer, review, close
+  for (const line of frames[0]) assert.doesNotMatch(line, /\x1b\[2J|\x1b\[31m|\n/);
+  assert.ok(frames[0].some((l) => plain(l).includes("h i: A B")));
+});
+
+test("result lines hold model text on one line", async (t) => {
+  const q = { question: "Pick\none", header: "h\ni", options: [{ label: "A\x1b[2J\nB" }, { label: "C" }] };
+  const session = await ask(t, [[q]], [[K.enter]]);
+  assert.deepEqual(results(session), [[false, "h i: A B"]]);
+});
+
+test("aborting the turn closes the open panel as cancelled", async (t) => {
+  const session = await ask(t, [[Q("one")]], [[]], { onOpen: (s) => s.abort() });
+  assert.deepEqual(results(session).map(([, text]) => text), ["cancelled"]);
+});
+
+test("a single question is skipped with Enter on the empty text row", async (t) => {
+  const session = await ask(t, [[Q("solo")], [{ question: "Why?", header: "why" }]], [[K.up, K.enter, K.esc], [K.enter, K.esc]]); // Esc: a regression reads cancelled
+  assert.deepEqual(results(session), [[false, "solo: skipped"], [false, "why: skipped"]]);
+});
+
+test("the focused text row fits the panel width", async (t) => {
+  const frames = [];
+  await ask(t, [[Q("m", { multiSelect: true })], [Q("s")]], [[K.up, ..."hi", K.esc], [K.up, ..."hi", K.esc]], { frames });
+  for (const frame of frames) {
+    const row = frame.map(plain).find((l) => l.includes("hi"));
+    assert.equal(row.endsWith("..."), false, row);
+    assert.ok(row.length <= WIDTH, row);
+  }
+});
+
+test("a header wider than 12 columns is rejected", async (t) => {
+  const session = await ask(t, [[Q("日本語日本語日本")]], [[K.esc]]); // Esc: a regression fails, not hangs
+  const [[isError, text]] = results(session);
+  assert.equal(isError, true);
+  assert.match(text, /header .* wider than 12 columns/);
+});
+
+test("removed fields such as allowSkip or preview are rejected", async (t) => {
+  const session = await ask(t, [[Q("a", { allowSkip: true })], [Q("b", { options: [{ label: "x", preview: "p" }, { label: "y" }] })]], []);
+  for (const [isError, text] of results(session)) {
+    assert.equal(isError, true);
+    assert.match(text, /Validation failed for tool "ask_user"/);
+  }
+});
+
+test("Tab does nothing when there is one question", async (t) => {
+  const session = await ask(t, [[Q("solo")]], [[K.up, "a", K.tab, "\x1b[9u", "b", K.enter]]);
+  assert.deepEqual(results(session), [[false, 'solo: "ab"']]);
 });

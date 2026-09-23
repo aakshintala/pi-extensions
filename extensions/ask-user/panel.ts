@@ -1,7 +1,7 @@
 // The ask_user bottom panel: one option list per question, the last row an
 // inline free-text field; a review tab (answers + note) when there are 2+ questions.
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, Input, matchesKey, truncateToWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
+import { getKeybindings, Input, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 
 export type Question = { question: string; header: string; options?: { label: string; description?: string }[]; multiSelect?: boolean };
 export type Answer = { labels: string[]; text?: string };
@@ -47,7 +47,7 @@ export function panel(questions: Question[], theme: Theme, render: () => void, d
       if (questions[tab].multiSelect) return advance();
       if (!onText) s.chosen = { labels: [opts(tab)[s.cursor].label] };
       else if (text(tab)) s.chosen = { labels: [], text: text(tab) };
-      else return;
+      else if (n > 1) return; // with one question, Enter on the empty row skips it
       advance();
     } else if (onText) s.input.handleInput(data);
     else if (questions[tab].multiSelect && matchesKey(data, "space")) {
@@ -88,7 +88,7 @@ export function panel(questions: Question[], theme: Theme, render: () => void, d
     const k = opts(tab).length;
     const lead = pointer(s.cursor === k) + (q.multiSelect ? "    " : `${k + 1}. `);
     const tick = !q.multiSelect && s.chosen?.text ? theme.fg("success", " ✓") : "";
-    lines.push(lead + field(s.input, s.cursor === k, width - 5, TEXT_ROW) + tick);
+    lines.push(lead + field(s.input, s.cursor === k, width - visibleWidth(lead), TEXT_ROW) + tick);
     const choose = q.multiSelect ? "Space toggle · Enter confirm" : "Enter choose";
     lines.push("", theme.fg("dim", `  ↑↓ move · ${choose}${n > 1 ? " · Tab/←→ switch" : ""} · Esc cancel`));
     return lines;
@@ -114,6 +114,8 @@ export function panel(questions: Question[], theme: Theme, render: () => void, d
     invalidate() {},
     handleInput(data) {
       if (getKeybindings().matches(data, "tui.select.cancel")) return done({ cancelled: true });
+      const tabKey = matchesKey(data, "tab") || matchesKey(data, "shift+tab");
+      if (n === 1 && tabKey) return; // no other tab, and never a literal tab in the text row
       if (n > 1 && (matchesKey(data, "tab") || (matchesKey(data, "right") && !editing()))) go(tab + 1);
       else if (n > 1 && (matchesKey(data, "shift+tab") || (matchesKey(data, "left") && !editing()))) go(tab - 1);
       else if (tab === n) reviewKey(data);
