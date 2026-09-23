@@ -202,7 +202,8 @@ the main chat:
 - A finished agent opens from its saved session. If its parent resumes it
   while the viewer is open, the viewer follows the new run.
 - Typing steers the agent. The steer shows as `Steering: …` until the agent
-  reads it, then as a user message. Ctrl+Q, then y, stops it.
+  reads it, then as a user message. x on its FleetView row stops it, and
+  Ctrl+X, then Ctrl+K, in FleetView stops every agent the session started.
 - A compaction keeps the messages already drawn, as the main chat keeps its
   scrollback. The compaction summary is not drawn.
 

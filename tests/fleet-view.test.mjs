@@ -14,6 +14,7 @@ const EXTENSIONS = [
 ];
 const ROWS = 24;
 const BORDER = "─".repeat(80);
+const KEYS = " Enter to view · x to stop · ctrl+x ctrl+k to stop all agents"; // under the rows while FleetView has focus (#141)
 const FOOTER = ["~/cwd", "0.0%/128k (auto)                                                       harness-1"];
 
 // Regular mode before any prompt: blank header row, editor, FleetView, footer.
@@ -142,7 +143,7 @@ test("a selected finished row stays until the selection leaves it, then 30 s mor
   tui.keys("Down", "Down", "Down"); // lint is selected; build, above it, is not
   writeFileSync(later, "");
   await tui.waitForEvent("clock");
-  const selected = idle([" ● main", "›  shell lint · done 0s · ok"]);
+  const selected = idle([" ● main", "›  shell lint · done 0s · ok", KEYS]);
   await tui.waitForScreen(selected); // build left; the selection stays on lint
   tui.keys("Escape"); // leaves it at 100 s
   const left = idle([" ● main", "   shell lint · done 0s · ok"]);
@@ -210,7 +211,7 @@ test("arrow keys at an empty prompt move through FleetView; Esc returns", async 
   const tui = await start(t);
   await tui.fx({ add: "a", kind: "agent", label: "one" }, { add: "b", kind: "shell", label: "two" });
   const screen = (marks, editor = "") =>
-    idle([`${marks[0]}● main`, `${marks[1]}  agent one · 0s`, `${marks[2]}  shell two · 0s`], editor);
+    idle([`${marks[0]}● main`, `${marks[1]}  agent one · 0s`, `${marks[2]}  shell two · 0s`, ...(marks.trim() ? [KEYS] : [])], editor);
   await tui.waitForScreen(screen("   "));
 
   tui.keys("Down");
@@ -241,17 +242,19 @@ test("rows stay within the line budget and scroll to the selection", async (t) =
   const labels = ["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8"];
   await tui.fx(...labels.map((l) => ({ add: l, kind: "shell", label: l })));
   const row = (label, sel) => `${sel ? "›" : " "}  shell ${label} · 0s`;
+  // Focused, the keys line takes one of the 6 lines.
   const view = (first, sel) => {
     const all = [`${sel === 0 ? "›" : " "}● main`, ...labels.map((l, i) => row(l, sel === i + 1))];
-    return idle([...all.slice(first, first + 5), "   … 4 more"]);
+    const size = sel === undefined ? 5 : 4;
+    return idle([...all.slice(first, first + size), `   … ${9 - size} more`, ...(sel === undefined ? [] : [KEYS])]);
   };
   await tui.waitForScreen(view(0));
 
   tui.keys("Down"); // focus main
   tui.keys("Down", "Down", "Down", "Down", "Down", "Down");
-  await tui.waitForScreen(view(2, 6));
+  await tui.waitForScreen(view(3, 6));
   tui.keys("Down", "Down");
-  await tui.waitForScreen(view(4, 8));
+  await tui.waitForScreen(view(5, 8));
   tui.keys(...Array(8).fill("Up"));
   await tui.waitForScreen(view(0, 0));
 });
@@ -294,4 +297,50 @@ test("notices are one compact themed line; a failure shows its error", async (t)
     "~/cwd",
     "↑26 ↓5 R16 W26 CH44.4% 0.0%/128k (auto)                                harness-1",
   ]));
+});
+
+test("x stops the selected running or queued row at once; on a finished row or main it does nothing", async (t) => {
+  const tui = await start(t);
+  await tui.fx(
+    { add: "a", kind: "shell", label: "build" },
+    { add: "b", kind: "monitor", label: "ci", status: "queued" },
+    { add: "c", kind: "agent", label: "scout" },
+    { finish: "c", status: "completed", result: "found 3 files" },
+  );
+  const rows = (marks, a = "0s", b = "queued") =>
+    idle([`${marks[0]}● main`, `${marks[1]}  shell build · ${a}`, `${marks[2]}  monitor ci · ${b}`, `${marks[3]}  agent scout · done 0s · found 3 files`, KEYS]);
+  tui.keys("Down", "x"); // main: nothing to stop, and x is not typed into the editor
+  await tui.waitForScreen(rows("›   "));
+  tui.keys("Down", "x");
+  await tui.waitForScreen(rows(" ›  ", "stopped 0s · stopped by user"));
+  tui.keys("Down", "x");
+  await tui.waitForScreen(rows("  › ", "stopped 0s · stopped by user", "stopped 0s · stopped by user"));
+  tui.keys("Down", "x", "Up"); // finished: x leaves its result alone
+  await tui.waitForScreen(rows("  › ", "stopped 0s · stopped by user", "stopped 0s · stopped by user"));
+  tui.keys("Down");
+  await tui.waitForScreen(rows("   ›", "stopped 0s · stopped by user", "stopped 0s · stopped by user"));
+});
+
+test("Ctrl+X Ctrl+K in FleetView stops every running or queued agent and leaves jobs alone", async (t) => {
+  const tui = await start(t);
+  await tui.fx(
+    { add: "a", kind: "agent", label: "scout" },
+    { add: "b", kind: "agent", label: "helper", status: "queued" },
+    { add: "c", kind: "shell", label: "build" },
+  );
+  tui.keys("Down", "C-x", "C-k");
+  await tui.waitForScreen(idle([
+    "›● main",
+    "   agent scout · stopped 0s · stopped by user",
+    "   agent helper · stopped 0s · stopped by user",
+    "   shell build · 0s",
+    KEYS,
+  ]));
+});
+
+test("Ctrl+K without Ctrl+X stops nothing", async (t) => {
+  const tui = await start(t);
+  await tui.fx({ add: "a", kind: "agent", label: "scout" });
+  tui.keys("Down", "C-k", "Down"); // in FleetView, Ctrl+K alone is not the chord: it returns to the editor
+  await tui.waitForScreen(idle(["›● main", "   agent scout · 0s", KEYS]));
 });

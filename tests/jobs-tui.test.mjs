@@ -1,5 +1,5 @@
 // A background job in a real pi (#48): its FleetView row, the live log viewer and
-// stop from the viewer. tests/fixtures/jobs/clock.ts holds running times at 0s.
+// stop with x from FleetView (#141). tests/fixtures/jobs/clock.ts holds running times at 0s.
 import { test } from "node:test";
 import assert from "node:assert";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -19,9 +19,10 @@ const screen = (chat, fleet) => {
   const dock = [BORDER, "", BORDER, ...fleet, ...FOOTER];
   return "\n" + [...chat, ...Array(ROWS - dock.length - chat.length).fill(""), ...dock].join("\n");
 };
-const view = (state, lines) => [` shell sh job.sh · ${state} · esc back · ctrl+q stop`, ...lines.map((l) => ` ${l}`)];
+const KEYS = " Enter to view · x to stop · ctrl+x ctrl+k to stop all agents";
+const view = (state, lines) => [` shell sh job.sh · ${state} · esc back`, ...lines.map((l) => ` ${l}`)];
 
-test("a job is a FleetView row; its viewer follows the log and stops it", async (t) => {
+test("a job is a FleetView row; its viewer follows the log, and x in FleetView stops it", async (t) => {
   const tui = await startTui(t, {
     extensions: EXTENSIONS,
     args: ["--tui-mode", "fullscreen"],
@@ -45,19 +46,20 @@ test("a job is a FleetView row; its viewer follows the log and stops it", async 
   const chat = ["", " go", "", "", " ⏺ Bash(sh job.sh)", `   ⎿  Started job ${id}. Log: ${log}`, "      A notice arrives when it ends.", "", " started"];
   await tui.waitForScreen(screen(chat, [" ● main", "   shell sh job.sh · 0s · first"]));
 
-  tui.keys("Down", "Down", "Enter");
-  await tui.waitForScreen(screen(view("0s", ["first"]), ["   main", "›● shell sh job.sh · 0s · first"]));
+  tui.keys("Down"); // into FleetView: the keys line shows
+  await tui.waitForScreen(screen(chat, ["›● main", "   shell sh job.sh · 0s · first", KEYS]));
+  tui.keys("Down", "Enter");
+  await tui.waitForScreen(screen(view("0s", ["first"]), ["   main", "›● shell sh job.sh · 0s · first", KEYS]));
   writeFileSync(join(tui.cwd, "go"), ""); // the viewer follows the new line
-  await tui.waitForScreen(screen(view("0s", ["first", "second"]), ["   main", "›● shell sh job.sh · 0s · second"]));
+  await tui.waitForScreen(screen(view("0s", ["first", "second"]), ["   main", "›● shell sh job.sh · 0s · second", KEYS]));
 
   const pgid = Number(readFileSync(join(tui.cwd, "pgid"), "utf8"));
   t.after(() => assert.deepEqual(liveGroup(pgid), [], "the job's own group is gone"));
   assert.notDeepEqual(liveGroup(pgid), []);
-  tui.keys("C-q");
-  tui.type("y");
+  tui.type("x"); // at once, with no confirmation
   await tui.waitForEvent("agent_end", 2); // the stop's notice starts a turn
   await tui.waitForScreen(
-    screen(view("stopped 0s", ["first", "second"]), ["   main", "›● shell sh job.sh · stopped 0s · stopped"]).replace(FOOTER[1], "↑72 ↓18 R47 W73 CH45.5% 0.1%/128k (auto)                               harness-1"),
+    screen(view("stopped 0s", ["first", "second"]), ["   main", "›● shell sh job.sh · stopped 0s · stopped", KEYS]).replace(FOOTER[1], "↑72 ↓18 R47 W73 CH45.5% 0.1%/128k (auto)                               harness-1"),
   );
   assert.deepEqual(liveGroup(pgid), []);
 });

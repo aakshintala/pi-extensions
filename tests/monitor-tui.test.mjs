@@ -1,5 +1,5 @@
-// A monitor in a real pi (#50): its FleetView row, the live log viewer and stop from
-// the viewer. tests/fixtures/jobs/clock.ts holds running times at 0s.
+// A monitor in a real pi (#50): its FleetView row, the live log viewer and stop with
+// x from FleetView (#141). tests/fixtures/jobs/clock.ts holds running times at 0s.
 import { test } from "node:test";
 import assert from "node:assert";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -12,17 +12,18 @@ const EXTENSIONS = [path("../extensions/fleet/index.ts"), path("../extensions/mo
 const ROWS = 24;
 // Token counts in the footer after each turn.
 const USAGE = ["↑83 ↓18 R71 W84 CH70.4% 0.1%/128k (auto)", "↑97 ↓20 R154 W98 CH74.8% 0.1%/128k (auto)", "↑134 ↓20 R251 W136 CH56.4% 0.1%/128k (auto)"];
+const KEYS = " Enter to view · x to stop · ctrl+x ctrl+k to stop all agents";
 const BORDER = "─".repeat(80);
 const FOOTER = (usage) => ["~/cwd", usage.padEnd(80 - "harness-1".length) + "harness-1"];
 
 // Fullscreen mode: the viewer on top; editor, FleetView and footer pinned to the bottom.
 const screen = (lines, fleet, usage) => {
-  const view = [" monitor watch · " + lines.state + " · esc back · ctrl+q stop", ...lines.log.map((l) => ` ${l}`)];
+  const view = [" monitor watch · " + lines.state + " · esc back", ...lines.log.map((l) => ` ${l}`)];
   const dock = [BORDER, "", BORDER, ...fleet, ...FOOTER(usage)];
   return "\n" + [...view, ...Array(ROWS - dock.length - view.length).fill(""), ...dock].join("\n");
 };
 
-test("a monitor is a FleetView row; its viewer follows the log and stops it", async (t) => {
+test("a monitor is a FleetView row; its viewer follows the log, and x in FleetView stops it", async (t) => {
   const tui = await startTui(t, {
     extensions: EXTENSIONS,
     args: ["--tui-mode", "fullscreen"],
@@ -35,17 +36,16 @@ test("a monitor is a FleetView row; its viewer follows the log and stops it", as
   await tui.waitForEvent("agent_end", 2); // the call's turn, then the notice for "first"
 
   tui.keys("Down", "Down", "Enter");
-  await tui.waitForScreen(screen({ state: "0s", log: ["first"] }, ["   main", "›● monitor watch · 0s · first"], USAGE[0]));
+  await tui.waitForScreen(screen({ state: "0s", log: ["first"] }, ["   main", "›● monitor watch · 0s · first", KEYS], USAGE[0]));
   writeFileSync(join(tui.cwd, "go"), ""); // the viewer follows the new line
   await tui.waitForEvent("agent_end", 3); // its notice
-  await tui.waitForScreen(screen({ state: "0s", log: ["first", "second"] }, ["   main", "›● monitor watch · 0s · second"], USAGE[1]));
+  await tui.waitForScreen(screen({ state: "0s", log: ["first", "second"] }, ["   main", "›● monitor watch · 0s · second", KEYS], USAGE[1]));
 
   const pgid = Number(readFileSync(join(tui.cwd, "pgid"), "utf8"));
   t.after(() => assert.deepEqual(liveGroup(pgid), [], "the monitor's group is gone"));
   assert.notDeepEqual(liveGroup(pgid), []);
-  tui.keys("C-q");
-  tui.type("y");
+  tui.type("x");
   await tui.waitForEvent("agent_end", 4); // the stop's notice starts a turn
-  await tui.waitForScreen(screen({ state: "stopped 0s", log: ["first", "second"] }, ["   main", "›● monitor watch · stopped 0s · stopped"], USAGE[2]));
+  await tui.waitForScreen(screen({ state: "stopped 0s", log: ["first", "second"] }, ["   main", "›● monitor watch · stopped 0s · stopped", KEYS], USAGE[2]));
   assert.deepEqual(liveGroup(pgid), []);
 });

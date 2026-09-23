@@ -14,6 +14,8 @@ import { createViewer, type Viewer } from "./viewer.ts";
 /** Most lines FleetView takes, including the "… N more" line. */
 const MAX_LINES = 6;
 const MAIN = "main";
+/** Shown under the rows while FleetView has focus (#141). */
+const KEYS = " Enter to view · x to stop · ctrl+x ctrl+k to stop all agents";
 const NOTICE = "rig.notice";
 const BLOCKED = Symbol.for("pi-rig.fleet.ctrlBBlocked");
 
@@ -194,6 +196,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   const registry = fleet();
   let tui: TUI | undefined;
   let focused = false;
+  let chord = false; // Ctrl+X was pressed in FleetView: Ctrl+K next stops every agent
   let selected = 0;
   let top = 0; // first row shown
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -204,10 +207,10 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
 
   const hint = () => registry.foregrounds() > 0 && ctrlBFree();
 
-  // Rows shown, as indices into current(), plus the hidden count. A stop confirmation and the Ctrl+B hint each take one line of the budget.
+  // Rows shown, as indices into current(), plus the hidden count. The keys line and the Ctrl+B hint each take one line of the budget.
   function window(all: Row[]) {
     selected = Math.min(selected, all.length - 1);
-    const budget = MAX_LINES - (viewer.confirmation() ? 1 : 0) - (hint() ? 1 : 0);
+    const budget = MAX_LINES - (focused ? 1 : 0) - (hint() ? 1 : 0);
     if (all.length <= budget) return { start: 0, end: all.length, hidden: 0 };
     const size = budget - 1;
     top = Math.max(0, Math.min(Math.max(top, selected - size + 1), selected, all.length - size));
@@ -248,8 +251,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
         const { start, end, hidden } = window(all);
         out.push(...all.slice(start, end).map((row, i) => line(row, start + i, theme, width)));
         if (hidden) out.push(theme.fg("dim", `   … ${hidden} more`));
-        const confirm = viewer.confirmation();
-        if (confirm) out.push(theme.fg("warning", ` ${confirm}`));
+        if (focused) out.push(theme.fg("dim", KEYS));
       }
       // Last, so a click's row index still counts from the first row.
       if (hint()) out.push(theme.fg("dim", " ctrl+b to run in background"));
@@ -275,6 +277,22 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     focused = true;
     if (row.item) viewer.open(row.item);
     else viewer.close();
+  };
+
+  // x (#141): stops a running or queued item at once, through its own stop(); a failure is shown.
+  const stop = (item: Item | undefined) => {
+    if (!item || isFinished(item.status)) return;
+    const failed = (e: unknown) => ctx.ui.notify(`Stopping ${oneLine(item.kind)} ${oneLine(item.label)} failed: ${oneLine((e as Error)?.message ?? e)}`, "error");
+    try {
+      void Promise.resolve(item.stop()).catch(failed);
+    } catch (e) {
+      failed(e);
+    }
+  };
+  // Ctrl+X Ctrl+K: every agent this session started; each one's stop takes its subtree with it.
+  const stopAll = () => {
+    const owner = ctx.sessionManager.getSessionId();
+    for (const item of registry.items()) if (item.kind === "agent" && item.owner === owner) stop(item);
   };
 
   // The selected item does not decay (#137): tell the registry, and follow it when rows above it leave.
@@ -307,12 +325,12 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   });
   function key(data: string) {
     if (data.startsWith("\x1b[<") || isKeyRelease(data)) return undefined;
+    const wasChord = chord;
+    chord = false;
     checkCtrlB(ctx);
     if (viewer.overlay()) focused = false; // the overlay covers FleetView and takes the keys
-    // First, so at a stop confirmation Ctrl+B is "any other key" and cancels. Esc in FleetView
-    // only returns to the editor, with the viewer still open; a second Esc there closes it.
-    const leave = focused && matchesKey(data, "escape") && !viewer.confirmation();
-    if (!leave && viewer.handleKey(data)) return { consume: true };
+    // Esc in FleetView only returns to the editor, with the viewer still open; a second Esc there closes it.
+    if (!focused && viewer.handleKey(data)) return { consume: true };
     if (matchesKey(data, "ctrl+b") && hint() && editorFocused(tui)) {
       registry.backgroundAll();
       return { consume: true };
@@ -323,7 +341,12 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
       if (!(matchesKey(data, "down") || matchesKey(data, "left")) || ctx.ui.getEditorText() !== "") return undefined;
       focused = true;
       selected = 0;
-    } else if (matchesKey(data, "up")) selected = Math.max(0, selected - 1);
+    } else if (wasChord && matchesKey(data, "ctrl+k")) stopAll();
+    else if (matchesKey(data, "ctrl+x")) {
+      chord = true;
+      return { consume: true };
+    } else if (matchesKey(data, "x")) stop(current()[selected]?.item);
+    else if (matchesKey(data, "up")) selected = Math.max(0, selected - 1);
     else if (matchesKey(data, "down")) selected = Math.min(current().length - 1, selected + 1);
     else if (matchesKey(data, "escape")) focused = false;
     else if (matchesKey(data, "enter")) choose(current()[selected]);
