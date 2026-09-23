@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { readFileSync, watch, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { liveGroup, startTui } from "./helpers/tui.mjs";
 
@@ -22,28 +22,44 @@ const picker = (name, cursor) =>
   screen(name, `${cursor === "dark" ? "→" : " "} dark        (current)\n${cursor === "light" ? "→" : " "} light`);
 
 // Pi saves settings on its write queue, after the redraw, so wait for the file itself.
-function saved(path, key, want) {
+function waitForSetting(path, key, want) {
   const read = () => {
     try {
       return JSON.parse(readFileSync(path, "utf8"))[key];
     } catch {
-      return undefined; // caught mid-write
+      return undefined; // missing or caught mid-write
     }
   };
   return new Promise((resolve, reject) => {
-    const check = () => {
-      if (read() !== want) return;
-      watcher.close();
+    let watcher;
+    const finish = (err) => {
+      watcher?.close();
       clearTimeout(timer);
-      resolve();
+      if (err) reject(err);
+      else resolve();
     };
-    const watcher = watch(path, check); // before the first read, so no write slips between
-    const timer = setTimeout(() => {
-      watcher.close();
-      reject(new Error(`settings.json ${key} never became ${want}: ${readFileSync(path, "utf8")}`));
-    }, 20_000);
-    check();
+    const check = () => read() === want && finish();
+    const timer = setTimeout(
+      () => finish(new Error(`settings.json ${key} is ${JSON.stringify(read())}, never ${JSON.stringify(want)}`)),
+      20_000,
+    );
+    try {
+      // The directory, not the file: a file watcher goes silent after a tmp + rename write.
+      watcher = watch(dirname(path), (_event, name) => (!name || name === basename(path)) && check());
+      watcher.on("error", finish);
+    } catch (err) {
+      return finish(err);
+    }
+    check(); // after the watcher starts, so no write slips between
   });
+}
+
+// /reload awaits Pi's settings write queue before it starts the session again, so once
+// session_start number `starts` arrives, any save the steps before it queued is on disk.
+async function drainSettings(tui, starts) {
+  tui.type("/reload");
+  tui.keys("Enter");
+  await tui.waitForEvent("session_start", starts);
 }
 
 async function open(t) {
@@ -64,6 +80,7 @@ test("/theme previews on move and Esc restores the old theme without saving", as
   const { tui, settings } = await open(t);
   tui.keys("Escape");
   await tui.waitForScreen(screen("dark"));
+  await drainSettings(tui, 2);
   assert.equal(settings().theme, undefined);
 });
 
@@ -71,7 +88,7 @@ test("/theme Enter applies the theme and Pi saves it", async (t) => {
   const { tui, path } = await open(t);
   tui.keys("Enter");
   await tui.waitForScreen(screen("light"));
-  await saved(path, "theme", "light");
+  await waitForSetting(path, "theme", "light");
 });
 
 // After /reload with an automatic light/dark setting: the reload notice sits above.
@@ -100,5 +117,6 @@ test("/theme cancel keeps Pi following the terminal's light/dark scheme", async 
 
   tui.type("\x1b[?997;2n"); // the terminal reports that it switched to light
   await tui.waitForScreen(autoScreen("light"));
+  await drainSettings(tui, 3);
   assert.equal(readFileSync(path, "utf8"), auto);
 });
