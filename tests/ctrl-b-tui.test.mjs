@@ -26,10 +26,11 @@ const screen = (chat, editor = "", below = []) => {
   return "\n" + [...lines, ...Array(ROWS - lines.length).fill("")].join("\n");
 };
 
-async function start(t) {
-  const tui = await startTui(t, { extensions: EXTENSIONS, cols: COLS, rows: ROWS });
+// `keybindings: null` starts pi with its default keybindings, which bind Ctrl+B to cursor left.
+async function start(t, keybindings) {
+  const tui = await startTui(t, { extensions: EXTENSIONS, cols: COLS, rows: ROWS, keybindings });
   t.after(() => assert.deepEqual(liveGroup(tui.pid), []));
-  const keybindings = join(dirname(tui.home), "agent", "keybindings.json");
+  const file = join(dirname(tui.home), "agent", "keybindings.json");
   let n = 0;
   // Runs producer ops (tests/fixtures/fleet/producer.ts) and waits until they are applied.
   tui.fx = async (...ops) => {
@@ -37,10 +38,10 @@ async function start(t) {
     tui.keys("Enter");
     await tui.waitForEvent("fx", ++n);
   };
-  tui.warning = ["", ` Warning: Ctrl+B moves the cursor left, so it cannot background commands. Add "tui.editor.cursorLeft": ["left"] to ${keybindings}`, ""];
+  tui.warning = ["", ` Warning: Ctrl+B moves the cursor left, so it cannot background commands. Add "tui.editor.cursorLeft": ["left"] to ${file}`, ""];
   // Frees Ctrl+B in keybindings.json and reloads; wait for the reloaded screen before typing.
   tui.freeCtrlB = () => {
-    writeFileSync(keybindings, JSON.stringify({ "tui.editor.cursorLeft": ["left"] }));
+    writeFileSync(file, JSON.stringify({ "tui.editor.cursorLeft": ["left"] }));
     tui.type("/reload");
     tui.keys("Enter");
   };
@@ -48,7 +49,7 @@ async function start(t) {
 }
 
 test("while Ctrl+B moves the cursor left, one warning names the line to add and nothing is bound", async (t) => {
-  const tui = await start(t);
+  const tui = await start(t, null);
   await tui.fx({ fg: "a" });
   tui.type("ab");
   tui.keys("C-b");
@@ -67,19 +68,17 @@ test("while Ctrl+B moves the cursor left, one warning names the line to add and 
 
 test("Ctrl+B calls every registered handler, and the hint shows only while one is registered", async (t) => {
   const tui = await start(t);
-  tui.freeCtrlB();
-  await tui.waitForScreen(screen(["", RELOADED, ""]));
   await tui.fx({ add: "j", kind: "shell", label: "build" }, { fg: "a" }, { fg: "b" }, { fg: "c" }, { fgEnd: "c" });
-  await tui.waitForScreen(screen(["", RELOADED, ""], "", [" ● main", "   shell build · 0s", HINT]));
+  await tui.waitForScreen(screen([""], "", [" ● main", "   shell build · 0s", HINT]));
 
   tui.keys("C-b");
   await tui.waitForEvent("bg:b");
-  await tui.waitForScreen(screen(["", RELOADED, ""], "", [" ● main", "   shell build · 0s"]));
+  await tui.waitForScreen(screen([""], "", [" ● main", "   shell build · 0s"]));
   assert.deepEqual(tui.events().filter((e) => e.startsWith("bg:")), ["bg:a", "bg:b"]);
 
   // With nothing to background, Ctrl+B reaches the editor, which no longer binds it.
   tui.type("ab");
   tui.keys("C-b");
   tui.type("X");
-  await tui.waitForScreen(screen(["", RELOADED, ""], "abX", [" ● main", "   shell build · 0s"]));
+  await tui.waitForScreen(screen([""], "abX", [" ● main", "   shell build · 0s"]));
 });
