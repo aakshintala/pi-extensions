@@ -70,6 +70,12 @@ export function gate(snap, lifecycle, budgets) {
   const commands = (snap.commands ?? []).map((c) => c.name);
   if (snap.commands && !commands.includes("rig")) failures.push("/rig is not registered");
   for (const c of commands.filter((c) => /^(agents|tasks)$|^bg/.test(c))) failures.push(`/${c} is registered; settings belong in /rig`);
+  // Spec #36: the command ports are registered, and /context has no config command.
+  // (A `/context config` argument is not visible in the snapshot; the context tests cover it.)
+  if (snap.commands) {
+    for (const c of ["usage", "context", "clear", "theme"]) if (!commands.includes(c)) failures.push(`/${c} is not registered`);
+  }
+  for (const c of commands.filter((c) => /^context[-:_ ]config$/.test(c))) failures.push(`/${c} is registered; /context has no config`);
   // Every non-builtin active tool needs a per-tool ceiling in budgets.tools.
   const toolBudgets = budgets.tools ?? {};
   for (const t of report(snap).tools) {

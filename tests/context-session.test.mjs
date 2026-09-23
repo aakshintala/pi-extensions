@@ -142,3 +142,11 @@ test("a clause appended to Pi's own system message counts once, as only the clau
   // "\n- Say thanks." is 14 characters: 4 tokens, not the whole prompt again.
   assert.match(screens[0], /unattributed \.+ 4\n {2}└─ system message \.+ 4\n/);
 });
+
+test("/context config is not a command: it reports the usage line", async (t) => {
+  const { session } = await scriptedSession(t, { extensions: [CONTEXT] });
+  const notices = [];
+  session.extensionRunner.setUIContext({ notify: (text, type) => notices.push([type, text]), setWorkingVisible() {}, async custom() {} }, "tui");
+  await session.prompt("/context config");
+  assert.deepEqual(notices, [["error", "Usage: /context [usage|injections]"]]);
+});
