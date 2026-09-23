@@ -37,50 +37,76 @@ export interface ClientOptions {
 export type QuotaClient = ReturnType<typeof createQuotaClient>;
 
 export function createQuotaClient({ port, refreshMs, fetch: fetchFn = fetch, timers = globalThis, now = Date.now }: ClientOptions) {
+  type Pending = { promise: Promise<Feed | null>; controller: AbortController; timer?: ReturnType<typeof setTimeout>; deadline: number };
   let feed: Feed | null = null;
   let fetchedAt = -Infinity;
-  let inFlight: Promise<Feed | null> | null = null;
-  let abort: AbortController | null = null;
+  let inFlight: Pending | null = null;
   let poll: ReturnType<typeof setInterval> | undefined;
 
-  async function load(timeoutMs: number): Promise<Feed | null> {
-    const controller = (abort = new AbortController());
-    const timer = timers.setTimeout(() => controller.abort(), timeoutMs);
+  async function run(p: Pending): Promise<Feed | null> {
     try {
-      const res = await fetchFn(`http://127.0.0.1:${port()}/quotas`, { signal: controller.signal });
+      const res = await fetchFn(`http://127.0.0.1:${port()}/quotas`, { signal: p.controller.signal });
       const json = res.ok ? await res.json() : null;
       if (!Array.isArray(json?.providers)) throw new Error("bad feed");
       feed = json as Feed;
       fetchedAt = now();
     } catch {
-      feed = null;
+      // A failed refresh keeps the last good feed while it is still fresh.
+      if (now() - fetchedAt >= refreshMs()) feed = null;
     } finally {
-      timers.clearTimeout(timer);
-      if (abort === controller) {
-        abort = null;
-        inFlight = null;
-      }
+      timers.clearTimeout(p.timer);
+      if (inFlight === p) inFlight = null;
     }
     return feed;
   }
+
+  // Joiners extend the shared fetch's deadline to the longest caller timeout.
+  function arm(p: Pending, timeoutMs: number) {
+    const deadline = now() + timeoutMs;
+    if (deadline <= p.deadline) return;
+    p.deadline = deadline;
+    timers.clearTimeout(p.timer);
+    p.timer = timers.setTimeout(() => p.controller.abort(), timeoutMs);
+  }
+
+  const refresh = () => void client.get({ force: true, timeoutMs: FOOTER_TIMEOUT_MS });
 
   const client = {
     /** The cached feed while younger than the refresh interval, else one (shared) fetch. Null when QuotaBar is unreachable. */
     get({ force = false, timeoutMs = CALL_TIMEOUT_MS } = {}): Promise<Feed | null> {
       if (!force && feed && now() - fetchedAt < refreshMs()) return Promise.resolve(feed);
-      return (inFlight ??= load(timeoutMs));
+      let p = inFlight;
+      if (!p) {
+        p = inFlight = { controller: new AbortController(), deadline: -Infinity } as Pending;
+        arm(p, timeoutMs);
+        p.promise = run(p);
+      } else arm(p, timeoutMs);
+      return p.promise;
     },
     start() {
       if (poll) return;
-      const refresh = () => void client.get({ force: true, timeoutMs: FOOTER_TIMEOUT_MS });
       refresh();
       poll = timers.setInterval(refresh, refreshMs());
+    },
+    /** Re-reads the refresh interval; a no-op unless polling. */
+    retime() {
+      if (!poll) return;
+      timers.clearInterval(poll);
+      poll = timers.setInterval(refresh, refreshMs());
+    },
+    /** Drops the cached feed and aborts the in-flight fetch, so the next get fetches afresh. */
+    invalidate() {
+      inFlight?.controller.abort();
+      inFlight = null;
+      feed = null;
+      fetchedAt = -Infinity;
     },
     /** Idempotent: stops polling and aborts the in-flight fetch. */
     stop() {
       if (poll) timers.clearInterval(poll);
       poll = undefined;
-      abort?.abort();
+      inFlight?.controller.abort();
+      inFlight = null;
     },
   };
   return client;
@@ -90,8 +116,10 @@ export const unavailableText = (port: number) => `QuotaBar feed unavailable on p
 
 function until(iso: string | null | undefined, now: number): string | null {
   if (!iso) return null;
-  const min = Math.floor((new Date(iso).getTime() - now) / 60_000);
-  if (!(min > 0)) return "soon";
+  const at = new Date(iso).getTime();
+  if (Number.isNaN(at)) return null;
+  const min = Math.floor((at - now) / 60_000);
+  if (min <= 0) return "soon";
   const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
   return d ? `${d}d${h ? `${h}h` : ""}` : h ? `${h}h${m ? `${m}m` : ""}` : `${m}m`;
 }
@@ -104,32 +132,58 @@ const extra = (q: Bucket) => {
 
 const head = (p: Provider) => `${p.id}${p.tier ? ` (${p.tier})` : ""}`;
 
-/** One line per provider; reset times only for buckets that are not healthy. */
+// get_quotas output stays within ~100 tokens (the audit's char/4 estimate).
+export const MAX_TOOL_CHARS = 400;
+
+const clip = (s: string, max = MAX_TOOL_CHARS) => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
+
+/** Keeps whole lines while they fit in MAX_TOOL_CHARS, then says how many providers were left out. */
+function fit(lines: string[]): string {
+  if (lines.join("\n").length <= MAX_TOOL_CHARS) return lines.join("\n");
+  const more = (n: number) => `\n+${n} more; pass provider for one`;
+  const kept: string[] = [];
+  for (const line of lines) {
+    if ([...kept, line].join("\n").length + more(lines.length - kept.length - 1).length > MAX_TOOL_CHARS) break;
+    kept.push(line);
+  }
+  if (!kept.length) kept.push(clip(lines[0], MAX_TOOL_CHARS - more(lines.length - 1).length));
+  const left = lines.length - kept.length;
+  return kept.join("\n") + (left ? more(left) : "");
+}
+
+/** One line per provider, reset times only for unhealthy buckets, within MAX_TOOL_CHARS. */
 export function compact(providers: Provider[], now = Date.now()): string {
-  return providers
+  const lines = providers
     .map((p) => {
       if (p.unavailable) return `${head(p)}: unavailable, ${p.unavailable}`;
       if (!p.quotas.length) return `${head(p)}: no data`;
       const buckets = p.quotas
         .map((q) => {
-          const notes = [extra(q), q.status !== "healthy" && `${q.status}, resets ${until(q.resetsAt, now)}`].filter(Boolean);
+          const reset = until(q.resetsAt, now);
+          const notes = [extra(q), q.status !== "healthy" && (reset ? `${q.status}, resets ${reset}` : q.status)].filter(Boolean);
           return `${q.label.toLowerCase()} ${Math.round(q.percentRemaining)}%${notes.length ? ` (${notes.join("; ")})` : ""}`;
         })
         .join(" · ");
-      const throttled = p.throttledUntil ? ` [throttled ${until(p.throttledUntil, now)}, last known]` : "";
+      const t = until(p.throttledUntil, now);
+      const throttled = p.throttledUntil ? ` [throttled${t ? ` ${t}` : ""}, last known]` : "";
       return `${head(p)}: ${buckets}${throttled}`;
-    })
-    .join("\n");
+    });
+  return fit(lines);
 }
 
 /** Every provider and bucket with reset times and status, for /quota. */
 export function full(feed: Feed, now = Date.now()): string {
   const lines: string[] = [];
   for (const p of feed.providers) {
-    lines.push(`${p.name ?? p.id}${p.tier ? ` (${p.tier})` : ""}: ${p.unavailable ? `unavailable, ${p.unavailable}` : (p.status ?? "")}`);
-    if (p.throttledUntil) lines.push(`  throttled for ${until(p.throttledUntil, now)}, showing last-known data`);
+    const state = p.unavailable ? `unavailable, ${p.unavailable}` : p.status;
+    lines.push(`${p.name ?? p.id}${p.tier ? ` (${p.tier})` : ""}${state ? `: ${state}` : ""}`);
+    const t = until(p.throttledUntil, now);
+    if (p.throttledUntil) lines.push(`  throttled${t ? ` for ${t}` : ""}, showing last-known data`);
     for (const q of p.quotas) {
-      const parts = [`${Math.round(q.percentRemaining)}% left`, extra(q), q.resetsAt && `resets in ${until(q.resetsAt, now)}`, q.status !== "healthy" && q.status];
+      const text = q.resetText?.trim();
+      const at = until(q.resetsAt, now);
+      const reset = text && /^resets?\b/i.test(text) ? text : at && `resets in ${at}`;
+      const parts = [`${Math.round(q.percentRemaining)}% left`, extra(q), reset, q.status];
       lines.push(`  ${q.label}: ${parts.filter(Boolean).join(", ")}`);
     }
   }
@@ -137,7 +191,7 @@ export function full(feed: Feed, now = Date.now()): string {
   return lines.join("\n");
 }
 
-type Settings = { get(key: string): unknown };
+type Settings = { get(key: string): unknown; onChange?(listener: (key: string) => void): unknown };
 
 /** Registers get_quotas and /quota on one client and ties polling to the session. Returns the client for the footer. */
 export function registerQuota(pi: ExtensionAPI, settings: Settings, deps: Partial<ClientOptions> = {}): QuotaClient {
@@ -147,13 +201,18 @@ export function registerQuota(pi: ExtensionAPI, settings: Settings, deps: Partia
   pi.on("session_start", (_event, ctx) => {
     if (ctx.mode === "tui") client.start();
   });
+  settings.onChange?.((key) => {
+    if (key === "quotaRefreshSeconds") client.retime();
+    if (key === "quotaPort") client.invalidate();
+  });
   // Also fires on session switch (reason new/resume/fork) and /reload.
   pi.on("session_shutdown", () => client.stop());
 
   pi.registerTool({
     name: "get_quotas",
     label: "Get Quotas",
-    description: "Remaining subscription quota per AI provider, from QuotaBar.app. Check before routing heavy work to a provider.",
+    description:
+      "Remaining subscription quota per AI provider, from QuotaBar.app. Returns one line per provider: percent left per bucket, plus status and reset time for unhealthy buckets.",
     parameters: {
       type: "object",
       properties: { provider: { type: "string", description: "Provider id, e.g. claude, codex, cursor. Omit for all." } },
@@ -162,8 +221,8 @@ export function registerQuota(pi: ExtensionAPI, settings: Settings, deps: Partia
       const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: undefined });
       const feed = await client.get();
       if (!feed) return text(unavailableText(port()));
-      const selected = params.provider ? feed.providers.filter((p) => p.id === params.provider) : feed.providers;
-      if (!selected.length) return text(`Unknown provider ${params.provider}; known: ${feed.providers.map((p) => p.id).join(", ")}`);
+      const selected = params.provider ? feed.providers.filter((p) => p.id.toLowerCase() === params.provider!.toLowerCase()) : feed.providers;
+      if (!selected.length) return text(clip(`Unknown provider ${params.provider}; known: ${feed.providers.map((p) => p.id).join(", ")}`));
       return text(compact(selected));
     },
   });

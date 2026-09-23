@@ -28,4 +28,7 @@ fetch (8 s timeout; polling uses 5 s).
 | Key | Default | Meaning |
 |---|---|---|
 | `quotaPort` | `8787` | QuotaBar.app feed port (1 to 65535) |
-| `quotaRefreshSeconds` | `60` | Polling interval (5 to 3600); applies from the next session start |
+| `quotaRefreshSeconds` | `60` | Polling interval (5 to 3600) |
+
+Changes made with `/rig` apply immediately: a new port drops the cached feed,
+and a new interval restarts polling.
