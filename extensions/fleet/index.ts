@@ -1,13 +1,15 @@
 // FleetView (spec #29, #44): the list of background work below the editor.
 // Items come from the shared registry (shared/fleet); this extension is the
-// only one that draws them.
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, matchesKey, MouseRegion, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
-import { fleet, isFinished, type Item } from "../../shared/fleet/index.ts";
+// only one that draws them. It also delivers the session's notices (#46) and
+// keeps a run without the UI alive until the work it started returns.
+import type { ExtensionAPI, ExtensionContext, MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
+import { isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
+import { fleet, isFinished, type Item, type Notice } from "../../shared/fleet/index.ts";
 
 /** Most lines FleetView takes, including the "… N more" line. */
 const MAX_LINES = 6;
 const MAIN = "main";
+const NOTICE = "rig.notice";
 
 type Row = { item?: Item; depth: number };
 
@@ -58,8 +60,42 @@ function duration(ms: number) {
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
 }
 
+const ICON = { completed: ["success", "✓"], failed: ["error", "✗"], stopped: ["warning", "■"] } as const;
+
+/** One themed line per notice; a failed or stopped item's error follows in full. */
+const renderNotice: MessageRenderer = (message, { outputPad }, theme) => {
+  const item = message.details as Notice["item"] | undefined;
+  const content = typeof message.content === "string" ? message.content : message.content.map((c) => ("text" in c ? c.text : "")).join("");
+  if (!item) return new Text(theme.fg("muted", content), outputPad, 0);
+  const [color, icon] = isFinished(item.status) ? ICON[item.status as keyof typeof ICON] : (["accent", "●"] as const);
+  const state = isFinished(item.status) ? (item.status === "completed" ? "done " : `${item.status} `) : "";
+  const head = `${theme.fg(color, icon)} ${clean(item.kind)} ${clean(item.label)} · ${state}${duration(item.ms)}`;
+  const body = isFinished(item.status) ? item.result ?? "" : content;
+  if (item.status === "failed" || item.status === "stopped") {
+    const lines = body.split("\n").map(clean).filter(Boolean);
+    return new Text([head, ...lines.map((l) => "  " + theme.fg(color, l))].join("\n"), outputPad, 0);
+  }
+  const first = clean(body.split("\n")[0] ?? "");
+  return new Text(head + (first ? theme.fg("muted", ` · ${first}`) : ""), outputPad, 0);
+};
+
+/** The one message a run without the UI gets when it ends with work running. */
+function listing(items: Item[], now: number) {
+  const rows = items.map((i) => `- ${i.kind} ${i.label} (id ${i.id}): ${i.status}, ${duration(now - i.startedAt)}`);
+  return [
+    "Your run is ending with work still running:",
+    ...rows,
+    "Stop what you no longer need. The session stays open until the rest finishes, and each result arrives as a notice.",
+  ].join("\n");
+}
+
 export default function (pi: ExtensionAPI) {
   let cleanup: (() => void) | undefined;
+  let detach: (() => void) | undefined;
+  let wake: (() => void) | undefined; // ends a session-end wait
+  let listed = false; // this run's end already listed its running work
+
+  pi.registerMessageRenderer(NOTICE, renderNotice);
 
   pi.on("input", (event) => {
     if (event.source !== "extension") fleet().prune();
@@ -67,12 +103,49 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     cleanup?.();
+    detach?.();
     if (ctx.mode === "tui") cleanup = mount(ctx);
+    // Idle: starts a turn. Mid-turn (and at settle): steers into it, so notices arriving together share one turn.
+    detach = fleet().attach(ctx.sessionManager.getSessionId(), (notice) => {
+      pi.sendMessage({ customType: NOTICE, content: notice.text, display: true, details: notice.item }, { triggerTurn: true, deliverAs: "steer" });
+      wake?.();
+    });
+  });
+
+  pi.on("agent_settled", () => {
+    listed = false;
+  });
+
+  // Session end without the UI (#29): list running work once, then wait for each notice until none is left.
+  pi.on("agent_before_settle", async (_event, ctx) => {
+    if (ctx.hasUI) return;
+    const registry = fleet();
+    const owner = ctx.sessionManager.getSessionId();
+    const running = () => registry.items().filter((i) => i.owner === owner && !isFinished(i.status));
+    if (running().length === 0) return;
+    if (!listed) {
+      listed = true;
+      const content = listing(running(), registry.now());
+      return { entries: [{ type: "custom_message", customType: NOTICE, content, display: true }], continue: true };
+    }
+    // No cap on the wait (spec #29): the command, shell timeout or caller's kill bounds it.
+    await new Promise<void>((resolve) => {
+      const unsubscribe = registry.subscribe(() => running().length === 0 && wake?.());
+      wake = () => {
+        unsubscribe();
+        wake = undefined;
+        resolve();
+      };
+    });
+    return undefined; // a delivered notice is queued, so the session continues
   });
 
   pi.on("session_shutdown", () => {
     cleanup?.();
     cleanup = undefined;
+    detach?.();
+    detach = undefined;
+    wake?.();
   });
 }
 

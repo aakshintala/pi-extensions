@@ -215,3 +215,43 @@ test("in fullscreen mode a click selects a row", async (t) => {
   tui.keys("Escape");
   await tui.waitForScreen(screen("   "));
 });
+
+test("notices are one compact themed line; a failure shows its error", async (t) => {
+  const tui = await start(t, { replies: ["noted", "noted too"] });
+  await tui.fx(
+    { add: "a", kind: "agent", label: "scout" },
+    { add: "b", kind: "shell", label: "npm test" },
+    { add: "c", kind: "monitor", label: "ci watch" },
+    { clock: 5 },
+    { finish: "a", status: "completed", result: "found 3 files\nsecond line", notice: "agent scout completed" },
+    { clock: 7 },
+    { finish: "b", status: "failed", result: "exit 1\nError: boom", notice: "shell npm test failed: exit 1" },
+    { notify: "c", text: "build 42 passed" },
+  );
+  // One run: pi's one-at-a-time steering takes the third notice at the next step.
+  await tui.waitForEvent("agent_end");
+  await tui.waitForScreen(pad([
+    "",
+    " ✓ agent scout · done 5s · found 3 files",
+    "",
+    " ✗ shell npm test · failed 7s",
+    "   exit 1",
+    "   Error: boom",
+    "",
+    " noted",
+    "",
+    " ● monitor ci watch · 7s · build 42 passed",
+    "",
+    " noted too",
+    "",
+    BORDER,
+    "",
+    BORDER,
+    " ● main",
+    "   agent scout · done 5s · found 3 files second line",
+    "   shell npm test · failed 7s · exit 1 Error: boom",
+    "   monitor ci watch · 7s",
+    "~/cwd",
+    "↑26 ↓5 R16 W26 CH44.4% 0.0%/128k (auto)                                harness-1",
+  ]));
+});
