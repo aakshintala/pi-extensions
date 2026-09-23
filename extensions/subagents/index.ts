@@ -26,8 +26,10 @@ import { oneLine } from "../../shared/text/index.ts";
 import { toolRenderers, resultText } from "../../shared/tool-display/index.ts";
 
 const MARKER = "rig.subagent";
-/** Tokens and cost of a finished child, saved in its parent's session for the parent's `Session total:`. */
+/** Tokens and cost of a finished child, saved in its parent's session: the parent's next notice and `Session total:` count them. */
 const USAGE = "rig.subagent.usage";
+/** Saved in an agent's session when its notice is sent: its next notice counts only the usage entries after it. */
+const REPORTED = "rig.subagent.reported";
 const NOTICE = "rig.notice"; // the fleet extension's notice type
 const TOOLS = ["subagent_spawn", "subagent_message", "subagent_stop"];
 const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -86,8 +88,8 @@ type Agent = Node & {
   /** The parent is shutting down: the notice is saved in its session instead of delivered. */
   closing?: boolean;
   activity: string;
-  /** Tokens and cost of children that finished since this agent's last notice; the next notice adds them. */
-  rolled: { tokens: number; cost: number };
+  /** Its parent's shutdown gave up waiting: its session is disposed, and it counts toward the cap until its run settles. */
+  abandoned?: boolean;
   /** Stops it, in the instance that spawned it. */
   halt?: () => Promise<void>;
 };
@@ -96,10 +98,10 @@ type Agent = Node & {
 const NODES = Symbol.for("pi-rig.subagents.nodes");
 const byManager: WeakMap<object, Agent> = ((globalThis as any)[NODES] ??= new WeakMap());
 
-/** Running agents below `n`; a stopped one no longer counts, even while it winds down. */
+/** Running agents below `n`. A stopped one no longer counts while it winds down, but counts again once abandoned. */
 function running(n: Node): number {
   let k = 0;
-  for (const a of n.children) k += (a.state === "running" && !a.stopped ? 1 : 0) + running(a);
+  for (const a of n.children) k += (a.state === "running" && (!a.stopped || a.abandoned) ? 1 : 0) + running(a);
   return k;
 }
 
@@ -182,7 +184,15 @@ export default function (pi: ExtensionAPI) {
     promptOptions = event.systemPromptOptions;
   });
 
-  const inherit = (): Inherit => ({ tools: pi.getActiveTools(), prompt: promptOptions, models: scope });
+  // The last one read stands in once this session is gone: the user can still resume its children from FleetView.
+  let inherited: Inherit = { tools: [], models: [] };
+  const inherit = (): Inherit => {
+    try {
+      return (inherited = { tools: pi.getActiveTools(), prompt: promptOptions, models: scope });
+    } catch {
+      return inherited;
+    }
+  };
   /** Starts queued top-level agents while a slot is free and the tree has room. */
   function pump() {
     const slots = () => [...top.children].filter((a) => a.state === "running").length;
@@ -330,10 +340,9 @@ export default function (pi: ExtensionAPI) {
     } catch (e) {
       error ??= (e as Error).message;
     } finally {
-      // Already done: its parent's shutdown gave up waiting and reported it.
-      const abandoned = a.state === "done";
+      // An abandoned agent was reported when its parent's shutdown gave up waiting.
       a.state = "done";
-      if (!abandoned) {
+      if (!a.abandoned) {
         try {
           finish(a, text, error, { ...stats, ms: fleet().now() - began }, total);
         } catch (e) {
@@ -354,15 +363,18 @@ export default function (pi: ExtensionAPI) {
   }
 
   function finish(a: Agent, text: string, error: string | undefined, s: Stats, total?: Omit<Stats, "ms">) {
-    // Tokens and cost roll up: this notice counts the children that finished since the last one.
-    s = { ...s, tokens: s.tokens + a.rolled.tokens, cost: s.cost + a.rolled.cost };
-    a.rolled = { tokens: 0, cost: 0 };
-    if ("root" in a.parent) {
-      const parent = a.parent as Agent;
-      parent.rolled.tokens += s.tokens;
-      parent.rolled.cost += s.cost;
-      parent.manager.appendCustomEntry(USAGE, { tokens: s.tokens, cost: s.cost });
+    // Tokens and cost roll up through the sessions: this notice counts the children that
+    // finished since the last one, which holds across pruning and restarts.
+    const entries = a.manager.getEntries() as any[];
+    const last = entries.findLastIndex((e) => e.type === "custom" && e.customType === REPORTED);
+    s = { ...s };
+    for (const e of entries.slice(last + 1)) {
+      if (e.type !== "custom" || e.customType !== USAGE) continue;
+      s.tokens += e.data.tokens;
+      s.cost += e.data.cost;
     }
+    a.manager.appendCustomEntry(REPORTED, {});
+    if ("root" in a.parent) (a.parent as Agent).manager.appendCustomEntry(USAGE, { tokens: s.tokens, cost: s.cost });
     const status = a.stopped ? "stopped" : error ? "failed" : "completed";
     const lines = [`${statsLine(s)} · ${duration(s.ms)}`, ...(total ? [`Session total: ${statsLine(total)}`] : [])];
     const head = `Subagent ${a.id} (${oneLine(a.label)}) ${status}. STATUS: ${a.stopped ? "STOPPED" : error ? "FAILED" : statusOf(text)}\n${lines.join("\n")}`;
@@ -445,8 +457,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** A new agent below this session. */
-  function agent(fields: Omit<Agent, "parent" | "root" | "children" | "stopped" | "activity" | "rolled">): Agent {
-    return { ...fields, parent: node, root: "root" in node ? (node as Agent).root : top, children: new Set(), stopped: false, activity: "", rolled: { tokens: 0, cost: 0 } };
+  function agent(fields: Omit<Agent, "parent" | "root" | "children" | "stopped" | "activity">): Agent {
+    return { ...fields, parent: node, root: "root" in node ? (node as Agent).root : top, children: new Set(), stopped: false, activity: "" };
   }
 
   /** Only the session that spawned a child can message it. */
@@ -556,9 +568,14 @@ export default function (pi: ExtensionAPI) {
     await bounded(Promise.all(all.map(stop)).then(() => Promise.all(all.map((a) => a.run))), SHUTDOWN_MS);
     for (const a of all) {
       if (a.state === "done") continue;
-      a.state = "done";
+      // Given up on: reported now and its session disposed, so it spends nothing more. It stays in
+      // the tree, counting toward the cap, until its run settles and prunes it.
+      a.abandoned = true;
       report(a, "stopped", "did not stop in time", `Subagent ${a.id} (${oneLine(a.label)}) stopped. It did not stop within ${SHUTDOWN_MS / 1000}s, so its session was abandoned.`);
+      const session = a.session;
+      if (session) void shutdown(a).finally(() => session.dispose());
+      a.session = undefined;
     }
-    node.children.clear();
+    for (const a of all) if (!a.abandoned) node.children.delete(a);
   });
 }

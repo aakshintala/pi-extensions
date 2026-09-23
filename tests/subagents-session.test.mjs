@@ -859,3 +859,77 @@ test("stopping a nested agent frees room for a queued top-level spawn at once", 
   assert.match(results()[1][1], /^Subagent \w+ queued\.$/);
   assert.equal(g1AtD, "running"); // D started while G1 was still winding down
 });
+
+test("an abandoned child is disposed, spends nothing more, and holds its place in the cap until its run settles", { timeout: 40_000 }, async (t) => {
+  const [gRunning, release] = [gate(), gate()];
+  let fResult;
+  const root = async (context) => {
+    const results = context.messages.filter((m) => m.role === "toolResult");
+    if (results.length === 0) return calls(spawn("C"))();
+    if (results.length === 1) return await gRunning, calls(["subagent_stop", { id: idOf("C") }])(); // returns once C's shutdown gives up on G
+    if (results.length === 2) return calls(spawn("E"), spawn("F"))();
+    if (results.length === 4 && context.messages.at(-1).role === "toolResult") {
+      fResult = textOf(results[3]);
+      release.open(); // G's stream answers at last
+    }
+    return says("waiting")();
+  };
+  const { session, agentDir } = await start(t, Array(12).fill(root), async (context) => {
+    const task = taskOf(context);
+    if (task === "G") return gRunning.open(), await release, calls(["read", { path: "late.txt" }])(); // ignores its abort
+    if (task === "E") return await release, says("E done")();
+    if (task === "F") return says("F done")();
+    return context.messages.some((m) => m.role === "toolResult") ? says("waiting")() : calls(spawn("G"))();
+  });
+  setting(t, "maxSessions", 3); // the root, C and G; then the root, abandoned G and E
+  await session.prompt("go");
+  // G, abandoned, still held its place, so F queued; it started once G's run settled.
+  assert.match(fResult, /^Subagent \w+ queued\.$/);
+  assert.equal(fleet().get(idOf("F")).status, "completed");
+  assert.equal(fleet().get(idOf("G")).result, "did not stop in time");
+  // Disposed, G's session took in nothing more: its late reply, and the tokens it cost, were never recorded.
+  const files = readdirSync(join(agentDir, "sessions"), { recursive: true }).filter((f) => f.endsWith(`_${idOf("G")}.jsonl`));
+  const replies = files.flatMap((f) => readFileSync(join(agentDir, "sessions", f), "utf8").trim().split("\n").map(JSON.parse)).filter((e) => e.message?.role === "assistant");
+  assert.deepEqual(replies, []);
+});
+
+test("a grandchild resumed after its parent finished counts in the parent's next per-run line", { timeout: 20_000 }, async (t) => {
+  let g;
+  let c;
+  globalThis[PRICE] = 1e-6;
+  const root = (context) => {
+    const results = context.messages.filter((m) => m.role === "toolResult");
+    if (results.length === 0) return calls(spawn("C"))();
+    if (lastText(context) === "check again") return calls(["subagent_message", { id: c, message: "check" }])();
+    return says("waiting")();
+  };
+  const { session, agentDir, notices } = await start(t, Array(12).fill(root), (context, options) => {
+    if (taskOf(context) === "G") return (g = options.sessionId), says("G\nSTATUS: DONE")();
+    c ??= options.sessionId; // the fleet drops finished rows on the next prompt, so keep C's id
+    if (textOf(context.messages.at(-1)).startsWith("check")) return says("C two\nSTATUS: DONE")();
+    if (!context.messages.some((m) => m.role === "toolResult")) return calls(spawn("G"))();
+    return says(noticed(context, "G") ? "C one\nSTATUS: DONE" : "waiting")();
+  });
+  await session.prompt("go");
+  // C has finished; the user resumes its child G from FleetView.
+  const again = new Promise((resolve) => {
+    const off = fleet().subscribe(() => fleet().get(g)?.status === "completed" && fleet().get(g).result && (off(), resolve()));
+  });
+  const before = fleet().get(g);
+  await fleet().get(g).steer("more");
+  assert.notEqual(fleet().get(g), before); // a new run, a new row
+  await again;
+  await session.prompt("check again");
+
+  const second = notices().filter((n) => n.startsWith(`Subagent ${c} `))[1];
+  assert.match(second, /\n\nC two\nSTATUS: DONE$/);
+  const run = second.split("\n")[1];
+  const dir = join(agentDir, "sessions", session.sessionId);
+  const entries = readFileSync(join(dir, readdirSync(dir).find((f) => f.endsWith(`_${c}.jsonl`))), "utf8").trim().split("\n").map(JSON.parse);
+  const usage = entries.filter((e) => e.customType === "rig.subagent.usage").map((e) => e.data.tokens);
+  const resumedAt = entries.findIndex((e) => e.type === "message" && e.message.role === "user" && textOf(e.message).startsWith("check"));
+  const own = entries.slice(resumedAt).filter((e) => e.type === "message" && e.message.role === "assistant").reduce((n, e) => n + e.message.usage.totalTokens, 0);
+  assert.equal(usage.length, 2); // G's first run, then its resumed one
+  assert.equal(tokens(run), own + usage[1]);
+  assert.equal(cost(run), money(tokens(run) * 1e-6));
+});

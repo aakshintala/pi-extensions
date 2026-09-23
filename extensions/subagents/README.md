@@ -48,11 +48,13 @@ any agent.
 - A child that ends its run with its own children or jobs still running gets
   one message listing them, then waits for each notice before it finishes
   (the fleet extension's session-end rule). Its own notice comes after theirs.
-- Tokens and cost roll up: a child's notice counts its own replies plus those
-  of every agent below it that finished since its last notice. Each such
-  finish is also saved in the child's session as a `rig.subagent.usage` entry,
-  so `Session total:` counts the child's session and every run below it, also
-  after a restart.
+- Tokens and cost roll up through the saved sessions. Each finished agent
+  saves its counts in its parent's session as a `rig.subagent.usage` entry.
+  Each notice saves a `rig.subagent.reported` entry in the agent's own
+  session. An agent's notice counts its own replies plus the usage entries
+  since its last notice, so a child resumed from FleetView after its parent
+  finished still counts in the parent's next notice. `Session total:` counts
+  the agent's session and every usage entry, also after a restart.
 - A finished agent is dropped from memory once nothing below it is running. A
   later message to it resumes it from its session file.
 - In FleetView a nested agent is shown indented under its parent.
@@ -94,7 +96,12 @@ any agent.
   it. Their notices are saved in the parent's session, because FleetView no
   longer delivers to it. A child still running after 10 seconds, such as one
   whose model stream ignores its abort, is reported stopped with
-  `did not stop in time` and its session is abandoned.
+  `did not stop in time`. Its session is shut down and disposed, so it
+  records and spends nothing more. It counts toward `maxSessions` until its
+  run settles.
+- A child's instance keeps what it last passed on (tools, prompt sections,
+  models), so the user can still resume a finished child from FleetView after
+  that child's parent session has closed.
 
 ## Notices
 
