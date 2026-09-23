@@ -3,7 +3,8 @@
 process.env.TZ = "Asia/Kolkata"; // before any Date is made
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { homedir } from "node:os";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { collectUsageData, localHourStart, parseUsageAmount, resolveSessionsDir } from "../extensions/usage/data.ts";
@@ -43,4 +44,30 @@ test("every cost shape counts: {total}, a number, parts without a total, compact
   assert.equal(data.today.providers.get("p1").cost, 7);
   assert.equal(data.today.providers.get("Tools").cost, 24);
   assert.equal(data.allTime.totals.cost, 31 + 5); // plus last week's session
+});
+
+const SHAPES = fileURLToPath(new URL("./fixtures/usage/shapes", import.meta.url));
+
+test("reasoning-only records count, empty ones do not, and usage entries (cache warming) are costed", async () => {
+  const data = await collectUsageData({ sessionsDir: SHAPES, cachePath: null, now: NOW });
+  const p3 = data.allTime.providers.get("p3");
+  assert.equal(p3.messages, 1); // the reasoning-only turn; the empty probe reply is not a turn
+  assert.equal(p3.cost, 0.25); // the cache_warm entry
+  const reasoning = [...data.hourly.values()].flatMap((b) => [...b.values()]).reduce((n, c) => n + c.reasoning, 0);
+  assert.equal(reasoning, 50);
+});
+
+test("a cache written by the older parser is reparsed, not trusted", async (t) => {
+  const box = mkdtempSync(join(tmpdir(), "pi-rig-usage-cache-"));
+  t.after(() => rmSync(box, { recursive: true, force: true }));
+  const file = join(SHAPES, "--p--", "s3.jsonl");
+  const { size, mtimeMs } = statSync(file);
+  // Version 6 as upstream wrote it for this file: no usage entry and no reasoning-only turn.
+  writeFileSync(join(box, "cache.json"), JSON.stringify({
+    version: 6,
+    names: ["p3", "m3", ""],
+    files: { [file]: { size, mtimeMs, sessionId: "s3", cwd: "/p", messages: [], toolUsages: [] } },
+  }));
+  const data = await collectUsageData({ sessionsDir: SHAPES, cachePath: join(box, "cache.json"), now: NOW });
+  assert.equal(data.allTime.totals.cost, 0.25);
 });

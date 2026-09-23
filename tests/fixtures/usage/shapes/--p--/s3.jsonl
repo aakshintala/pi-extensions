@@ -1,0 +1,4 @@
+{"type":"session","id":"s3","cwd":"/p","timestamp":"2026-09-20T01:00:00.000Z"}
+{"type":"message","id":"r","timestamp":"2026-09-20T01:10:00.000Z","message":{"role":"assistant","provider":"p3","model":"m3","content":[],"usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"cost":{"total":0},"reasoning":50}}}
+{"type":"message","id":"a","timestamp":"2026-09-20T01:20:00.000Z","message":{"role":"assistant","provider":"p3","model":"m3","content":[],"stopReason":"stop","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"cost":{"total":0}}}}
+{"type":"usage","id":"w","parentId":"a","timestamp":"2026-09-20T01:30:00.000Z","kind":"cache_warm","provider":"p3","model":"m3","usage":{"input":0,"output":1,"cacheRead":900,"cacheWrite":0,"cost":{"total":0.25}}}

@@ -232,6 +232,9 @@ const PATTERN_COMPACTION_COMPACT = Buffer.from('"type":"compaction"');
 const PATTERN_COMPACTION_SPACED = Buffer.from('"type": "compaction"');
 const PATTERN_BRANCH_SUMMARY_COMPACT = Buffer.from('"type":"branch_summary"');
 const PATTERN_BRANCH_SUMMARY_SPACED = Buffer.from('"type": "branch_summary"');
+// Pi 0.87 `appendUsage` entries, such as cache warming, carry their own provider and model.
+const PATTERN_USAGE_ENTRY_COMPACT = Buffer.from('"type":"usage"');
+const PATTERN_USAGE_ENTRY_SPACED = Buffer.from('"type": "usage"');
 // pi-subagents versions predating Pi 0.81 persisted child usage in details but
 // could not put it on the canonical tool-result usage field. Their tool names
 // are near the start of the line, so we can recover those records without
@@ -269,9 +272,10 @@ export function parseUsageAmount(value: unknown): UsageAmount | null {
 		cacheWrite: finiteNumber(persisted.cacheWrite),
 		reasoning: finiteNumber(persisted.reasoning),
 	};
-	return usage.cost === 0 && usage.input === 0 && usage.output === 0 && usage.cacheRead === 0 && usage.cacheWrite === 0
-		? null
-		: usage;
+	// Null only when nothing at all was recorded: a reasoning-only record still counts.
+	const empty = usage.cost === 0 && usage.input === 0 && usage.output === 0 && usage.cacheRead === 0 &&
+		usage.cacheWrite === 0 && usage.reasoning === 0;
+	return empty ? null : usage;
 }
 
 function parsedTimestamp(messageTimestamp: unknown, entryTimestamp: unknown): number {
@@ -579,7 +583,9 @@ function lineMightBeRelevant(line: Buffer): boolean {
 		head.includes(PATTERN_SESSION_SPACED) ||
 		head.includes(PATTERN_THINKING_SPACED) ||
 		head.includes(PATTERN_COMPACTION_SPACED) ||
-		head.includes(PATTERN_BRANCH_SUMMARY_SPACED)
+		head.includes(PATTERN_BRANCH_SUMMARY_SPACED) ||
+		head.includes(PATTERN_USAGE_ENTRY_COMPACT) ||
+		head.includes(PATTERN_USAGE_ENTRY_SPACED)
 	);
 }
 
@@ -632,10 +638,27 @@ export async function parseSessionBuffer(buffer: Buffer, signal?: AbortSignal): 
 				} else if (entry.type === "compaction" || entry.type === "branch_summary") {
 					const usage = parseUsageAmount(entry.usage);
 					if (usage) messages.push(auxiliaryMessage(usage, parsedTimestamp(undefined, entry.timestamp), typeof entry.id === "string" ? entry.id : ""));
+				} else if (entry.type === "usage") {
+					const usage = typeof entry.provider === "string" && typeof entry.model === "string"
+						? parseUsageAmount(entry.usage)
+						: null;
+					if (usage) {
+						messages.push({
+							provider: entry.provider,
+							model: entry.model,
+							thinkingLevel,
+							source: "auxiliary",
+							sourceId: typeof entry.id === "string" ? entry.id : "",
+							...usage,
+							timestamp: parsedTimestamp(undefined, entry.timestamp),
+						});
+					}
 				} else if (entry.type === "message" && entry.message?.role === "assistant") {
 					const msg = entry.message;
-					if (msg.usage && msg.provider && msg.model) {
-						const usage = parseUsageAmount(msg.usage) ?? { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 };
+					// A message that recorded no usage at all (an aborted /context probe, for
+					// one) billed nothing, so it is neither a turn nor a cost.
+					const usage = msg.provider && msg.model ? parseUsageAmount(msg.usage) : null;
+					if (usage) {
 						messages.push({
 							provider: msg.provider,
 							model: msg.model,
@@ -666,10 +689,10 @@ export async function parseSessionBuffer(buffer: Buffer, signal?: AbortSignal): 
 // On-disk cache
 // =============================================================================
 
-// Upstream's version 6 format, kept so the cache survives the port. Pi always
-// writes assistant cost as `{ total }`, so entries parsed by upstream's
-// narrower assistant cost read stay valid.
-const CACHE_VERSION = 6;
+// Upstream's version 6 tuple layout, unchanged. The version is bumped because
+// the parser now counts what version 6 dropped (costs in other shapes,
+// reasoning-only records, `usage` entries), so version 6 entries are reparsed.
+const CACHE_VERSION = 7;
 
 type CachedMessageTuple = [
 	providerIdx: number,
