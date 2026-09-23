@@ -122,7 +122,12 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
     renderShell: "self" as const,
     renderCall(args: Args, theme: Theme, context: ToolRenderContext): Component {
       const groups = sessionOf(context.toolCallId, context.args ?? args);
-      const c = groups?.describe(context.toolCallId, style.summary, context.invalidate);
+      // How the group's first call draws this call when it failed (see `folded`).
+      const failure = (c: Call) => (w: number) => [
+        callLine(theme, "error", style.title, style.arg((c.args ?? args ?? {}) as Args, context.cwd), w),
+        ...errorLines(theme, resultText(c.result).replaceAll(`${context.cwd}/`, ""), false, w),
+      ];
+      const c = groups?.describe(context.toolCallId, style.summary, context.invalidate, failure);
       const g = c && groups!.group(context.toolCallId);
       const own = (w: number) => {
         const state = c ? c.state() : context.isError ? "error" : context.isPartial ? "pending" : "done";
@@ -132,14 +137,19 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
       if (!g) return lines((w) => [own(w)]);
       const open = context.expanded || g.open;
       const summary = !open && g.calls[0] === c;
-      const shown = open || c!.alwaysShown();
-      return clickable(g, lines((w) => [...(summary ? [summaryLine(theme, g, w)] : []), ...(shown ? [own(w)] : [])]));
+      const shown = open || shownAlone(g, c!);
+      return clickable(g, lines((w) => [
+        ...(summary ? [summaryLine(theme, g, w)] : []),
+        ...(shown ? [own(w)] : []),
+        ...(summary && !shown ? foldedLines(g, w) : []),
+      ]));
     },
     renderResult(result: Result, options: { expanded: boolean; isPartial: boolean }, theme: Theme, context: ToolRenderContext): Component {
       const groups = sessionOf(context.toolCallId, context.args);
       const g = groups?.group(context.toolCallId);
       const c = g?.calls.find((m) => m.id === context.toolCallId);
-      if (options.isPartial || (g && !context.expanded && !g.open && !c!.alwaysShown())) return lines(() => []);
+      const collapsed = g && !context.expanded && !g.open;
+      if (options.isPartial || (collapsed && !shownAlone(g, c!))) return lines(() => []);
       let out: Component;
       if (context.isError) {
         const message = resultText(result).replaceAll(`${context.cwd}/`, "");
@@ -148,16 +158,31 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
         const { summary, body } = style.result(result, context.args ?? {}, options.expanded, theme);
         out = lines((w) => resultLines(theme, summary, body, options.expanded, w));
       }
+      if (collapsed && g.calls[0] === c) {
+        const own = out;
+        out = lines((w) => [...own.render(w), ...foldedLines(g, w)]);
+      }
       return g ? clickable(g, out) : out;
     },
   };
 }
 
-// ---- Groups (#56) ----
-// Consecutive calls to tools with a summary, in one assistant message, form a group.
+/**
+ * A collapsed group's failed calls after its first are drawn by the first call, under
+ * the summary, and draw nothing themselves: Pi puts a blank row above every tool that
+ * draws a line, so this keeps a group free of blank rows (#133).
+ */
+const folded = (g: Group, c: Call) => c !== g.calls[0] && c.state() === "error" && !c.image;
+/** A collapsed group's call draws its own rows: its first call when it failed, and calls with images. */
+const shownAlone = (g: Group, c: Call) => c.alwaysShown() && !folded(g, c);
+const foldedLines = (g: Group, w: number) => g.calls.filter((m) => folded(g, m)).flatMap((m) => m.failure?.(w) ?? []);
+
+// ---- Groups (#56, #133) ----
+// Consecutive calls to tools with a summary form a group, across assistant messages
+// with nothing drawn between them.
 // Its first call draws one summary line and the others draw nothing, until Ctrl+O
 // (context.expanded) or a click on the group opens it. Failed calls and calls with
-// images always show. Groups come from the message itself, so a transcript rebuilt
+// images always show. Groups come from the messages alone, so a transcript rebuilt
 // from saved messages groups the same way as the live chat.
 //
 // Each session owns one ToolGroups (its extension creates it and drives it from Pi's
@@ -189,12 +214,28 @@ export const outcomeOf = (isError: boolean, result: unknown): Outcome =>
 const hasImage = (result: unknown) =>
   Array.isArray((result as any)?.content) && (result as any).content.some((c: any) => c?.type === "image");
 
+/** Consecutive calls across assistant messages with no text or message between them. */
 interface Run {
   ids: string[];
-  /** Its message has thinking: the summary starts with "thought ·". */
-  thought?: boolean;
-  /** Set when the message or its turn ended: what a call with no result counts as. */
+  /** Set when a message or its turn ended: what a call with no result counts as. */
   ended?: "cancelled" | "error";
+}
+
+/** One assistant message with calls. */
+interface Msg {
+  ids: string[];
+  /** The run open before it, which it continues when it has no text. */
+  before?: Run;
+  /**
+   * It has thinking. As the message's renderer last reported: `shown`, whether Pi
+   * draws that thinking, and `hides`, whether Pi hides thinking in this message.
+   */
+  thought: boolean;
+  shown?: boolean;
+  hides?: boolean;
+  /** A message with only thinking came just before it, or just after it. */
+  gap: boolean;
+  after: boolean;
 }
 
 class Call {
@@ -203,12 +244,17 @@ class Call {
   open = false;
   summary?: Summary;
   invalidate?: () => void;
+  /** Its rows when it failed, drawn by its group's first call. */
+  failure?: (width: number) => string[];
+  result?: unknown;
   id: string;
   run: Run;
+  msg: Msg;
   args: unknown;
-  constructor(id: string, run: Run, args: unknown) {
+  constructor(id: string, run: Run, msg: Msg, args: unknown) {
     this.id = id;
     this.run = run;
+    this.msg = msg;
     this.args = args;
   }
   state(): CallState {
@@ -240,55 +286,119 @@ const unindex = (id: string, groups: ToolGroups) => {
   else INDEX.delete(id);
 };
 
+/** Messages Pi draws in the chat, besides assistant messages (a custom one when `display` is set). */
+const SPLITS = new Set(["user", "bashExecution", "compactionSummary", "branchSummary"]);
+
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /** One session's tool groups. */
 export class ToolGroups {
   private calls = new Map<string, Call>();
   /** Results that arrived before their call was registered. */
-  private early = new Map<string, { outcome: Outcome; image: boolean }>();
+  private early = new Map<string, { outcome: Outcome; image: boolean; result: unknown }>();
+  /** The run a next message of calls only continues. */
+  private tail?: Run;
+  /** The message still streaming: later updates of it are the same message. */
+  private current?: Msg;
+  /** A message with only thinking came after the tail. */
+  private gap = false;
+  /** Whether Pi draws thinking, for messages whose renderer has not reported (Pi's default: yes). */
+  showThinking = true;
   frame = 0;
 
-  /** Registers the groups in an assistant message (call on every update and at its end). */
-  track(message: any): void {
+  /**
+   * Feeds one message, in order. An assistant message registers its calls: pass
+   * `streaming` for each update while it streams, and track it once more without it
+   * when it ends. A message drawn in the chat closes the open run.
+   */
+  track(message: any, streaming = false): void {
+    if (SPLITS.has(message?.role) || (message?.role === "custom" && message.display)) return this.close();
     if (message?.role !== "assistant" || !Array.isArray(message.content)) return;
     const runs: any[][] = [[]];
+    let text = false;
     for (const b of message.content) {
       if (b?.type === "toolCall" && typeof b.id === "string") runs.at(-1)!.push(b);
-      else if (b?.type === "text" && b.text?.trim()) runs.push([]);
+      else if (b?.type === "text" && b.text?.trim()) (text = true), runs.push([]);
     }
     const thought = message.content.some((b: any) => b?.type === "thinking" && b.thinking?.trim());
+    const segments = runs.filter((r) => r.length);
+    if (!segments.length) {
+      if (text) return this.close();
+      // A finished message with only thinking: it belongs to the run around it.
+      if (thought && !streaming && this.tail) {
+        const last = this.calls.get(this.tail.ids.at(-1)!);
+        if (last) last.msg.after = true;
+        this.gap = true;
+        this.refresh(this.tail);
+      }
+      return;
+    }
+    // Each streaming update is a new object, and its first call can be revised out,
+    // so a message is the one still streaming, or a new one.
+    const msg: Msg = this.current ?? { ids: [], before: this.tail, thought, gap: this.gap, after: false };
+    this.current = streaming ? msg : undefined;
+    this.gap = false;
+    const all = segments.flat().map((b) => b.id as string);
+    // A call revised out of the message leaves its group, and an id that an earlier
+    // message used belongs to this one now.
+    for (const id of msg.ids) if (!all.includes(id)) this.forget(id);
+    for (const id of all) if (this.calls.get(id) && this.calls.get(id)!.msg !== msg) this.forget(id);
+    msg.ids = all;
+    let changed = msg.thought !== thought;
+    msg.thought = thought;
+    // Pi draws all of a message's text above its calls, so only a message without
+    // text continues the run before it.
+    const join = text ? undefined : msg.before;
     const ended = message.stopReason === "aborted" ? "cancelled" : message.stopReason === "error" ? "error" : undefined;
-    for (const blocks of runs.filter((r) => r.length)) {
-      const ids = blocks.map((b) => b.id);
+    const mine = (id: string) => this.calls.get(id)?.msg === msg;
+    const used = new Set<Run>();
+    for (const [i, blocks] of segments.entries()) {
+      const ids = blocks.map((b) => b.id as string);
       const old = this.calls.get(ids[0])?.run;
-      const run: Run = old ?? { ids: [] };
-      // A call revised out of the message leaves its group.
-      for (const id of run.ids) if (!ids.includes(id)) this.forget(id);
-      const changed = ids.join() !== run.ids.join() || (ended && !run.ended) || thought !== !!run.thought;
-      run.ids = ids;
-      run.thought = thought;
+      const run: Run = i === 0 && join ? join : old && !used.has(old) && old.ids.every(mine) ? old : { ids: [] };
+      used.add(run);
+      const next = [...run.ids.filter((id) => !mine(id)), ...ids];
+      changed ||= next.join() !== run.ids.join() || (!!ended && !run.ended);
+      run.ids = next;
       run.ended ??= ended;
       for (const b of blocks) {
         const c = this.calls.get(b.id);
-        if (c) Object.assign(c, { run, args: b.arguments });
-        else this.add(new Call(b.id, run, b.arguments));
+        if (!c) this.add(new Call(b.id, run, msg, b.arguments));
+        else {
+          if (c.run !== run) this.leave(c);
+          Object.assign(c, { run, args: b.arguments });
+        }
+        // Pi shows an errored message's error on its calls with no result.
+        if (ended === "error") this.calls.get(b.id)!.result ??= { content: [{ type: "text", text: message.errorMessage || "Error" }] };
       }
       if (changed) this.refresh(run);
+      this.tail = run;
     }
+    // An aborted or failed message is the last of its agent run.
+    if (ended && !streaming) this.close();
+  }
+
+  /** Records whether Pi draws a message's thinking (its renderer calls this; see `thinkingShown`). */
+  thinkingShown(id: string, shown: boolean, hides: boolean): void {
+    const msg = this.calls.get(id)?.msg;
+    if (!msg || (msg.shown === shown && msg.hides === hides)) return;
+    Object.assign(msg, { shown, hides });
+    // Drawn thinking splits a group, so the groups around it change.
+    for (const c of this.calls.values()) if (c.msg === msg) this.refresh(c.run);
   }
 
   /** Records a call's result (Pi's tool_execution_end, or a saved toolResult message). */
   settle(id: string, isError: boolean, result: unknown): void {
-    const outcome = { outcome: outcomeOf(isError, result), image: hasImage(result) };
+    const outcome = { outcome: outcomeOf(isError, result), image: hasImage(result), result };
     const c = this.calls.get(id);
     if (!c) return void this.early.set(id, outcome);
-    Object.assign(c, { status: outcome.outcome, image: outcome.image });
+    Object.assign(c, { status: outcome.outcome, image: outcome.image, result });
     this.refresh(c.run);
   }
 
-  /** The turn is over: calls still without a result are cancelled. */
+  /** The agent run is over: the open run closes, and calls still without a result are cancelled. */
   endRun(): void {
+    this.close();
     for (const run of new Set([...this.calls.values()].map((c) => c.run))) {
       if (!run.ended && run.ids.some((id) => this.calls.get(id)?.status === "pending")) {
         run.ended = "cancelled";
@@ -302,6 +412,7 @@ export class ToolGroups {
     for (const id of this.calls.keys()) unindex(id, this);
     this.calls.clear();
     this.early.clear();
+    this.close();
   }
 
   /** Advances the spinner and redraws the summary line of each running group. */
@@ -316,11 +427,12 @@ export class ToolGroups {
     }
   }
 
-  /** Called by a renderer: records the call's summary and redraw hook. */
-  describe(id: string, summary: Summary | undefined, invalidate: () => void): Call | undefined {
+  /** Called by a renderer: records the call's summary, redraw hook and failure rows. */
+  describe(id: string, summary: Summary | undefined, invalidate: () => void, failure?: (c: Call) => (width: number) => string[]): Call | undefined {
     const c = this.calls.get(id);
     if (!c) return undefined;
     c.invalidate = invalidate;
+    c.failure = failure?.(c);
     if (summary && !c.summary) {
       c.summary = summary;
       // The call may join the group before it: redraw the others (not itself, mid-render).
@@ -330,18 +442,25 @@ export class ToolGroups {
   }
 
   /**
-   * The call's group: the calls around it in its run that have a summary. Pi renders
-   * calls in message order, so every call before this one has already described itself.
+   * The call's group: the calls around it in its run that have a summary, up to thinking
+   * Pi draws between two messages. Pi renders calls in message order, so every call
+   * before this one has already described itself.
    */
   group(id: string): Group | undefined {
     const c = this.calls.get(id);
     if (!c?.summary) return undefined;
     const ids = c.run.ids;
-    const has = (i: number) => !!this.calls.get(ids[i])?.summary;
+    const at = (i: number) => this.calls.get(ids[i]);
+    // Calls i-1 and i are in one group.
+    const joined = (i: number) => {
+      const a = at(i - 1);
+      const b = at(i);
+      return !!a?.summary && !!b?.summary && (a.msg === b.msg || !this.drawsThinking(b.msg));
+    };
     let start = ids.indexOf(id);
     let end = start;
-    while (start > 0 && has(start - 1)) start--;
-    while (end < ids.length - 1 && has(end + 1)) end++;
+    while (start > 0 && joined(start)) start--;
+    while (end < ids.length - 1 && joined(end + 1)) end++;
     const calls = ids.slice(start, end + 1).map((i) => this.calls.get(i)!);
     return { session: this, calls, open: calls[0].open };
   }
@@ -357,6 +476,18 @@ export class ToolGroups {
     for (const c of g.calls) c.invalidate?.();
   }
 
+  /** Pi draws thinking just above the message's calls. */
+  private drawsThinking(m: Msg) {
+    // A message with only thinking before it is drawn as this message's thinking would be.
+    return (m.thought && (m.shown ?? this.showThinking)) || (m.gap && !(m.hides ?? !this.showThinking));
+  }
+
+  private close() {
+    this.tail = undefined;
+    this.current = undefined;
+    this.gap = false;
+  }
+
   private add(c: Call) {
     this.calls.set(c.id, c);
     const owners = INDEX.get(c.id) ?? [];
@@ -364,18 +495,36 @@ export class ToolGroups {
     const early = this.early.get(c.id);
     if (early) {
       this.early.delete(c.id);
-      Object.assign(c, { status: early.outcome, image: early.image });
+      Object.assign(c, { status: early.outcome, image: early.image, result: early.result });
     }
   }
 
   private forget(id: string) {
+    const c = this.calls.get(id);
+    if (c) this.leave(c);
     this.calls.delete(id);
     unindex(id, this);
+  }
+
+  /** Takes a call out of its run (it moved to another, or left the message). */
+  private leave(c: Call) {
+    c.run.ids = c.run.ids.filter((id) => id !== c.id);
+    this.refresh(c.run);
   }
 
   private refresh(run: Run) {
     for (const id of run.ids) this.calls.get(id)?.invalidate?.();
   }
+}
+
+/**
+ * Pi's assistant message renderer reports whether it draws the message's thinking
+ * (Ctrl+T, or a click on one block), and whether it hides thinking as a rule;
+ * drawn thinking splits a group.
+ */
+export function thinkingShown(message: any, shown: boolean, hides = !shown): void {
+  const call = Array.isArray(message?.content) && message.content.find((b: any) => b?.type === "toolCall" && typeof b.id === "string");
+  if (call) sessionOf(call.id, call.arguments)?.thinkingShown(call.id, shown, hides);
 }
 
 /** Clicking any row of a group opens or closes that group only. */
@@ -392,7 +541,7 @@ function summaryLine(theme: Theme, g: Group, width: number): string {
   const bad = calls.some((c) => c.status === "error" || c.status === "cancelled");
   const frame = SPINNER[g.session.frame % SPINNER.length];
   const bullet = live ? theme.fg("muted", frame) : theme.fg(bad ? "error" : "success", CALL);
-  return truncateToWidth(`${PAD}${bullet} ${summaryText(theme, calls, g.calls[0].run.thought)}`, width);
+  return truncateToWidth(`${PAD}${bullet} ${summaryText(theme, calls, g.calls.some((c) => c.msg.thought || c.msg.gap || c.msg.after))}`, width);
 }
 
 const lineTotals = new WeakMap<object, { added: number; removed: number } | undefined>();

@@ -92,7 +92,8 @@ test("a real error stays failed and shown when Esc comes during a thinking-only 
   emit("message_end", { message: saved[2] });
   emit("agent_end");
   const draw = () => RENDERERS.read.renderCall(call.arguments, theme, { ...ctx(call.arguments), toolCallId: call.id, invalidate() {} }).render(80);
-  const want = [" ⏺ Read 1 file · 1 failed", " ⏺ Read(missing.txt)"];
+  // The reply with only thinking belongs to the run, so it leads the summary (#133).
+  const want = [" ⏺ thought · read 1 file · 1 failed", " ⏺ Read(missing.txt)"];
   assert.deepEqual(draw(), want, "live");
   emit("session_shutdown");
   branch.push(...saved.map((message) => ({ type: "message", message })));

@@ -179,9 +179,9 @@ test("groups: a result that arrives before its call is registered still counts",
 test("groups: a call revised out of the message leaves its group", (t) => {
   const g = new td.ToolGroups();
   t.after(() => g.reset());
-  g.track({ role: "assistant", content: [toolCall("v1"), toolCall("v2")] });
+  g.track({ role: "assistant", content: [toolCall("v1"), toolCall("v2")] }, true);
   draw(["v1", "v2"]);
-  g.track({ role: "assistant", content: [toolCall("v1")] });
+  g.track({ role: "assistant", content: [toolCall("v1")] }, true);
   assert.deepEqual(draw(["v1"]), [" ⠋ Read 1 file"]);
   assert.deepEqual(draw(["v2"]), [" ⏺ Read(v2)"]); // no longer grouped
 });
@@ -236,4 +236,116 @@ test("groups: an error before the user's abort of a later reply, or of a new pro
   g.track({ role: "user", content: "next" });
   g.track({ role: "assistant", stopReason: "aborted", content: [] });
   assert.deepEqual(draw(["u2"]), [" ⏺ Read 1 file · 1 failed", " ⏺ Read(u2)"]);
+});
+
+// #133: a run spans assistant messages until something drawn in the chat, or the end of the agent run.
+const said = (...content) => ({ role: "assistant", stopReason: "toolUse", content });
+const thinking = { type: "thinking", thinking: "hmm" };
+/** A hidden-thinking session's groups. */
+const groups = (t) => {
+  const g = new td.ToolGroups();
+  g.showThinking = false;
+  t.after(() => g.reset());
+  return g;
+};
+
+test("groups span tool-only messages; hidden thinking in any of them leads the summary; streaming updates are new objects", (t) => {
+  const g = groups(t);
+  g.track(said(toolCall("m1")));
+  g.track(said(thinking), true); // the next message, streaming its thinking
+  g.track(said(thinking, toolCall("m2")), true);
+  g.track(said(thinking, toolCall("m2"), toolCall("m3")));
+  g.track(said(toolCall("m4")));
+  for (const id of ["m1", "m2", "m3", "m4"]) g.settle(id, false, { content: [] });
+  g.endRun();
+  assert.deepEqual(draw(["m1", "m2", "m3", "m4"]), [" ⏺ thought · read 4 files"]);
+});
+
+test("groups: a streaming message whose first call is revised out is still the same message", (t) => {
+  const g = groups(t);
+  g.track(said(toolCall("q0")));
+  g.track(said(toolCall("q1"), toolCall("q2")), true);
+  g.track(said(toolCall("q2")));
+  for (const id of ["q0", "q2"]) g.settle(id, false, { content: [] });
+  assert.deepEqual(draw(["q0", "q2"]), [" ⏺ Read 2 files"]);
+  assert.deepEqual(draw(["q1"]), [" ⏺ Read(q1)"]); // no longer grouped
+});
+
+test("groups: a new message reusing an earlier message's call id is a new call", (t) => {
+  const g = groups(t);
+  g.track(said(toolCall("k1")));
+  g.settle("k1", true, { content: [{ type: "text", text: "ENOENT" }] });
+  g.track({ role: "user", content: "next" });
+  g.track(said(toolCall("k2"), toolCall("k1"))); // ids made from the clock can repeat
+  assert.deepEqual(draw(["k2", "k1"]), [" ⠋ Read 2 files"]); // the old call's failure is not the new one's
+});
+
+test("groups: text, a message drawn in the chat, a call without a summary, the end of an aborted message and the end of the agent run each split a run", (t) => {
+  const g = groups(t);
+  const steps = [
+    [said(toolCall("p1"))],
+    [said({ type: "text", text: "Next:" }, toolCall("p2"))], // text, drawn above its calls
+    [{ role: "user", content: "steer" }, said(toolCall("p3"))],
+    [{ role: "custom", display: true, content: "notice" }, said(toolCall("p4"))],
+    [{ role: "custom", display: false, content: "hidden" }, { role: "system", content: "tools" }, said(toolCall("p5"))], // not drawn: joins p4
+    [said(toolCall("p6", "ask_user"))],
+    [said(toolCall("p7"))],
+    [said(toolCall("p8")), "end", said(toolCall("p9"))],
+    [{ ...said(toolCall("pa")), stopReason: "aborted" }, said(toolCall("pb"))], // pa joins p9; pb does not join pa
+  ];
+  for (const step of steps) for (const m of step) m === "end" ? g.endRun() : g.track(m);
+  const grouped = ["p1", "p2", "p3", "p4", "p5", "p7", "p8", "p9", "pa", "pb"];
+  for (const id of grouped) g.settle(id, false, { content: [] });
+  draw(grouped); // p6 is drawn by its own tool
+  const shown = grouped.map((id) => draw([id]).join());
+  assert.deepEqual(shown, [" ⏺ Read 1 file", " ⏺ Read 1 file", " ⏺ Read 1 file", " ⏺ Read 2 files", "", " ⏺ Read 2 files", "", " ⏺ Read 2 files", "", " ⏺ Read 1 file"]);
+});
+
+test("groups: thinking Pi draws splits a group; hidden, it does not", (t) => {
+  const g = groups(t);
+  g.track(said(toolCall("h1")));
+  g.track(said(thinking, toolCall("h2")));
+  g.track(said(thinking)); // a message with only thinking
+  g.track(said(toolCall("h3")));
+  for (const id of ["h1", "h2", "h3"]) g.settle(id, false, { content: [] });
+  assert.deepEqual(draw(["h1", "h2", "h3"]), [" ⏺ thought · read 3 files"]);
+  td.thinkingShown(said(thinking, toolCall("h2")), true, true); // clicked open while thinking is hidden, reported by Pi's renderer
+  assert.deepEqual(draw(["h1", "h2", "h3"]), [" ⏺ Read 1 file", " ⏺ thought · read 2 files"]);
+  td.thinkingShown(said(thinking, toolCall("h3")), false, false); // Ctrl+T: the message with only thinking is drawn too
+  assert.deepEqual(draw(["h1", "h2", "h3"]), [" ⏺ Read 1 file", " ⏺ thought · read 1 file", " ⏺ thought · read 1 file"]);
+  td.thinkingShown(said(thinking, toolCall("h2")), false, true);
+  td.thinkingShown(said(thinking, toolCall("h3")), false, true);
+  assert.deepEqual(draw(["h1", "h2", "h3"]), [" ⏺ thought · read 3 files"]);
+});
+
+test("groups: a finished message with only thinking leads its run's summary with thought", (t) => {
+  const g = groups(t);
+  g.track(said(toolCall("o1")));
+  g.settle("o1", false, { content: [] });
+  assert.deepEqual(draw(["o1"]), [" ⏺ Read 1 file"]);
+  g.track(said(thinking), true); // still streaming: it may yet call tools
+  assert.deepEqual(draw(["o1"]), [" ⏺ Read 1 file"]);
+  g.track({ ...said(thinking), stopReason: "stop" });
+  assert.deepEqual(draw(["o1"]), [" ⏺ thought · read 1 file"]);
+});
+
+test("groups: a message that gains text after joining a run leaves it", (t) => {
+  const g = groups(t);
+  g.track(said(toolCall("j1")));
+  g.track(said(toolCall("j2")), true);
+  assert.deepEqual(draw(["j1", "j2"]), [" ⠋ Read 2 files"]);
+  g.track(said(toolCall("j2"), { type: "text", text: "Done." }));
+  assert.deepEqual(draw(["j1"]), [" ⠋ Read 1 file"]);
+  assert.deepEqual(draw(["j2"]), [" ⠋ Read 1 file"]);
+});
+
+test("groups: a collapsed group's first call draws its failed calls, which draw nothing themselves", (t) => {
+  const g = groups(t);
+  g.track(said(toolCall("f1"), toolCall("f2"), toolCall("f3")));
+  g.settle("f1", false, { content: [] });
+  g.settle("f2", true, { content: [{ type: "text", text: "ENOENT /w/f2" }] });
+  g.settle("f3", false, { content: [] });
+  draw(["f1", "f2", "f3"]);
+  assert.deepEqual(draw(["f1"]), [" ⏺ Read 3 files · 1 failed", " ⏺ Read(f2)", "   ⎿  Error: ENOENT f2"]);
+  assert.deepEqual([draw(["f2"]), draw(["f3"])], [[], []]);
 });

@@ -110,6 +110,7 @@ class Transcript extends Container {
     // Read on each open, so Ctrl+T in the main chat applies from the next open.
     const settings = SettingsManager.create(source.cwd, getAgentDir());
     this.hide = settings.getHideThinkingBlock();
+    this.groups.showThinking = !this.hide;
     this.pad = settings.getOutputPad();
     this.expanded = ui.getToolsExpanded();
   }
@@ -133,6 +134,8 @@ class Transcript extends Container {
   }
 
   private add(message: any) {
+    // A message drawn between two runs of calls splits them, as in the main chat.
+    if (message.role !== "assistant") this.groups.track(message);
     if (message.role === "user") {
       const text = userText(message);
       if (!text) return;
@@ -210,7 +213,7 @@ class Transcript extends Container {
     const message: any = session?.agent.state.streamingMessage;
     if (message?.role === "assistant") {
       const m = own(message);
-      this.groups.track(m);
+      this.groups.track(m, true);
       if (!this.streaming) {
         this.streaming = { component: new AssistantMessageComponent(undefined, this.hide, getMarkdownTheme(), undefined, this.pad), calls: new Map() };
       }

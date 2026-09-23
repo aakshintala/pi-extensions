@@ -71,12 +71,44 @@ test("a saved transcript groups the same way as the live session", async (t) => 
       .flatMap((c) => c.render(80).map(plain));
 
   const live = transcript();
-  assert.deepEqual(live.slice(0, 5), ["", " ⏺ Read 2 files · 1 failed", "", " ⏺ Read(missing.txt)", `   ⎿  Error: ENOENT: no such file or directory, access 'missing.txt'`]);
-  assert.deepEqual(live.slice(5, 7), ["", " ⏺ Read 1 file"]);
+  // The failed call is drawn by the group's first call, with no blank row (#133).
+  assert.deepEqual(live.slice(0, 4), ["", " ⏺ Read 2 files · 1 failed", " ⏺ Read(missing.txt)", `   ⎿  Error: ENOENT: no such file or directory, access 'missing.txt'`]);
+  assert.deepEqual(live.slice(4, 6), ["", " ⏺ Read 1 file"]);
   assert.deepEqual(live.slice(-2), ["", " ⏺ Read 1 file"]); // ls, not grouped, splits the run
   // As on /resume: groups are forgotten, then registered again from the saved branch.
   await session.extensionRunner.emit({ type: "session_shutdown", reason: "resume" });
   assert.equal(transcript()[1], " ⏺ Read(a.txt)");
+  await session.extensionRunner.emit({ type: "session_start", reason: "resume" });
+  assert.deepEqual(transcript(), live);
+});
+
+test("a run spans tool-only responses until the next prompt, the same live and after the session is reopened (#133)", async (t) => {
+  initTheme("dark", false);
+  const read = (path) => fauxToolCall("read", { path });
+  const toolUse = (...blocks) => fauxAssistantMessage(blocks, { stopReason: "toolUse" });
+  const { session, cwd } = await scriptedSession(t, {
+    replies: [toolUse(read("a.txt")), toolUse(read("a.txt"), read("a.txt")), toolUse(read("a.txt")), fauxAssistantMessage(fauxText("ok")),
+      toolUse(read("a.txt")), fauxAssistantMessage(fauxText("ok"))],
+    extensions: [toolDisplay],
+    tools: ["read"],
+  });
+  writeFileSync(join(cwd, "a.txt"), "one");
+  await session.prompt("first");
+  await session.prompt("second");
+  const results = new Map(session.messages.filter((m) => m.role === "toolResult").map((m) => [m.toolCallId, m]));
+  const calls = session.messages.filter((m) => m.role === "assistant").flatMap((m) => m.content.filter((b) => b.type === "toolCall"));
+  // Pi's chat builds every component, then draws them.
+  const transcript = () =>
+    calls
+      .map((b) => {
+        const c = new ToolExecutionComponent(b.name, b.id, b.arguments, {}, session.getToolDefinition(b.name), { requestRender() {} }, cwd);
+        c.updateResult({ ...results.get(b.id) });
+        return c;
+      })
+      .flatMap((c) => c.render(80).map(plain));
+  const live = transcript();
+  assert.deepEqual(live, ["", " ⏺ Read 4 files", "", " ⏺ Read 1 file"]);
+  await session.extensionRunner.emit({ type: "session_shutdown", reason: "resume" });
   await session.extensionRunner.emit({ type: "session_start", reason: "resume" });
   assert.deepEqual(transcript(), live);
 });

@@ -24,10 +24,11 @@ const REPLIES = [
   "Done.",
 ];
 
-const A_FAILS = `
- ⏺ Edit(a.txt)
+// Collapsed, failed calls sit right under the summary, with no blank rows (#133).
+const A_FAILED = ` ⏺ Edit(a.txt)
    ⎿  Error: Could not find the exact text in a.txt. The old text must match
       exactly including all whitespace and newlines.`;
+const A_FAILS = `\n${A_FAILED}`;
 const calls = (prompt, summary, failures) => `
 
  ${prompt}
@@ -50,7 +51,7 @@ test("tool display: decorated built-ins grouped, visible error, Ctrl+O shows eac
   tui.type("go");
   tui.keys("Enter");
   await tui.waitForEvent("agent_end");
-  await tui.waitForScreen(fill(`${calls("go", "Read 1 file, edited 2 files +3 −2, wrote 1 file +6 · 1 failed", A_FAILS)}
+  await tui.waitForScreen(fill(`${calls("go", "Read 1 file, edited 2 files +3 −2, wrote 1 file +6 · 1 failed", A_FAILED)}
 ${RULE}
 
 ${RULE}
@@ -107,11 +108,10 @@ ${RULE}
   await tui.waitForScreen(fill(`${calls(
     "again",
     "Read 1 file, edited 2 files, wrote 1 file +6 · 2 failed",
-    `
- ⏺ Edit(b.txt)
+    ` ⏺ Edit(b.txt)
    ⎿  Error: Could not find the exact text in b.txt. The old text must match
       exactly including all whitespace and newlines.
-${A_FAILS}`,
+${A_FAILED}`,
   )}
 
  ✓ New session started

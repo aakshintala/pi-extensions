@@ -1,5 +1,5 @@
 // Tool grouping (#56) in a real pi: a run of calls is one live summary line, failed
-// calls show under it, text between calls splits groups, Ctrl+O expands every call,
+// calls show right under it (#133), text between calls splits groups, Ctrl+O expands every call,
 // Esc counts result-less calls as cancelled, and a click toggles one group.
 // Pi draws all of a message's text before its tool calls, so text between two runs
 // shows above both groups, not between them.
@@ -55,7 +55,6 @@ test("a run of calls is one live summary line; failures show under it; text make
  Then:
 
  ${bullet} Read 1 file, edited 2 files +3 −2, waited on 1 file · 1 failed
-
  ⏺ Edit(a.txt)
    ⎿  Error: Could not find the exact text in a.txt. The old text must match
       exactly including all whitespace and newlines.
@@ -77,6 +76,7 @@ ${RULE}
 
 
 
+
 `);
 
   writeFileSync(join(tui.cwd, "go"), "");
@@ -89,6 +89,7 @@ ${RULE}
 ${RULE}
 ~/cwd
 ↑141 ↓64 R2 W141 CH0.7% 0.2%/128k (auto)                               harness-1
+
 
 
 
