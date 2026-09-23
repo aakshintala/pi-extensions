@@ -85,16 +85,25 @@ test("one read takes at most MAX_READ bytes and marks what it skipped", (t) => {
   const source = logSource(path);
   writeFileSync(path, "start\n");
   source.read();
-  const line = "x".repeat(999) + "\n"; // 1000 bytes: the tail stays under MAX_LINES
+  const line = "x".repeat(999) + "\n"; // 1000 bytes
   const count = Math.ceil(MAX_READ / 1000) + 50;
   appendFileSync(path, line.repeat(count) + "last\n");
   source.read();
   const lines = source.lines();
-  assert.equal(lines[0], "start");
-  assert.match(lines[1], /^… \d+ bytes skipped$/);
-  assert.ok(Number(lines[1].match(/\d+/)[0]) >= 50 * 1000, lines[1]);
+  assert.match(lines[0], /^… \d+ bytes skipped$/);
+  assert.ok(Number(lines[0].match(/\d+/)[0]) >= 50 * 1000, lines[0]);
   assert.equal(lines.at(-1), "last");
   assert.ok(lines.length <= MAX_READ / 1000 + 3, `only the tail was read: ${lines.length} lines`);
+});
+
+test("the skip line survives a tail longer than MAX_LINES", (t) => {
+  const path = tempLog(t);
+  const source = logSource(path);
+  writeFileSync(path, "y\n".repeat(MAX_READ)); // 2 MiB of short lines
+  source.read();
+  const lines = source.lines();
+  assert.equal(lines[0], `… ${MAX_READ} bytes skipped`);
+  assert.equal(lines.length, MAX_LINES + 1);
 });
 
 test("a log that cannot be read shows why once, and reading never throws", (t) => {

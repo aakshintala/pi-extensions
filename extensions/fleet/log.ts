@@ -27,11 +27,12 @@ export function logSource(path: string) {
   let partial = ""; // text after the last newline
   let lines: string[] = [];
   let error = "";
+  let skipped = 0; // bytes never read; shown above the lines, outside the MAX_LINES cap
   return {
     /** Complete lines, the unfinished last line up to any sequence cut off at its end, then a read error if any. */
     lines() {
       const out = partial ? [...lines, logLine(partial.slice(0, unfinished(partial)))] : lines;
-      return error ? [...out, error] : out;
+      return [...(skipped ? [`… ${skipped} bytes skipped`] : []), ...out, ...(error ? [error] : [])];
     },
     /** Reads what was appended, at most MAX_READ bytes. Returns whether anything changed. */
     read(): boolean {
@@ -41,12 +42,13 @@ export function logSource(path: string) {
         fd = openSync(path, "r");
         const size = fstatSync(fd).size;
         error = "";
-        if (size < offset) [offset, partial, lines, decoder] = [0, "", [], new StringDecoder("utf8")];
+        if (size < offset) [offset, partial, lines, decoder, skipped] = [0, "", [], new StringDecoder("utf8"), 0];
         if (size === offset) return error !== before;
         let cut = false; // reading from mid-file: the first line is partial
         if (size - offset > MAX_READ) {
-          lines.push(`… ${size - MAX_READ - offset + Buffer.byteLength(partial)} bytes skipped`);
-          [offset, partial, decoder, cut] = [size - MAX_READ, "", new StringDecoder("utf8"), true];
+          // The tail replaces what was shown: those lines are older than the gap.
+          skipped += size - MAX_READ - offset + Buffer.byteLength(partial);
+          [offset, partial, lines, decoder, cut] = [size - MAX_READ, "", [], new StringDecoder("utf8"), true];
         }
         const buffer = Buffer.alloc(size - offset);
         const n = readSync(fd, buffer, 0, buffer.length, offset);
@@ -54,7 +56,7 @@ export function logSource(path: string) {
         const split = (partial + decoder.write(buffer.subarray(0, n))).replace(/\r\n/g, "\n").split("\n");
         partial = split.pop()!;
         if (cut) split.shift();
-        lines.push(...split.map(logLine));
+        lines.push(...split.slice(-MAX_LINES).map(logLine)); // a spread of every line in 1 MiB can overflow the stack
         if (lines.length > MAX_LINES) lines = lines.slice(-MAX_LINES);
         return true;
       } catch (e) {
