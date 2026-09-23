@@ -1,8 +1,7 @@
-// Tool display (spec #40, ticket #55): the built-in read, edit, write and ls tools,
+// Tool display (spec #40, ticket #55): the built-in read, edit and write tools,
 // built from Pi's own definitions and drawn in the shared style.
 import {
   createEditToolDefinition,
-  createLsToolDefinition,
   createReadToolDefinition,
   createWriteToolDefinition,
   type ExtensionAPI,
@@ -55,22 +54,16 @@ export const RENDERERS: Record<string, ReturnType<typeof toolRenderers>> = {
       return { summary: `Wrote ${body.length} ${plural(body.length, "line")}`, body: body.map((l) => theme.fg("toolOutput", l)) };
     },
   }),
-  ls: toolRenderers({
-    title: "List",
-    arg: (a: any, cwd) => shortPath(a.path ?? ".", cwd),
-    result: (r: any, _a, _e, theme) => {
-      const text = resultText(r);
-      const body = text.trim() === "(empty directory)" ? [] : textLines(text);
-      return { summary: `Listed ${body.length} ${plural(body.length, "entry", "entries")}`, body: body.map((l) => theme.fg("toolOutput", l)) };
-    },
-  }),
 };
 
 export default function (pi: ExtensionAPI) {
   // Execution stays Pi's own (each built-in resolves paths against the call's ctx.cwd);
   // only the renderers change. Registering a built-in's name replaces the built-in.
+  // Not ls: Pi activates every registered extension tool, and ls is off by default,
+  // so registering it would add prompt tokens. It keeps Pi's look when enabled.
+  // read uses the factory's autoResizeImages default: extensions cannot read Pi's setting.
   const cwd = process.cwd();
-  for (const def of [createReadToolDefinition(cwd), createEditToolDefinition(cwd), createWriteToolDefinition(cwd), createLsToolDefinition(cwd)]) {
+  for (const def of [createReadToolDefinition(cwd), createEditToolDefinition(cwd), createWriteToolDefinition(cwd)]) {
     pi.registerTool({ ...def, ...RENDERERS[def.name] } as any);
   }
 }

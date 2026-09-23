@@ -6,7 +6,6 @@
     "get_quotas": 100,
     "read": 180,
     "edit": 420,
-    "write": 110,
-    "ls": 110
+    "write": 110
   }
 }

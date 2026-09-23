@@ -43,7 +43,7 @@ settings.onChange((key, value) => { /* apply */ });
 ### `tool-display/`
 
 The rig's tool style (spec #40), Claude Code-like. Rig tools and the built-in
-`read`/`edit`/`write`/`ls` render through it.
+`read`/`edit`/`write` render through it.
 
 ```ts
 import { toolRenderers, plural } from "../../shared/tool-display/index.ts";

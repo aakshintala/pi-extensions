@@ -16,4 +16,4 @@ pi install /path/to/pi-rig
 | [status](extensions/status/README.md) | Quota headroom from QuotaBar.app via `get_quotas` and `/quota` | [#38](https://github.com/aakshintala/pi-rig/issues/38) |
 | [rig](extensions/rig/README.md) | `/rig` settings menu over every extension's `rig.json` section | [#32](https://github.com/aakshintala/pi-rig/issues/32) |
 | [fleet](extensions/fleet/README.md) | FleetView: one list below the editor of all running background work | [#29](https://github.com/aakshintala/pi-rig/issues/29) |
-| [tool-display](extensions/tool-display/README.md) | Claude Code-style call lines, collapsed results and edit diffs for the built-in `read`, `edit`, `write` and `ls` | [#40](https://github.com/aakshintala/pi-rig/issues/40) |
+| [tool-display](extensions/tool-display/README.md) | Claude Code-style call lines, collapsed results and edit diffs for the built-in `read`, `edit` and `write` | [#40](https://github.com/aakshintala/pi-rig/issues/40) |

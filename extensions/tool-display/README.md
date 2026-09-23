@@ -1,6 +1,6 @@
 # tool-display
 
-Draws the built-in `read`, `edit`, `write` and `ls` calls in the rig's shared
+Draws the built-in `read`, `edit` and `write` calls in the rig's shared
 tool style (`shared/tool-display/`), the way Claude Code shows them:
 
 ```
@@ -20,12 +20,14 @@ tool style (`shared/tool-display/`), the way Claude Code shows them:
   characters show no diff.
 - **Errors always shown.** A failed call shows `Error:` and the message, wrapped
   to the terminal width.
-- **Pi's own tools.** `read`, `edit`, `write` and `ls` are built from Pi's
+- **Pi's own tools.** `read`, `edit` and `write` are built from Pi's
   exported tool definitions, so their descriptions, parameters and execution
   are Pi's. Registering them under the same names replaces the built-ins; only
-  the rendering changes. Pi activates extension tools by default, so `ls`,
-  inactive as a built-in, is active (about 100 prompt tokens). `read` always
-  resizes images (the built-in default), whatever Pi's image setting says.
+  the rendering changes. `read` always resizes images (the built-in default):
+  extensions cannot read Pi's image setting.
+- **Not `ls`.** Pi activates every tool an extension registers, and `ls` is
+  off by default, so registering it would add prompt tokens. When you enable
+  `ls`, it keeps Pi's own look.
 
 No commands, keys or settings.
 

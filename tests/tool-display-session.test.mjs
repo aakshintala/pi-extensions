@@ -29,10 +29,15 @@ test("read runs as Pi's read, renders in the shared style, and is registered onc
     c.updateResult({ content: result.content, details: result.details, isError: result.isError });
     return c.render(80).map(plain).filter(Boolean);
   };
-  const names = () => session.getAllTools().map((t) => t.name).filter((n) => ["read", "edit", "write", "ls"].includes(n)).sort();
+  const names = () => session.getAllTools().map((t) => t.name).filter((n) => ["read", "edit", "write"].includes(n)).sort();
   for (const when of ["start", "after reload"]) {
     assert.deepEqual(render(), [" ⏺ Read(a.txt)", "   ⎿  Read 2 lines"], when);
-    assert.deepEqual(names(), ["edit", "ls", "read", "write"], when);
+    assert.deepEqual(names(), ["edit", "read", "write"], when);
     if (when === "start") await session.reload();
   }
+});
+
+test("the rig adds no active tools to Pi's defaults", async (t) => {
+  const { session } = await scriptedSession(t, { extensions: [toolDisplay] });
+  assert.deepEqual(session.getActiveToolNames().sort(), ["bash", "edit", "read", "write"]);
 });
