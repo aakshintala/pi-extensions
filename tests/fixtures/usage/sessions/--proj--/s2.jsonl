@@ -1,0 +1,3 @@
+{"type":"session","id":"s2","cwd":"/proj","timestamp":"2026-09-10T04:00:00.000Z"}
+{"type":"thinking_level_change","id":"k","timestamp":"2026-09-10T04:00:01.000Z","thinkingLevel":"high"}
+{"type":"message","id":"a","timestamp":"2026-09-10T04:30:00.000Z","message":{"role":"assistant","provider":"p2","model":"m2","usage":{"input":1000,"output":200,"cacheRead":5000,"cacheWrite":0,"cost":{"total":5}}}}

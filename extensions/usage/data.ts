@@ -1,7 +1,7 @@
 /**
- * Data collection, caching, and insights for the /usage dashboard.
+ * Data collection and caching for the /usage dashboard.
  *
- * Performance model (see CHANGELOG 0.4.0):
+ * Performance model (upstream CHANGELOG 0.4.0):
  * - Session JSONL files are scanned at the buffer level. Only lines relevant
  *   to assistant or auxiliary accounting are decoded and JSON.parsed. Ordinary
  *   multi-megabyte tool results are skipped; accounting-bearing large results
@@ -46,75 +46,9 @@ export interface TotalStats extends BaseStats {
 	sessions: number;
 }
 
-export interface Insight {
-	/** Structure insights always show; alarms fire only when material. */
-	kind: "structure" | "alarm";
-	/** Leading stat, already formatted (e.g. "34%", "$446", "1.4×"). */
-	stat: string;
-	headline: string;
-	/** Dimmed follow-up line; empty string renders nothing. */
-	advice: string;
-}
-
-export interface PeriodInsights {
-	insights: Insight[];
-}
-
-interface CostCount {
-	cost: number;
-	messages: number;
-}
-
-interface PeriodRawData {
-	/** All recorded cost, including usage reported by tools and summaries. */
-	totalCost: number;
-	/** Cost attached to assistant messages, used as the turn-insight denominator. */
-	assistantCost: number;
-	/** Usage reported by tool results, compactions, and branch summaries. */
-	auxiliaryCost: number;
-	/** Messages at ≥ CTX_TAX_THRESHOLD context. */
-	ctxHigh: CostCount;
-	/** Messages below CTX_LOW_THRESHOLD context (comparison group). */
-	ctxLow: CostCount;
-	projectCosts: Map<string, number>;
-	sessionCosts: Map<string, number>;
-	/** Cost of each session's first-ever message falling in this period. */
-	upfrontCost: number;
-	/** Cache misses after >TTL_GAP_MS idle — resuming after the cache expired. */
-	ttlMissCost: number;
-	/** Cache misses right after a mid-session model switch (no idle gap). */
-	modelSwitchMissCost: number;
-	/** Cache misses with no idle gap, compaction, or model switch — true prefix changes. */
-	prefixMissCost: number;
-	reasoningTokens: number;
-	outputTokens: number;
-	cacheReadTokens: number;
-	freshTokens: number;
-}
-
-/** Per-message adjacency info, computed on raw file order before dedupe. */
-interface MessageMeta {
-	/** Gap to the previous assistant message in the same file; -1 when unknown. */
-	gapMs: number;
-	/** Context size of the previous assistant message in the same file; 0 when first. */
-	prevCtx: number;
-	/** True when the provider/model differs from the previous assistant message. */
-	modelSwitched: boolean;
-	/** True for the first deduped message of a session across all its files. */
-	isSessionStart: boolean;
-}
-
-export interface TrendInfo {
-	/** Cost over the last 7 calendar days including today. */
-	last7Cost: number;
-	/** Average weekly cost over the prior 28 days. */
-	priorWeeklyPace: number;
-}
-
 export interface TimeFilteredStats {
 	providers: Map<string, ProviderStats>;
 	totals: TotalStats;
-	insights: PeriodInsights;
 }
 
 /**
@@ -194,8 +128,6 @@ export interface SessionMessage extends UsageAmount {
 	/** Session entry id used to dedupe copied auxiliary entries; empty for assistant messages. */
 	sourceId: string;
 	timestamp: number;
-	/** The request followed a compaction or context edit that intentionally changed its prefix. */
-	afterContextChange: boolean;
 }
 
 export interface ChildToolUsage {
@@ -232,17 +164,19 @@ export interface ParsedSessionFile {
 // Paths
 // =============================================================================
 
-export function getAgentDir(): string {
-	// Replicate Pi's logic: respect PI_CODING_AGENT_DIR env var
-	return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+/**
+ * The folder holding session files, resolved the way Pi does:
+ * PI_CODING_AGENT_SESSION_DIR, then the `sessionDir` setting, then
+ * `<agentDir>/sessions`. A custom folder is scanned whole.
+ */
+export function resolveSessionsDir(agentDir: string, sessionDirSetting?: string, env: NodeJS.ProcessEnv = process.env): string {
+	const fromEnv = env.PI_CODING_AGENT_SESSION_DIR;
+	if (fromEnv) return fromEnv === "~" ? homedir() : fromEnv.startsWith("~/") ? join(homedir(), fromEnv.slice(2)) : fromEnv;
+	return sessionDirSetting || join(agentDir, "sessions");
 }
 
-export function getSessionsDir(): string {
-	return join(getAgentDir(), "sessions");
-}
-
-export function getDefaultCachePath(): string {
-	return join(getAgentDir(), "usage-extension-cache.json");
+export function usageCachePath(agentDir: string): string {
+	return join(agentDir, "usage-extension-cache.json");
 }
 
 // =============================================================================
@@ -296,8 +230,6 @@ const PATTERN_THINKING_COMPACT = Buffer.from('"type":"thinking_level_change"');
 const PATTERN_THINKING_SPACED = Buffer.from('"type": "thinking_level_change"');
 const PATTERN_COMPACTION_COMPACT = Buffer.from('"type":"compaction"');
 const PATTERN_COMPACTION_SPACED = Buffer.from('"type": "compaction"');
-const PATTERN_CONTEXT_EDIT_COMPACT = Buffer.from('"type":"context_edit"');
-const PATTERN_CONTEXT_EDIT_SPACED = Buffer.from('"type": "context_edit"');
 const PATTERN_BRANCH_SUMMARY_COMPACT = Buffer.from('"type":"branch_summary"');
 const PATTERN_BRANCH_SUMMARY_SPACED = Buffer.from('"type": "branch_summary"');
 // pi-subagents versions predating Pi 0.81 persisted child usage in details but
@@ -315,16 +247,20 @@ function finiteNumber(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-function parseUsageAmount(value: unknown): UsageAmount | null {
+/** Cost as recorded: a number, `{ total }`, or `{ input, output, cacheRead, cacheWrite }` without a total. */
+export function parseCost(value: unknown): number {
+	if (typeof value === "number") return finiteNumber(value);
+	if (!value || typeof value !== "object") return 0;
+	const parts = value as Record<string, unknown>;
+	if (typeof parts.total === "number") return finiteNumber(parts.total);
+	return finiteNumber(parts.input) + finiteNumber(parts.output) + finiteNumber(parts.cacheRead) + finiteNumber(parts.cacheWrite);
+}
+
+/** The one parser for every usage shape: assistant messages, tool results, compactions and summaries. */
+export function parseUsageAmount(value: unknown): UsageAmount | null {
 	if (!value || typeof value !== "object") return null;
 	const persisted = value as Record<string, unknown>;
-	const costValue = persisted.cost;
-	const cost =
-		typeof costValue === "number"
-			? finiteNumber(costValue)
-			: costValue && typeof costValue === "object"
-				? finiteNumber((costValue as Record<string, unknown>).total)
-				: 0;
+	const cost = parseCost(persisted.cost);
 	const usage = {
 		cost,
 		input: finiteNumber(persisted.input),
@@ -355,7 +291,6 @@ function auxiliaryMessage(usage: UsageAmount, timestamp: number, sourceId: strin
 		sourceId,
 		...usage,
 		timestamp,
-		afterContextChange: false,
 	};
 }
 
@@ -640,12 +575,10 @@ function lineMightBeRelevant(line: Buffer): boolean {
 		head.includes(PATTERN_SESSION_COMPACT) ||
 		head.includes(PATTERN_THINKING_COMPACT) ||
 		head.includes(PATTERN_COMPACTION_COMPACT) ||
-		head.includes(PATTERN_CONTEXT_EDIT_COMPACT) ||
 		head.includes(PATTERN_BRANCH_SUMMARY_COMPACT) ||
 		head.includes(PATTERN_SESSION_SPACED) ||
 		head.includes(PATTERN_THINKING_SPACED) ||
 		head.includes(PATTERN_COMPACTION_SPACED) ||
-		head.includes(PATTERN_CONTEXT_EDIT_SPACED) ||
 		head.includes(PATTERN_BRANCH_SUMMARY_SPACED)
 	);
 }
@@ -665,7 +598,6 @@ export async function parseSessionBuffer(buffer: Buffer, signal?: AbortSignal): 
 	// message of a session. Replaying them in append order attributes each message
 	// to the level active when it was produced.
 	let thinkingLevel = "";
-	let contextChangePending = false;
 
 	let start = 0;
 	let lineNumber = 0;
@@ -697,35 +629,22 @@ export async function parseSessionBuffer(buffer: Buffer, signal?: AbortSignal): 
 					if (typeof entry.cwd === "string") cwd = entry.cwd;
 				} else if (entry.type === "thinking_level_change") {
 					if (typeof entry.thinkingLevel === "string") thinkingLevel = entry.thinkingLevel;
-				} else if (entry.type === "compaction") {
-					const usage = parseUsageAmount(entry.usage);
-					if (usage) messages.push(auxiliaryMessage(usage, parsedTimestamp(undefined, entry.timestamp), typeof entry.id === "string" ? entry.id : ""));
-					contextChangePending = true;
-				} else if (entry.type === "context_edit") {
-					contextChangePending = true;
-				} else if (entry.type === "branch_summary") {
+				} else if (entry.type === "compaction" || entry.type === "branch_summary") {
 					const usage = parseUsageAmount(entry.usage);
 					if (usage) messages.push(auxiliaryMessage(usage, parsedTimestamp(undefined, entry.timestamp), typeof entry.id === "string" ? entry.id : ""));
 				} else if (entry.type === "message" && entry.message?.role === "assistant") {
 					const msg = entry.message;
 					if (msg.usage && msg.provider && msg.model) {
-						const fallbackTs = entry.timestamp ? new Date(entry.timestamp).getTime() : 0;
+						const usage = parseUsageAmount(msg.usage) ?? { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 };
 						messages.push({
 							provider: msg.provider,
 							model: msg.model,
 							thinkingLevel,
 							source: "assistant",
 							sourceId: "",
-							cost: msg.usage.cost?.total || 0,
-							input: msg.usage.input || 0,
-							output: msg.usage.output || 0,
-							cacheRead: msg.usage.cacheRead || 0,
-							cacheWrite: msg.usage.cacheWrite || 0,
-							reasoning: msg.usage.reasoning || 0,
-							timestamp: msg.timestamp || (Number.isNaN(fallbackTs) ? 0 : fallbackTs),
-							afterContextChange: contextChangePending,
+							...usage,
+							timestamp: parsedTimestamp(msg.timestamp, entry.timestamp),
 						});
-						contextChangePending = false;
 					}
 				} else if (entry.type === "message" && entry.message?.role === "toolResult") {
 					const msg = entry.message;
@@ -747,6 +666,9 @@ export async function parseSessionBuffer(buffer: Buffer, signal?: AbortSignal): 
 // On-disk cache
 // =============================================================================
 
+// Upstream's version 6 format, kept so the cache survives the port. Pi always
+// writes assistant cost as `{ total }`, so entries parsed by upstream's
+// narrower assistant cost read stay valid.
 const CACHE_VERSION = 6;
 
 type CachedMessageTuple = [
@@ -760,7 +682,7 @@ type CachedMessageTuple = [
 	timestamp: number,
 	thinkingLevelIdx: number,
 	reasoning: number,
-	afterContextChange: 0 | 1,
+	unused: 0 | 1, // was afterContextChange, read only by the cut Insights view
 	auxiliary: 0 | 1,
 	sourceIdIdx: number,
 ];
@@ -862,7 +784,6 @@ export async function loadUsageCache(cachePath: string): Promise<Map<string, Cac
 				cacheWrite: Number(tuple[6]) || 0,
 				timestamp: Number(tuple[7]) || 0,
 				reasoning: Number(tuple[9]) || 0,
-				afterContextChange: tuple[10] === 1,
 			});
 		}
 		if (!valid) continue;
@@ -961,7 +882,7 @@ export async function saveUsageCache(cachePath: string, states: Map<string, Cach
 				m.timestamp,
 				intern(m.thinkingLevel),
 				m.reasoning,
-				m.afterContextChange ? 1 : 0,
+				0,
 				m.source === "auxiliary" ? 1 : 0,
 				intern(m.source === "auxiliary" ? m.sourceId : ""),
 			]),
@@ -1007,54 +928,7 @@ function emptyTimeFilteredStats(): TimeFilteredStats {
 	return {
 		providers: new Map(),
 		totals: { sessions: 0, messages: 0, cost: 0, tokens: emptyTokens() },
-		insights: { insights: [] },
 	};
-}
-
-function emptyPeriodRawData(): PeriodRawData {
-	return {
-		totalCost: 0,
-		assistantCost: 0,
-		auxiliaryCost: 0,
-		ctxHigh: { cost: 0, messages: 0 },
-		ctxLow: { cost: 0, messages: 0 },
-		projectCosts: new Map(),
-		sessionCosts: new Map(),
-		upfrontCost: 0,
-		ttlMissCost: 0,
-		modelSwitchMissCost: 0,
-		prefixMissCost: 0,
-		reasoningTokens: 0,
-		outputTokens: 0,
-		cacheReadTokens: 0,
-		freshTokens: 0,
-	};
-}
-
-/**
- * Collapse a session cwd to a short, stable project label: `~` for the home
- * directory, up to two path segments below home (worktrees collapse to their
- * repository), absolute paths elsewhere.
- */
-export function projectLabelFromCwd(cwd: string): string {
-	if (!cwd) return "(unknown)";
-	// Collapse any home-directory prefix to "~", not just the current user's —
-	// session stores merged from other machines can carry a different username.
-	const home = homedir();
-	let homePrefix: string | null = null;
-	if (cwd === home || cwd.startsWith(home + "/")) {
-		homePrefix = home;
-	} else {
-		const m = /^(\/Users\/[^/]+|\/home\/[^/]+)(?=\/|$)/.exec(cwd);
-		if (m) homePrefix = m[1]!;
-	}
-	if (homePrefix !== null && cwd.length <= homePrefix.length) return "~";
-	let rel = homePrefix !== null ? cwd.slice(homePrefix.length + 1) : cwd;
-	const wt = rel.indexOf("/.worktrees/");
-	if (wt !== -1) rel = rel.slice(0, wt);
-	const parts = rel.split("/").filter(Boolean);
-	const label = parts.slice(0, 2).join("/");
-	return homePrefix !== null ? `~/${label}` : `/${label}`;
 }
 
 function emptyUsageData(bounds: PeriodBounds): UsageData {
@@ -1069,11 +943,16 @@ function emptyUsageData(bounds: PeriodBounds): UsageData {
 	};
 }
 
-const HOUR_MS = 3_600_000;
+/** Start of the local hour holding `ms`: the same local clock the period bounds use. */
+export function localHourStart(ms: number): number {
+	const d = new Date(ms);
+	d.setMinutes(0, 0, 0);
+	return d.getTime();
+}
 
 function addToHourlyBuckets(hourly: Map<number, Map<HourlyKey, HourlyCell>>, msg: SessionMessage): void {
 	if (msg.timestamp <= 0) return; // Unknown time can't be placed on a time axis.
-	const hour = Math.floor(msg.timestamp / HOUR_MS) * HOUR_MS;
+	const hour = localHourStart(msg.timestamp);
 	let bucket = hourly.get(hour);
 	if (!bucket) {
 		bucket = new Map();
@@ -1094,13 +973,7 @@ function addToHourlyBuckets(hourly: Map<number, Map<HourlyKey, HourlyCell>>, msg
 	cell.reasoning += msg.reasoning;
 }
 
-// Helper to accumulate stats into a target
-function accumulateStats(
-	target: BaseStats,
-	cost: number,
-	tokens: { total: number; input: number; output: number; cacheRead: number; cacheWrite: number },
-	countMessage: boolean
-): void {
+function accumulateStats(target: BaseStats, cost: number, tokens: TokenStats, countMessage: boolean): void {
 	if (countMessage) target.messages++;
 	target.cost += cost;
 	target.tokens.total += tokens.total;
@@ -1110,138 +983,57 @@ function accumulateStats(
 	target.tokens.cacheWrite += tokens.cacheWrite;
 }
 
-function getPeriodsForTimestamp(
-	timestamp: number,
-	todayMs: number,
-	weekStartMs: number,
-	lastWeekStartMs: number,
-	last30DaysStartMs: number
-): TabName[] {
+function getPeriodsForTimestamp(timestamp: number, bounds: PeriodBounds): TabName[] {
 	const periods: TabName[] = ["allTime"];
-	if (timestamp >= todayMs) periods.push("today");
-	if (timestamp >= weekStartMs) {
+	if (timestamp >= bounds.todayMs) periods.push("today");
+	if (timestamp >= bounds.weekStartMs) {
 		periods.push("thisWeek");
-	} else if (timestamp >= lastWeekStartMs) {
+	} else if (timestamp >= bounds.lastWeekStartMs) {
 		periods.push("lastWeek");
 	}
-	if (timestamp >= last30DaysStartMs) periods.push("last30Days");
+	if (timestamp >= bounds.last30DaysStartMs) periods.push("last30Days");
 	return periods;
 }
 
-const DAY_MS = 24 * HOUR_MS;
-const PROGRESS_REPORT_EVERY = 100;
+/** pi's built-in test providers never send anything to a real API. */
+const EXCLUDED_PROVIDERS = new Set(["faux-provider", "fake-provider"]);
 
-function addMessagesToUsageData(
-	data: UsageData,
-	sessionId: string,
-	project: string,
-	messages: SessionMessage[],
-	meta: MessageMeta[],
-	todayMs: number,
-	weekStartMs: number,
-	lastWeekStartMs: number,
-	last30DaysStartMs: number,
-	rawByPeriod: Record<TabName, PeriodRawData>,
-	costByDayIdx: Map<number, number>
-): void {
-	const sessionContributed = { today: false, thisWeek: false, lastWeek: false, last30Days: false, allTime: false };
-
-	for (let mi = 0; mi < messages.length; mi++) {
-		const msg = messages[mi]!;
-		const mm = meta[mi]!;
-
-		// pi's built-in test providers never call a real API — keep them out of stats.
+function addMessagesToUsageData(data: UsageData, sessionId: string, messages: SessionMessage[]): void {
+	const sessionContributed = new Set<TabName>();
+	for (const msg of messages) {
 		if (EXCLUDED_PROVIDERS.has(msg.provider)) continue;
-
-		// Day-indexed cost totals power the burn-trend insight.
-		if (msg.timestamp > 0) {
-			const dayIdx = Math.floor((msg.timestamp - todayMs) / DAY_MS);
-			costByDayIdx.set(dayIdx, (costByDayIdx.get(dayIdx) ?? 0) + msg.cost);
-		}
-
 		addToHourlyBuckets(data.hourly, msg);
-
-		const periods = getPeriodsForTimestamp(msg.timestamp, todayMs, weekStartMs, lastWeekStartMs, last30DaysStartMs);
-		const tokens = {
-			// Count fresh tokens processed this turn.
-			// Include cacheWrite because those prompt tokens were newly written and billed.
-			// Exclude cacheRead because repeated cache hits would otherwise dominate totals.
+		const tokens: TokenStats = {
+			// Fresh tokens: cacheWrite was newly written and billed; cacheRead
+			// is excluded because repeated cache hits would dominate totals.
 			total: msg.input + msg.output + msg.cacheWrite,
 			input: msg.input,
 			output: msg.output,
 			cacheRead: msg.cacheRead,
 			cacheWrite: msg.cacheWrite,
 		};
-
-		for (const period of periods) {
+		const isAssistant = msg.source === "assistant";
+		for (const period of getPeriodsForTimestamp(msg.timestamp, data.bounds)) {
 			const stats = data[period];
-
 			let providerStats = stats.providers.get(msg.provider);
 			if (!providerStats) {
 				providerStats = emptyProviderStats();
 				stats.providers.set(msg.provider, providerStats);
 			}
-
 			let modelStats = providerStats.models.get(msg.model);
 			if (!modelStats) {
 				modelStats = emptyModelStats();
 				providerStats.models.set(msg.model, modelStats);
 			}
-
-			const isAssistant = msg.source === "assistant";
 			modelStats.sessions.add(sessionId);
 			accumulateStats(modelStats, msg.cost, tokens, isAssistant);
-
 			providerStats.sessions.add(sessionId);
 			accumulateStats(providerStats, msg.cost, tokens, isAssistant);
-
 			accumulateStats(stats.totals, msg.cost, tokens, isAssistant);
-			sessionContributed[period] = true;
-
-			const raw = rawByPeriod[period];
-			raw.totalCost += msg.cost;
-			raw.projectCosts.set(project, (raw.projectCosts.get(project) ?? 0) + msg.cost);
-			raw.sessionCosts.set(sessionId, (raw.sessionCosts.get(sessionId) ?? 0) + msg.cost);
-
-			// Auxiliary calls belong in accounting totals, project/session mix, and
-			// burn trend. They are not assistant turns, so do not let their synthetic
-			// model identity or nested context distort turn/cache insights.
-			if (!isAssistant) {
-				raw.auxiliaryCost += msg.cost;
-				continue;
-			}
-			raw.assistantCost += msg.cost;
-
-			const ctx = msg.input + msg.cacheRead + msg.cacheWrite;
-			if (ctx >= CTX_TAX_THRESHOLD) {
-				raw.ctxHigh.cost += msg.cost;
-				raw.ctxHigh.messages++;
-			} else if (ctx < CTX_LOW_THRESHOLD) {
-				raw.ctxLow.cost += msg.cost;
-				raw.ctxLow.messages++;
-			}
-			if (mm.isSessionStart) raw.upfrontCost += msg.cost;
-			if (
-				!msg.afterContextChange &&
-				mm.prevCtx >= MISS_MIN_PREV_CONTEXT &&
-				msg.cacheRead < Math.min(MISS_MAX_CACHE_READ, 0.3 * mm.prevCtx)
-			) {
-				if (mm.gapMs > TTL_GAP_MS) raw.ttlMissCost += msg.cost;
-				else if (mm.gapMs >= 0 && mm.modelSwitched) raw.modelSwitchMissCost += msg.cost;
-				else if (mm.gapMs >= 0) raw.prefixMissCost += msg.cost;
-			}
-			raw.reasoningTokens += msg.reasoning;
-			raw.outputTokens += msg.output;
-			raw.cacheReadTokens += msg.cacheRead;
-			raw.freshTokens += msg.input + msg.cacheWrite;
+			sessionContributed.add(period);
 		}
 	}
-
-	if (sessionContributed.today) data.today.totals.sessions++;
-	if (sessionContributed.thisWeek) data.thisWeek.totals.sessions++;
-	if (sessionContributed.lastWeek) data.lastWeek.totals.sessions++;
-	if (sessionContributed.last30Days) data.last30Days.totals.sessions++;
-	if (sessionContributed.allTime) data.allTime.totals.sessions++;
+	for (const period of sessionContributed) data[period].totals.sessions++;
 }
 
 // =============================================================================
@@ -1348,6 +1140,7 @@ function toolUsageMessages(
 const STAT_CONCURRENCY = 16;
 const DEFAULT_PARSE_CONCURRENCY = 4;
 const AGGREGATE_YIELD_EVERY_FILES = 200;
+const PROGRESS_REPORT_EVERY = 100;
 
 export interface CollectProgress {
 	/** Why this pass needs to parse files. */
@@ -1364,20 +1157,19 @@ export interface CollectUsageOptions {
 	signal?: AbortSignal;
 	/** Called once before parsing begins and periodically while files are parsed. */
 	onProgress?: (progress: CollectProgress) => void;
-	/** Defaults to `<agentDir>/sessions`. */
-	sessionsDir?: string;
-	/** Defaults to `<agentDir>/usage-extension-cache.json`. Pass `null` to disable the on-disk cache. */
-	cachePath?: string | null;
+	/** From resolveSessionsDir. */
+	sessionsDir: string;
+	/** From usageCachePath; `null` disables the on-disk cache. */
+	cachePath: string | null;
 	/** Reference time for period bucketing. Defaults to `new Date()`. */
 	now?: Date;
 	parseConcurrency?: number;
 }
 
-export async function collectUsageData(options: CollectUsageOptions = {}): Promise<UsageData | null> {
+export async function collectUsageData(options: CollectUsageOptions): Promise<UsageData | null> {
 	const signal = options.signal;
 	const now = options.now ?? new Date();
-	const sessionsDir = options.sessionsDir ?? getSessionsDir();
-	const cachePath = options.cachePath === undefined ? getDefaultCachePath() : options.cachePath;
+	const { sessionsDir, cachePath } = options;
 	const parseConcurrency = Math.max(1, options.parseConcurrency ?? DEFAULT_PARSE_CONCURRENCY);
 
 	const startOfToday = new Date(now);
@@ -1527,15 +1319,6 @@ export async function collectUsageData(options: CollectUsageOptions = {}): Promi
 
 	// 6. Aggregate in sorted path order with cross-file dedupe.
 	const data = emptyUsageData({ todayMs, weekStartMs, lastWeekStartMs, last30DaysStartMs, nowMs: now.getTime() });
-	const rawByPeriod: Record<TabName, PeriodRawData> = {
-		today: emptyPeriodRawData(),
-		thisWeek: emptyPeriodRawData(),
-		lastWeek: emptyPeriodRawData(),
-		last30Days: emptyPeriodRawData(),
-		allTime: emptyPeriodRawData(),
-	};
-	const costByDayIdx = new Map<number, number>();
-	const seenSessions = new Set<string>();
 	const seenHashes = new Set<string>();
 	const scannedSessions = buildScannedSessionIndex(current);
 	const resolvedToolChildren = resolvedToolChildIdentities(current, scannedSessions);
@@ -1550,20 +1333,11 @@ export async function collectUsageData(options: CollectUsageOptions = {}): Promi
 			if (signal?.aborted) return null;
 		}
 
-		// Deduplicate copied history across branched session files, computing
-		// adjacency metadata (idle gaps, previous context) on the raw file order
-		// so branch copies do not distort miss classification.
+		// Deduplicate history copied across branched session files.
 		const toolMessages = state.parsed.toolUsages.flatMap((tool) => toolUsageMessages(filePath, tool, scannedSessions, resolvedToolChildren));
 		const rawMsgs = toolMessages.length > 0 ? [...state.parsed.messages, ...toolMessages] : state.parsed.messages;
 		const deduped: SessionMessage[] = [];
-		const meta: MessageMeta[] = [];
-		let previousAssistant: SessionMessage | null = null;
 		for (const m of rawMsgs) {
-			// Auxiliary usage is interleaved with conversation entries, but it must
-			// not become the "previous message" for cache-miss classification.
-			const prev = m.source === "assistant" ? previousAssistant : null;
-			if (m.source === "assistant") previousAssistant = m;
-
 			// Pi entry ids survive copied branch history and distinguish parallel
 			// tool results that happen to report identical usage in the same ms.
 			const tokenFingerprint = m.input + m.output + m.cacheRead + m.cacheWrite;
@@ -1574,266 +1348,9 @@ export async function collectUsageData(options: CollectUsageOptions = {}): Promi
 			if (seenHashes.has(hash)) continue;
 			seenHashes.add(hash);
 			deduped.push(m);
-			meta.push({
-				gapMs: prev && prev.timestamp > 0 && m.timestamp > 0 ? m.timestamp - prev.timestamp : -1,
-				prevCtx: prev ? prev.input + prev.cacheRead + prev.cacheWrite : 0,
-				modelSwitched: prev !== null && (prev.provider !== m.provider || prev.model !== m.model),
-				isSessionStart: false,
-			});
 		}
-		if (deduped.length === 0) continue;
-		const firstAssistantIndex = deduped.findIndex((m) => m.source === "assistant");
-		if (firstAssistantIndex !== -1 && !seenSessions.has(state.parsed.sessionId)) {
-			seenSessions.add(state.parsed.sessionId);
-			meta[firstAssistantIndex]!.isSessionStart = true;
-		}
-
-		addMessagesToUsageData(
-			data,
-			state.parsed.sessionId,
-			projectLabelFromCwd(state.parsed.cwd),
-			deduped,
-			meta,
-			todayMs,
-			weekStartMs,
-			lastWeekStartMs,
-			last30DaysStartMs,
-			rawByPeriod,
-			costByDayIdx
-		);
-	}
-
-	// Burn trend: last 7 calendar days vs the average weekly pace of the prior 28.
-	let last7 = 0;
-	let prior28 = 0;
-	for (const [idx, c] of costByDayIdx) {
-		if (idx >= -6) last7 += c;
-		else if (idx >= -34) prior28 += c;
-	}
-	const trend: TrendInfo | null = prior28 > 0 ? { last7Cost: last7, priorWeeklyPace: prior28 / 4 } : null;
-
-	for (const period of TAB_ORDER) {
-		data[period].insights = computeInsights(rawByPeriod[period], trend);
+		if (deduped.length > 0) addMessagesToUsageData(data, state.parsed.sessionId, deduped);
 	}
 
 	return data;
-}
-
-// =============================================================================
-// Insights
-// =============================================================================
-
-// Context tax (structure)
-const CTX_TAX_THRESHOLD = 150_000;
-const CTX_LOW_THRESHOLD = 100_000;
-// Project mix (structure)
-const PROJECT_TOP_COUNT = 3;
-const PROJECT_MAX_DOMINANCE_PERCENT = 90;
-// Reasoning share (structure)
-const REASONING_MIN_PERCENT = 5;
-// Burn trend (structure)
-const TREND_HIGH_RATIO = 1.5;
-const TREND_LOW_RATIO = 0.6;
-// Cache-miss alarms
-const TTL_GAP_MS = 5 * 60_000;
-const MISS_MIN_PREV_CONTEXT = 20_000;
-const MISS_MAX_CACHE_READ = 5_000;
-/** pi's built-in test providers never send anything to a real API. */
-const EXCLUDED_PROVIDERS = new Set(["faux-provider", "fake-provider"]);
-
-const CACHE_MISS_ALARM_PERCENT = 2;
-const CACHE_MISS_ALARM_MIN_COST = 1;
-// Concentration / upfront alarms
-const TOP_SESSION_COUNT = 5;
-const CONCENTRATION_ALARM_PERCENT = 35;
-const UPFRONT_ALARM_PERCENT = 8;
-// Cache-leverage alarm
-const LEVERAGE_FLOOR = 5;
-const LEVERAGE_MIN_COST = 5;
-const LEVERAGE_MIN_FRESH_TOKENS = 1_000_000;
-
-function fmtMoney(v: number): string {
-	if (v >= 1000) return `$${(v / 1000).toFixed(1)}k`;
-	if (v >= 100) return `$${Math.round(v)}`;
-	return `$${v.toFixed(2)}`;
-}
-
-function fmtPercent(p: number): string {
-	return p >= 10 ? `${Math.round(p)}%` : `${p.toFixed(1)}%`;
-}
-
-/**
- * Insights come in two kinds:
- * - structure: always-on decomposition of where the period's cost went.
- * - alarm: fires only when a wasteful pattern is material for the period, so
- *   an all-clear period shows a calm panel instead of a wall of 2% factoids.
- * Periods with zero recorded cost produce an empty list — the UI renders a
- * distinct empty-state for that case.
- */
-function computeInsights(raw: PeriodRawData, trend: TrendInfo | null): PeriodInsights {
-	if (raw.totalCost <= 0) {
-		return { insights: [] };
-	}
-	const total = raw.totalCost;
-	const assistantTotal = raw.assistantCost;
-	const assistantPctLabel = raw.auxiliaryCost > 0 ? "assistant-message cost" : "this period";
-	const insights: Insight[] = [];
-
-	// --- Alarms (listed first) ---
-
-	const ttlPct = assistantTotal > 0 ? (raw.ttlMissCost / assistantTotal) * 100 : 0;
-	if (ttlPct >= CACHE_MISS_ALARM_PERCENT && raw.ttlMissCost >= CACHE_MISS_ALARM_MIN_COST) {
-		insights.push({
-			kind: "alarm",
-			stat: fmtMoney(raw.ttlMissCost),
-			headline: `spent resuming conversations after a break (${fmtPercent(ttlPct)} of ${assistantPctLabel})`,
-			advice:
-				"Sent context is only reusable for a few minutes. After a longer pause, the next message pays to send the whole conversation again. Replying while a session is fresh avoids this.",
-		});
-	}
-
-	const switchPct = assistantTotal > 0 ? (raw.modelSwitchMissCost / assistantTotal) * 100 : 0;
-	if (switchPct >= CACHE_MISS_ALARM_PERCENT && raw.modelSwitchMissCost >= CACHE_MISS_ALARM_MIN_COST) {
-		insights.push({
-			kind: "alarm",
-			stat: fmtMoney(raw.modelSwitchMissCost),
-			headline: `spent switching models mid-conversation (${fmtPercent(switchPct)} of ${assistantPctLabel})`,
-			advice:
-				"Changing model re-sends the whole conversation at full price — the previous model's saved context doesn't transfer. Switching between tasks instead of mid-conversation avoids this.",
-		});
-	}
-
-	const prefixPct = assistantTotal > 0 ? (raw.prefixMissCost / assistantTotal) * 100 : 0;
-	if (prefixPct >= CACHE_MISS_ALARM_PERCENT && raw.prefixMissCost >= CACHE_MISS_ALARM_MIN_COST) {
-		insights.push({
-			kind: "alarm",
-			stat: fmtMoney(raw.prefixMissCost),
-			headline: `spent re-sending conversations mid-session (${fmtPercent(prefixPct)} of ${assistantPctLabel})`,
-			advice:
-				"These messages paid full price for context that had already been sent — with no break, compaction, or model switch to explain it. Usually a tool or workflow is restarting or rewriting conversations. Worth a look if it stays high.",
-		});
-	}
-
-	if (raw.sessionCosts.size > TOP_SESSION_COUNT) {
-		const sortedSessions = Array.from(raw.sessionCosts.values()).sort((a, b) => b - a);
-		const topWeight = sortedSessions.slice(0, TOP_SESSION_COUNT).reduce((sum, c) => sum + c, 0);
-		const topPct = (topWeight / total) * 100;
-		if (topPct >= CONCENTRATION_ALARM_PERCENT) {
-			insights.push({
-				kind: "alarm",
-				stat: fmtMoney(topWeight),
-				headline: `came from just ${TOP_SESSION_COUNT} of your ${raw.sessionCosts.size} sessions (${fmtPercent(topPct)} of this period)`,
-				advice: "A handful of sessions drove most of the spend. The graph view can show what they were doing.",
-			});
-		}
-	}
-
-	const upfrontPct = assistantTotal > 0 ? (raw.upfrontCost / assistantTotal) * 100 : 0;
-	if (upfrontPct >= UPFRONT_ALARM_PERCENT) {
-		insights.push({
-			kind: "alarm",
-			stat: fmtMoney(raw.upfrontCost),
-			headline: `spent on the opening message of new sessions (${fmtPercent(upfrontPct)} of ${assistantPctLabel})`,
-			advice: "A session's first message sends everything from scratch. Fewer, longer sessions cut this overhead.",
-		});
-	}
-
-	if (assistantTotal >= LEVERAGE_MIN_COST && raw.freshTokens >= LEVERAGE_MIN_FRESH_TOKENS) {
-		const leverage = raw.cacheReadTokens / raw.freshTokens;
-		if (leverage < LEVERAGE_FLOOR) {
-			insights.push({
-				kind: "alarm",
-				stat: `${leverage.toFixed(1)}×`,
-				headline: "tokens reused from history for every token paid at full price",
-				advice:
-					"Typical interactive use reuses 10× or more. A low number means conversations keep being sent from scratch — look for workflows that restart sessions.",
-			});
-		}
-	}
-
-	// --- Structure (always-on) ---
-
-	if (raw.auxiliaryCost > 0) {
-		const pct = (raw.auxiliaryCost / total) * 100;
-		if (pct >= 1) {
-			insights.push({
-				kind: "structure",
-				stat: fmtPercent(pct),
-				headline: "of your cost came from usage reported by tools and conversation summaries",
-				advice: "Pi records this separately because it cannot be attributed reliably to a specific provider and model.",
-			});
-		}
-	}
-
-	if (raw.ctxHigh.messages > 0 && assistantTotal > 0) {
-		const pct = (raw.ctxHigh.cost / assistantTotal) * 100;
-		if (pct >= 1) {
-			const avgHigh = raw.ctxHigh.cost / raw.ctxHigh.messages;
-			const avgLow = raw.ctxLow.messages > 0 ? raw.ctxLow.cost / raw.ctxLow.messages : 0;
-			const cmp =
-				avgLow > 0
-					? ` — ${fmtMoney(avgHigh)}/msg vs ${fmtMoney(avgLow)} under ${formatThresholdTokens(CTX_LOW_THRESHOLD)}`
-					: "";
-			insights.push({
-				kind: "structure",
-				stat: fmtPercent(pct),
-				headline: `of your ${raw.auxiliaryCost > 0 ? "assistant-message cost" : "cost"} came from messages with ≥${formatThresholdTokens(CTX_TAX_THRESHOLD)} tokens loaded${cmp}`,
-				advice: "Long conversations cost more per message. /compact mid-task and /clear between tasks keep them lean.",
-			});
-		}
-	}
-
-	if (raw.projectCosts.size >= 2) {
-		const top = [...raw.projectCosts.entries()].sort((a, b) => b[1] - a[1]).slice(0, PROJECT_TOP_COUNT);
-		const topPct = (top[0]![1] / total) * 100;
-		if (topPct < PROJECT_MAX_DOMINANCE_PERCENT) {
-			const rest = top
-				.slice(1)
-				.map(([label, c]) => `${label} ${fmtPercent((c / total) * 100)}`)
-				.join(", ");
-			insights.push({
-				kind: "structure",
-				stat: fmtPercent(topPct),
-				headline: `of your cost was ${top[0]![0]}${rest ? ` — then ${rest}` : ""}`,
-				advice: "",
-			});
-		}
-	}
-
-	if (raw.outputTokens > 0) {
-		const reasoningPct = (raw.reasoningTokens / raw.outputTokens) * 100;
-		if (reasoningPct >= REASONING_MIN_PERCENT) {
-			insights.push({
-				kind: "structure",
-				stat: fmtPercent(reasoningPct),
-				headline: "of your output tokens were hidden reasoning",
-				advice:
-					"Models charge for their behind-the-scenes thinking as output tokens. pi records this only from 0.80.3 (June 2026), so older periods understate it.",
-			});
-		}
-	}
-
-	if (trend && trend.priorWeeklyPace > 0) {
-		const ratio = trend.last7Cost / trend.priorWeeklyPace;
-		const advice =
-			ratio >= TREND_HIGH_RATIO
-				? "Spending is up against your own baseline — the graph view shows what changed."
-				: ratio <= TREND_LOW_RATIO
-					? "Spending is well below your recent baseline."
-					: "";
-		insights.push({
-			kind: "structure",
-			stat: `${ratio.toFixed(1)}×`,
-			headline: `your last 7 days (${fmtMoney(trend.last7Cost)}) vs your prior 4-week pace (${fmtMoney(trend.priorWeeklyPace)}/wk)`,
-			advice,
-		});
-	}
-
-	return { insights };
-}
-
-function formatThresholdTokens(n: number): string {
-	if (n >= 1_000_000) return `${n / 1_000_000}M`;
-	if (n >= 1_000) return `${n / 1_000}k`;
-	return String(n);
 }

@@ -1,0 +1,6 @@
+{"type":"session","id":"s1","cwd":"/proj","timestamp":"2026-09-19T18:35:00.000Z"}
+{"type":"message","id":"2026-09-19T18:40:00.000Z","timestamp":"2026-09-19T18:40:00.000Z","message":{"role":"assistant","provider":"p1","model":"m1","usage":{"input":1,"output":10,"cacheRead":0,"cacheWrite":0,"cost":{"input":0.5,"output":0.5,"cacheRead":0,"cacheWrite":0,"total":1}}}}
+{"type":"message","id":"2026-09-20T05:15:00.000Z","timestamp":"2026-09-20T05:15:00.000Z","message":{"role":"assistant","provider":"p1","model":"m1","usage":{"input":2,"output":10,"cacheRead":0,"cacheWrite":0,"cost":2}}}
+{"type":"message","id":"2026-09-20T05:20:00.000Z","timestamp":"2026-09-20T05:20:00.000Z","message":{"role":"assistant","provider":"p1","model":"m1","usage":{"input":3,"output":10,"cacheRead":0,"cacheWrite":0,"cost":{"input":1,"output":3}}}}
+{"type":"compaction","id":"c1","timestamp":"2026-09-20T05:25:00.000Z","usage":{"input":5,"output":1,"cacheRead":0,"cacheWrite":0,"cost":{"total":8}}}
+{"type":"message","id":"t1","timestamp":"2026-09-20T05:30:00.000Z","message":{"role":"toolResult","toolName":"bash","toolCallId":"x","content":[],"usage":{"input":7,"output":1,"cacheRead":0,"cacheWrite":0,"cost":16},"timestamp":1789882200000}}
