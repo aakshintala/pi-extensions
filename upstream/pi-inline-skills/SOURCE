@@ -1,0 +1,6 @@
+@tifan/pi-inline-skills (https://github.com/tifandotme/pi-extensions/tree/master/packages/pi-inline-skills)
+version 1.0.6, commit 4a1f7ce19080f4a3beaf9c502760f14dccabcd88 (npm gitHead)
+License: MIT (LICENSE, from the repository root at that commit; the npm tarball omits it)
+
+Kept for reference:
+- upstream/pi-inline-skills/src/index.ts: the published source, ported to extensions/inline-skills/

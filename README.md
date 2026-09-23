@@ -26,3 +26,4 @@ pi install /path/to/pi-rig
 | [context](extensions/context/README.md) | `/context`: context usage map and injections inspector | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
 | [clear](extensions/clear/README.md) | `/clear`: starts a new session, as `/new` does | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
 | [theme](extensions/theme/README.md) | `/theme`: Pi's own theme picker with live preview | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
+| [inline-skills](extensions/inline-skills/README.md) | `/skill-name` anywhere in a prompt loads that skill, with mid-prompt autocomplete | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
