@@ -4,7 +4,7 @@ FleetView: one list below the editor of all background work (agents, shell jobs 
 
 - The first row is the main session. Every item follows, and nested items are indented under their parent.
 - Each row shows kind, label, running time and the latest activity. A finished row shows its status and result.
-- An item's detail fields, such as an agent's model, thinking level, tokens and cost, follow its status. On a narrow row they drop from the right, and then the activity or result; the label and status always stay.
+- An item's detail fields, such as an agent's model, thinking level, tokens and cost, follow its status. On a narrow row they drop from the right: once one does not fit, it and everything after it, the activity or result too, is dropped. The label is shortened with `…` so the status always shows.
 - A finished item leaves 30 s after it finishes. While it is selected, open in the viewer or has a running item under it, it stays, and the 30 s count from when that ends. Sending a prompt removes nothing.
 - FleetView shows at most 6 lines. A `… N more` line counts the hidden rows, and the list scrolls to keep the selection visible.
 - FleetView is hidden when nothing is registered.
@@ -58,7 +58,7 @@ Until then Ctrl+B keeps moving the cursor, the hint never shows, and a warning n
 
 | Key | When | Does |
 |---|---|---|
-| Down or Left | Empty prompt | Focuses FleetView |
+| Down or Left | Empty prompt | Focuses FleetView, on the open item, or on `main` when none is open |
 | Up / Down | FleetView focused | Moves the selection |
 | Enter | FleetView focused | Opens the selected row |
 | x | FleetView focused | Stops the selected running or queued item at once, with no confirmation |

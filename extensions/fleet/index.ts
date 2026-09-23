@@ -229,15 +229,23 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
         : (done ? (item.status === "completed" ? "done " : `${item.status} `) : "") +
           duration((item.endedAt ?? registry.now()) - item.startedAt);
     const activity = oneLine(done && item.result !== undefined ? item.result : safeActivity(item));
-    // Detail fields that do not fit are dropped from the right, and the activity takes what is
-    // left if a few columns are (#138). The label and status always stay.
+    // The label and status always stay: the label is shortened to leave room for the status (#138).
+    const head = `${"  ".repeat(row.depth)}${oneLine(item.kind)} `;
+    const tail = ` · ${state}`;
+    const room = Math.max(1, width - 3 - visibleWidth(head + tail));
+    let text = head + truncateToWidth(oneLine(item.label), room, "…") + tail;
+    // Then detail fields while they fit. Once one does not, it and everything to its right is
+    // dropped, the activity too; the activity alone may be cut if a few columns are left.
     const fits = (more: string) => 3 + visibleWidth(`${text} · ${more}`) <= width;
-    let text = `${"  ".repeat(row.depth)}${oneLine(item.kind)} ${oneLine(item.label)} · ${state}`;
+    let dropped = false;
     for (const field of safeDetail(item).map(oneLine).filter(Boolean)) {
-      if (!fits(field)) break;
+      if (!fits(field)) {
+        dropped = true;
+        break;
+      }
       text += ` · ${field}`;
     }
-    if (activity && fits(activity.slice(0, 6))) text += ` · ${activity}`;
+    if (activity && !dropped && fits(activity.slice(0, 6))) text += ` · ${activity}`;
     const color = item.status === "failed" ? "error" : done ? "muted" : "text";
     return theme.fg("accent", mark) + " " + theme.fg(color, text);
   }
@@ -340,7 +348,8 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     if (!focused) {
       if (!(matchesKey(data, "down") || matchesKey(data, "left")) || ctx.ui.getEditorText() !== "") return undefined;
       focused = true;
-      selected = 0;
+      // The item open in the viewer, or main when none is.
+      selected = Math.max(0, current().findIndex((r) => r.item && r.item.id === viewer.active()));
     } else if (wasChord && matchesKey(data, "ctrl+k")) stopAll();
     else if (matchesKey(data, "ctrl+x")) {
       chord = true;

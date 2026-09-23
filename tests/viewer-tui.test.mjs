@@ -79,6 +79,22 @@ test("Enter opens an item in place of the chat and focus stays on its row; Up an
   await tui.waitForScreen(main);
 });
 
+test("entering FleetView selects the item open in the viewer, or main when none is", async (t) => {
+  const tui = await start(t);
+  tui.keys("Down", "Down", "Down", "Enter");
+  await tui.waitForScreen(screen(agentView([]), rows("b", {}, "b")));
+  tui.keys("Escape");
+  await tui.waitForScreen(screen(agentView([]), rows("b")));
+  tui.keys("Down"); // onto the open agent, not main
+  await tui.waitForScreen(screen(agentView([]), rows("b", {}, "b")));
+  tui.keys("Up", "Up", "Enter"); // main: back to the chat
+  await tui.waitForScreen(screen([], rows("main", {}, "main")));
+  tui.keys("Escape");
+  await tui.waitForScreen(screen([], rows("main")));
+  tui.keys("Down");
+  await tui.waitForScreen(screen([], rows("main", {}, "main")));
+});
+
 test("Esc from FleetView returns to the editor with the item open, so typing steers it", async (t) => {
   const tui = await start(t);
   tui.keys("Down", "Down", "Down", "Enter");
@@ -165,7 +181,9 @@ test("typing while an agent is open steers it and echoes in the viewer; a shell 
   tui.keys("Enter");
   await tui.waitForScreen(screen(agentView(["", " go left", ""]), rows("b", { b: "0s · steered: go left" })));
 
-  tui.keys("Down", "Down", "Enter");
+  tui.keys("Down"); // back into FleetView: onto the open agent
+  await tui.waitForScreen(screen(agentView(["", " go left", ""]), rows("b", { b: "0s · steered: go left" }, "b")));
+  tui.keys("Up", "Enter");
   await tui.waitForScreen(screen(logView(["one", "two", "three"]), rows("a", { b: "0s · steered: go left" }, "a")));
   tui.type("hello");
   tui.keys("Enter");
@@ -189,7 +207,7 @@ test("file watchers are released when the viewer closes, switches or the session
   tui.keys("Down", "Down", "Enter");
   await tui.waitForScreen(screen(logView(["one", "two", "three"]), [...rows("a", {}, "a").slice(0, -1), "   shell lint · 0s", KEYS]));
   await tui.watchers(1);
-  tui.keys("Down", "Down", "Down", "Down", "Enter"); // switch to lint
+  tui.keys("Down", "Down", "Down", "Enter"); // back into FleetView on build, then switch to lint
   await tui.waitForScreen(screen([" shell lint · 0s · esc back", " one", " two", " three"], [...rows(), "›● shell lint · 0s", KEYS]));
   await tui.watchers(1);
   tui.keys("Escape");

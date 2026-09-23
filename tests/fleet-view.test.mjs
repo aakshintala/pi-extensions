@@ -344,3 +344,22 @@ test("Ctrl+K without Ctrl+X stops nothing", async (t) => {
   tui.keys("Down", "C-k", "Down"); // in FleetView, Ctrl+K alone is not the chord: it returns to the editor
   await tui.waitForScreen(idle(["›● main", "   agent scout · 0s", KEYS]));
 });
+
+for (const cols of [30, 60]) {
+  test(`at ${cols} columns a long label is shortened so the status stays, and a dropped field drops everything to its right`, async (t) => {
+    const tui = await start(t, { cols });
+    await tui.fx(
+      { add: "a", kind: "agent", label: "a-very-long-agent-label-that-fills-the-row-and-more", activity: "reading", detail: ["kid-1", "low"] },
+      { add: "b", kind: "shell", label: "test", activity: "PASS", detail: ["a-detail-field-far-too-wide-for-this-row-to-hold"] },
+      { clock: 133 },
+    );
+    const border = "─".repeat(cols);
+    const footer = "0.0%/128k (auto)".padEnd(cols - "harness-1".length) + "harness-1";
+    await tui.waitForScreen(pad(["", border, "", border, " ● main", ...ROWS_AT[cols], "~/cwd", footer]));
+  });
+}
+const ROWS_AT = {
+  30: ["   agent a-very-long-… · 2m13s", "   shell test · 2m13s"],
+  60: ["   agent a-very-long-agent-label-that-fills-the-row… · 2m13s", "   shell test · 2m13s"],
+};
+
