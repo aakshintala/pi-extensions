@@ -35,9 +35,16 @@ settings.onChange((key, value) => { /* apply */ });
 - `set`/`reset`, and `setMany` for several keys in one write, validate,
   re-read the file, change only the given keys, keep only non-default keys,
   and write atomically (temp file, then rename).
-- Redeclaring a section (on `/reload`) re-reads the file, drops the
-  section's old listeners and retires the old handle: its `set`/`reset`
-  throw. There is no file watcher and no project file.
+- There is one live section per name for the process. Redeclaring it (on
+  `/reload`, or when an in-process subagent session runs the factory again)
+  returns the same handle, takes the new settings, and re-reads and
+  re-validates the file; listeners stay and hear every changed or added
+  key, and each removed key with value `undefined`. A warning repeats only
+  when its value changes, and a file that cannot be read keeps the current
+  values.
+  Unsubscribe with the function `onChange` returns on `session_shutdown`, or
+  listeners pile up across sessions. There is no file watcher and no project
+  file.
 - `sections()` lists declared sections for the `/rig` menu, and
   `problem(setting, value)` returns why a value is invalid (or nothing).
 - `/rig` itself is registered by `extensions/rig`, which also sends the

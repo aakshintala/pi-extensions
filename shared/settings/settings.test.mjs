@@ -151,16 +151,107 @@ test("change listeners hear set and reset, and can unsubscribe", () => {
   assert.deepEqual(heard, [["maxConcurrent", 4], ["maxConcurrent", 10]]);
 });
 
-test("redeclaring a section re-reads the file and drops old listeners", () => {
+test("redeclaring a section re-reads the file into the same handle and tells its listeners", () => {
   const d = dir();
   const rig = createRigSettings(d);
   const heard = [];
-  rig.declare("subagents", DECL).onChange(() => heard.push("old"));
+  const old = rig.declare("subagents", DECL);
+  old.onChange((k, v) => heard.push([k, v]));
   writeFileSync(join(d, "rig.json"), JSON.stringify({ subagents: { mode: "slow" } }));
   const fresh = rig.declare("subagents", DECL);
-  assert.equal(fresh.get("mode"), "slow");
-  fresh.set("verbose", true);
+  assert.equal(fresh, old);
+  assert.equal(old.get("mode"), "slow");
+  assert.deepEqual(heard, [["mode", "slow"]]);
+});
+
+test("two declares of a section share values and listeners, and a change through either or through sections() reaches both", () => {
+  const d = dir();
+  const rig = createRigSettings(d);
+  const parent = rig.declare("subagents", DECL);
+  const heard = [];
+  parent.onChange((k, v) => heard.push(["parent", k, v]));
+  const child = rig.declare("subagents", DECL);
+  child.onChange((k, v) => heard.push(["child", k, v]));
+  parent.set("maxConcurrent", 4);
+  child.set("verbose", true);
+  rig.sections()[0].reset("maxConcurrent");
+  assert.deepEqual(heard, [
+    ["parent", "maxConcurrent", 4], ["child", "maxConcurrent", 4],
+    ["parent", "verbose", true], ["child", "verbose", true],
+    ["parent", "maxConcurrent", 10], ["child", "maxConcurrent", 10],
+  ]);
+  assert.deepEqual(parent.values(), child.values());
+  assert.deepEqual(rig.sections().length, 1);
+  assert.deepEqual(readFile(d), { subagents: { verbose: true } });
+});
+
+test("a redeclare with a changed schema keeps listeners, re-validates the values and announces added and removed keys", () => {
+  const d = dir({ subagents: { maxConcurrent: 20, mode: "slow" } });
+  const rig = createRigSettings(d);
+  const old = rig.declare("subagents", DECL);
+  const heard = [];
+  old.onChange((k, v) => heard.push([k, v]));
+  rig.notifyWarnings({ notify: () => {} });
+  const tighter = [
+    { key: "maxConcurrent", type: "integer", min: 1, max: 8, default: 2, description: "Parallel subagents" },
+    { key: "mode", type: "enum", values: ["fast", "slow"], default: "fast", description: "Mode" },
+    { key: "depth", type: "integer", min: 1, max: 3, default: 1, description: "Depth" },
+  ];
+  rig.declare("subagents", tighter);
+  const warnings = [];
+  rig.notifyWarnings({ notify: (m) => warnings.push(m) });
+  assert.equal(old.settings, tighter);
+  assert.deepEqual(old.values(), { maxConcurrent: 2, mode: "slow", depth: 1 });
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /subagents\.maxConcurrent must be between 1 and 8; using default 2/);
+  assert.deepEqual(heard, [["maxConcurrent", 2], ["depth", 1], ["verbose", undefined]]);
+  assert.throws(() => old.get("verbose"), /unknown rig setting/);
+  old.set("depth", 3);
+  assert.deepEqual(heard.at(-1), ["depth", 3]);
+  assert.throws(() => old.set("maxConcurrent", 9), /between 1 and 8/);
+});
+
+test("a redeclare warns about an invalid value once, and again only when the value changes", () => {
+  const d = dir({ subagents: { maxConcurrent: 99 } });
+  const rig = createRigSettings(d);
+  const warnings = [];
+  const declare = () => {
+    rig.declare("subagents", DECL);
+    rig.notifyWarnings({ notify: (m) => warnings.push(m) });
+  };
+  declare();
+  declare();
+  declare();
+  assert.equal(warnings.length, 1);
+  writeFileSync(join(d, "rig.json"), JSON.stringify({ subagents: { maxConcurrent: 50 } }));
+  declare();
+  declare();
+  assert.equal(warnings.length, 2);
+  writeFileSync(join(d, "rig.json"), JSON.stringify({ subagents: { maxConcurrent: 4 } }));
+  declare();
+  writeFileSync(join(d, "rig.json"), JSON.stringify({ subagents: { maxConcurrent: 50 } }));
+  declare();
+  assert.equal(warnings.length, 3);
+  assert.ok(warnings.every((m) => /subagents\.maxConcurrent must be between 1 and 32/.test(m)));
+});
+
+test("a redeclare that cannot read the file keeps the current values and warns once", () => {
+  const d = dir();
+  const rig = createRigSettings(d);
+  const section = rig.declare("subagents", DECL);
+  section.set("maxConcurrent", 4);
+  const heard = [];
+  section.onChange((k, v) => heard.push([k, v]));
+  writeFileSync(join(d, "rig.json"), "{ broken");
+  const warnings = [];
+  for (let i = 0; i < 3; i++) {
+    rig.declare("subagents", DECL);
+    rig.notifyWarnings({ notify: (m) => warnings.push(m) });
+  }
+  assert.equal(section.get("maxConcurrent"), 4);
   assert.deepEqual(heard, []);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /rig\.json is not valid JSON.*; keeping current values/);
 });
 
 test("sections lists declared sections with their settings for the menu", () => {
@@ -192,19 +283,6 @@ test("rigSettings is one instance per process, shared through globalThis", async
   const a = (await import("./index.ts")).rigSettings(d);
   const b = (await import("./index.ts?copy")).rigSettings(d);
   assert.equal(a, b);
-});
-
-test("a redeclared section retires the old handle: it refuses writes and its listeners stay silent", () => {
-  const d = dir();
-  const rig = createRigSettings(d);
-  const old = rig.declare("subagents", DECL);
-  const heard = [];
-  old.onChange(() => heard.push("old"));
-  rig.declare("subagents", DECL);
-  assert.throws(() => old.set("maxConcurrent", 4), /redeclared/);
-  assert.throws(() => old.reset("maxConcurrent"), /redeclared/);
-  assert.equal(existsSync(join(d, "rig.json")), false);
-  assert.deepEqual(heard, []);
 });
 
 test("a section named __proto__ is an ordinary section", () => {

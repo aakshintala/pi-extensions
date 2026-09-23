@@ -28,12 +28,13 @@ export interface Section {
   /** `set` for several keys in one write; all are validated before anything is written. */
   setMany(values: Record<string, Value>): void;
   reset(key: string): void;
-  onChange(listener: (key: string, value: Value) => void): () => void;
+  /** Hears every change, including a redeclare's added keys and removed ones (value `undefined`). */
+  onChange(listener: (key: string, value: Value | undefined) => void): () => void;
 }
 
 export interface RigSettings {
   readonly path: string;
-  /** Declares (or redeclares, on /reload) a section, reading its values from the file. */
+  /** Declares a section, reading its values from the file. A redeclare returns the same handle with the new settings, keeping its listeners. */
   declare(name: string, settings: readonly Setting[]): Section;
   sections(): Section[];
   /** Sends each pending warning once, e.g. `rig.notifyWarnings(ctx.ui)`. */
@@ -70,8 +71,8 @@ const put = (o: Record<string, unknown>, k: string, v: unknown) =>
 
 export function createRigSettings(agentDir: string): RigSettings {
   const path = join(agentDir, "rig.json");
-  const sections = new Map<string, Section>();
   const pending = new Set<string>();
+  const warned = new Map<string, Set<string>>();
 
   // Throws on unparsable JSON; a missing or empty file is {}.
   function read(): Record<string, unknown> {
@@ -93,6 +94,11 @@ export function createRigSettings(agentDir: string): RigSettings {
     return json;
   }
 
+  // One live section per name for the process: every handle `declare` returns
+  // is the same object, so a child session's redeclare cannot retire the parent's.
+  type Live = { section: Section; byKey: Map<string, Setting>; values: Map<string, Value>; listeners: Set<(key: string, value: Value | undefined) => void> };
+  const sections = new Map<string, Live>();
+
   function declare(name: string, settings: readonly Setting[]): Section {
     const byKey = new Map(settings.map((s) => [s.key, s]));
     for (const s of settings) {
@@ -100,40 +106,58 @@ export function createRigSettings(agentDir: string): RigSettings {
       if (p) throw new Error(`rig setting ${name}.${s.key}: default ${p}`);
     }
 
+    const live = sections.get(name);
+    // Each warning with the value behind it; queued only if this section's last declare did not already warn it.
+    const found = new Map<string, string>();
+    const warn = (message: string, value?: unknown, id = message) => found.set(`${id}\0${JSON.stringify(value)}`, message);
     const values = new Map<string, Value>(settings.map((s) => [s.key, s.default]));
-    let file: Record<string, unknown> = {};
+    let raw: unknown;
     try {
-      file = read();
+      raw = own(read(), name);
     } catch (e) {
-      pending.add(`${(e as Error).message}; using defaults`);
+      // A redeclare keeps the current values rather than resetting them to defaults.
+      warn(`${(e as Error).message}; ${live ? "keeping current values" : "using defaults"}`, undefined, (e as Error).message);
+      raw = live && Object.fromEntries([...live.values].filter(([k, v]) => byKey.has(k) && !problem(byKey.get(k)!, v)));
     }
-    const raw = own(file, name);
     if (raw !== undefined && !isObject(raw)) {
-      pending.add(`${path}: section "${name}" must be an object; using defaults`);
+      warn(`${path}: section "${name}" must be an object; using defaults`, raw);
     } else if (raw) {
       for (const [key, value] of Object.entries(raw)) {
         const setting = byKey.get(key);
         const p = setting ? problem(setting, value) : "is not a known setting";
-        if (p) pending.add(`${path}: ${name}.${key} ${p}; ${setting ? `using default ${JSON.stringify(setting.default)}` : "ignored"}`);
+        if (p) warn(`${path}: ${name}.${key} ${p}; ${setting ? `using default ${JSON.stringify(setting.default)}` : "ignored"}`, value);
         else values.set(key, value as Value);
       }
     }
+    const before = warned.get(name);
+    for (const [id, message] of found) if (!before?.has(id)) pending.add(message);
+    warned.set(name, new Set(found.keys()));
 
-    const listeners = new Set<(key: string, value: Value) => void>();
-    const section: Section = {
+    if (live) {
+      // Redeclared (/reload or another session): same handle, new schema and values, listeners kept.
+      const old = live.values;
+      Object.assign(live, { byKey, values });
+      (live.section as { settings: readonly Setting[] }).settings = settings;
+      // Changed and added keys carry their value; a removed key carries undefined.
+      for (const [key, value] of values) if (old.get(key) !== value) notify(live, key, value);
+      for (const key of old.keys()) if (!values.has(key)) notify(live, key, undefined);
+      return live.section;
+    }
+
+    const state: Live = { byKey, values, listeners: new Set(), section: undefined! };
+    const section: Section = (state.section = {
       name,
       settings,
       get: (key) => {
-        if (!values.has(key)) throw new Error(`unknown rig setting ${name}.${key}`);
-        return values.get(key)!;
+        if (!state.values.has(key)) throw new Error(`unknown rig setting ${name}.${key}`);
+        return state.values.get(key)!;
       },
-      values: () => Object.fromEntries(values),
+      values: () => Object.fromEntries(state.values),
       set: (key, value) => section.setMany({ [key]: value }),
       setMany(changes) {
-        if (sections.get(name) !== section) throw new Error(`rig section ${name} was redeclared; use the new handle`);
         const entries = Object.entries(changes);
         for (const [key, value] of entries) {
-          const setting = byKey.get(key);
+          const setting = state.byKey.get(key);
           const p = setting ? problem(setting, value) : "is not a known setting";
           if (p) throw new Error(`rig setting ${name}.${key} ${p}`);
         }
@@ -142,7 +166,7 @@ export function createRigSettings(agentDir: string): RigSettings {
         const found = own(current, name);
         const sec = isObject(found) ? found : {};
         for (const [key, value] of entries) {
-          if (value === byKey.get(key)!.default) delete sec[key];
+          if (value === state.byKey.get(key)!.default) delete sec[key];
           else put(sec, key, value);
         }
         if (Object.keys(sec).length) put(current, name, sec);
@@ -152,28 +176,32 @@ export function createRigSettings(agentDir: string): RigSettings {
         writeFileSync(tmp, JSON.stringify(current, null, 2) + "\n");
         renameSync(tmp, path);
         for (const [key, value] of entries) {
-          values.set(key, value);
-          for (const l of listeners) l(key, value);
+          state.values.set(key, value);
+          notify(state, key, value);
         }
       },
       reset(key) {
-        const setting = byKey.get(key);
+        const setting = state.byKey.get(key);
         if (!setting) throw new Error(`unknown rig setting ${name}.${key}`);
         section.set(key, setting.default);
       },
       onChange(listener) {
-        listeners.add(listener);
-        return () => listeners.delete(listener);
+        state.listeners.add(listener);
+        return () => state.listeners.delete(listener);
       },
-    };
-    sections.set(name, section);
+    });
+    sections.set(name, state);
     return section;
+  }
+
+  function notify(live: Live, key: string, value: Value | undefined) {
+    for (const l of live.listeners) l(key, value);
   }
 
   return {
     path,
     declare,
-    sections: () => [...sections.values()],
+    sections: () => [...sections.values()].map((l) => l.section),
     notifyWarnings(ui) {
       for (const w of pending) ui.notify(w, "warning");
       pending.clear();
