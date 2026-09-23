@@ -1,6 +1,6 @@
 // The agent transcript (#68) drawn from a SessionManager, without a live session: the
-// first open is bounded, later syncs append, custom messages are plain text, calls group
-// with the rig's definitions from other child sessions, and closing releases the groups.
+// first open is bounded, later syncs append (a compaction too), custom messages are plain text, calls group
+// with the rig definitions of their own tree only, and closing releases the groups.
 import "./fixtures/tool-display/pi-tui.mjs";
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
@@ -23,10 +23,13 @@ const said = (content) => ({ role: "assistant", content, stopReason: "toolUse", 
 const read = (id, path) => ({ type: "toolCall", id, name: "read", arguments: { path } });
 const result = (id, text) => ({ role: "toolResult", toolCallId: id, toolName: "read", content: [{ type: "text", text }], isError: false, timestamp: 0 });
 
-/** An agent with no live session, as after its session closed. */
-function agent() {
+/** The tool definitions of one tree of agents. */
+const tree = new Map();
+
+/** An agent with no live session, as after its session closed, in `defs`' tree. */
+function agent(defs = tree) {
   const manager = SessionManager.inMemory("/w");
-  return { manager, cwd: "/w", partial: new Map(), version: 0 };
+  return { manager, cwd: "/w", partial: new Map(), version: 0, root: { defs } };
 }
 
 test("the first open draws the last messages and counts the rest; later messages are appended", () => {
@@ -47,8 +50,20 @@ test("a custom message is drawn as plain text, its control sequences removed", (
   assert.deepEqual(plain(transcript(a, tui, ui).render(60)), [" done now", " next"]);
 });
 
-// The rig's read renderer, as another child session registered it.
-rememberTools({ getAllTools: () => [{ name: "read" }], getToolDefinition: () => ({ ...createReadToolDefinition("/w"), ...RENDERERS.read }) });
+test("a compaction keeps the messages drawn before it, and its summary is not drawn", () => {
+  const a = agent();
+  a.manager.appendMessage(user("before"));
+  const kept = a.manager.appendMessage(user("kept"));
+  const view = transcript(a, tui, ui);
+  assert.deepEqual(plain(view.render(60)), [" before", " kept"]);
+  a.manager.appendCompaction("the summary", kept, 100);
+  a.manager.appendMessage(user("after"));
+  a.version++;
+  assert.deepEqual(plain(view.render(60)), [" before", " kept", " after"]);
+});
+
+// The rig's read renderer, as another child session of the tree registered it.
+rememberTools({ getAllTools: () => [{ name: "read" }], getToolDefinition: () => ({ ...createReadToolDefinition("/w"), ...RENDERERS.read }) }, tree);
 
 test("with no session of its own, calls group with the rig definitions other child sessions registered", () => {
   const a = agent();
@@ -57,6 +72,19 @@ test("with no session of its own, calls group with the rig definitions other chi
   a.manager.appendMessage(result("t2", "two"));
   const view = transcript(a, tui, ui);
   assert.deepEqual(plain(view.render(60)), [" ⏺ Read 2 files"]);
+  view.dispose();
+});
+
+test("an agent of another tree does not use this tree's definitions", () => {
+  const a = agent(new Map());
+  a.manager.appendMessage(said([read("o1", "a.md"), read("o2", "b.md")]));
+  a.manager.appendMessage(result("o1", "one"));
+  a.manager.appendMessage(result("o2", "two"));
+  const view = transcript(a, tui, ui);
+  // Pi's stock read tool: one line per call, no group.
+  const lines = plain(view.render(60));
+  assert.ok(!lines.some((l) => l.includes("Read 2 files")), lines.join("\n"));
+  assert.ok(lines.some((l) => l.includes("a.md")) && lines.some((l) => l.includes("b.md")), lines.join("\n"));
   view.dispose();
 });
 

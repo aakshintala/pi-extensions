@@ -3,8 +3,8 @@
 //   cwd branch* │ Q quotas │ TTFT · TPS
 // Usage and context update from events, never per draw. Git dirty state is
 // checked asynchronously, debounced after tool calls, one git at a time.
-import { spawn } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { blankRepoFilters, GIT_LIMITS, runGit } from "../../shared/git/index.ts"; // no repo code runs
 import { oneLine } from "../../shared/text/index.ts"; // cwd, branch, model and provider ids come from outside
 import type { Feed } from "./quota.ts";
 
@@ -23,67 +23,14 @@ export interface FooterDeps {
   gitDirty?: GitDirty;
 }
 
-// A repo's own config must not run code: no fsmonitor, no hooks, and no index
-// write (so no post-index-change hook).
-const SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "--no-optional-locks"];
-
-export const GIT_LIMITS = { timeoutMs: 5_000, graceMs: 2_000 };
-
-/**
- * Runs git; resolves once it exits. On timeout or abort git gets SIGTERM, then
- * SIGKILL after a grace period, and the promise resolves then even if git has
- * not exited (e.g. stuck on NFS), so a hung git never holds the lock. With
- * `first`, kills git at its first output. `stopped`: timed out, aborted or
- * killed at first output.
- */
-function runGit(args: string[], cwd: string, signal: AbortSignal, first: boolean, limits: typeof GIT_LIMITS) {
-  return new Promise<{ ok: boolean; out: string; stopped: boolean }>((resolve) => {
-    let out = "";
-    let stopped = false;
-    let grace: ReturnType<typeof setTimeout> | undefined;
-    const child = spawn("git", [...SAFE, ...args], { cwd, stdio: ["ignore", "pipe", "ignore"] });
-    const done = (ok: boolean) => {
-      clearTimeout(timer);
-      clearTimeout(grace);
-      signal.removeEventListener("abort", stop);
-      // Resolved before close (grace expired): a descendant may hold the pipe, so release our end.
-      child.stdout?.destroy();
-      resolve({ ok, out, stopped });
-    };
-    const stop = () => {
-      stopped = true;
-      child.kill();
-      grace ??= setTimeout(() => {
-        child.kill("SIGKILL");
-        done(false);
-      }, limits.graceMs);
-    };
-    const timer = setTimeout(stop, limits.timeoutMs);
-    if (signal.aborted) stop();
-    else signal.addEventListener("abort", stop);
-    child.stdout.on("data", (d) => {
-      out += d;
-      if (first) stop();
-    });
-    child.on("error", () => child.pid === undefined && done(false)); // never spawned: no close
-    child.on("close", (code) => done(code === 0));
-  });
-}
+export { GIT_LIMITS };
 
 export const gitDirty = async (cwd: string, signal: AbortSignal, limits = GIT_LIMITS): Promise<boolean | null> => {
-  // Clean filters run while status hashes changed files. Blank every filter the
-  // repo configures itself (local or worktree scope, includes too); the user's
-  // global and system filters stay.
-  const scoped = await runGit(["config", "--includes", "--show-scope", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|process)$"], cwd, signal, false, limits);
-  const blank = scoped.out
-    .split("\n")
-    .map((l) => l.split("\t"))
-    .filter(([scope, key]) => key && scope !== "global" && scope !== "system")
-    .flatMap(([, key]) => ["-c", `${key}=`]);
   // A timed-out config leaves filters unknown: stop here, not hang again in status.
-  if (signal.aborted || scoped.stopped) return null;
+  const blank = await blankRepoFilters(cwd, signal, limits);
+  if (!blank) return null;
   // Submodules count by commit only: no status runs inside them.
-  const status = await runGit([...blank, "status", "--porcelain", "--ignore-submodules=dirty"], cwd, signal, true, limits);
+  const status = await runGit([...blank, "status", "--porcelain", "--ignore-submodules=dirty"], cwd, signal, { first: true, limits });
   return status.out ? true : status.ok ? false : null;
 };
 
@@ -241,7 +188,7 @@ export function registerFooter(pi: ExtensionAPI, { timers = globalThis, now = Da
     perf = reqStart = firstToken = undefined;
     dirty = null;
     cwd = ctx.sessionManager.getCwd(); // one cwd for git and for the footer
-    // Trust is on by default for folders without .pi resources; git runs with repo code disabled anyway (SAFE).
+    // Trust is on by default for folders without .pi resources; git runs with repo code disabled anyway (shared/git).
     live = ctx.isProjectTrusted();
     if (live) void checkGit();
     const shownCwd = tilde(cwd);

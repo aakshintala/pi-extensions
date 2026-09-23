@@ -4,7 +4,8 @@
 // notice. Every session runs this factory, so a child spawns its own children with
 // its own instance. The agents form a tree of objects: each instance holds its
 // session's node, found for a child through its SessionManager.
-// Its viewer content is its transcript (#68, transcript.ts). Worktrees and fork (#54) come later.
+// Its viewer content is its transcript (#68, transcript.ts). A child can run in its own git
+// worktree (#54, worktree.ts) and start from a copy of its parent's conversation (fork).
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -19,6 +20,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
   type ExtensionUIContext,
+  buildSessionContext,
   parseSessionEntries,
 } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
@@ -27,6 +29,7 @@ import { rigSettings } from "../../shared/settings/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
 import { toolRenderers, resultText } from "../../shared/tool-display/index.ts";
 import { rememberTools, transcript, type Source } from "./transcript.ts";
+import { checkWorktree, createWorktree, reopenWorktree, settleWorktree, type Worktree } from "./worktree.ts";
 
 const MARKER = "rig.subagent";
 /** Tokens and cost of a finished child, saved in its parent's session: the parent's next notice and `Session total:` count them. */
@@ -67,7 +70,8 @@ type Node = {
   parent?: Node;
   stopped?: boolean;
 };
-type Root = Node & { pump(): void };
+/** `defs`: the tool definitions of the tree's child sessions, for transcripts (transcript.ts). */
+type Root = Node & { pump(): void; defs: Map<string, unknown> };
 
 type Agent = Node & Source & {
   id: string;
@@ -94,6 +98,8 @@ type Agent = Node & Source & {
   abandoned?: boolean;
   /** Stops it, in the instance that spawned it. */
   halt?: () => Promise<void>;
+  /** Its own git worktree, with isolation "worktree"; `cwd` is inside it. */
+  worktree?: Worktree;
 };
 
 /** Agents by id while anything holds them (such as the viewer), so a resume keeps their open transcript. */
@@ -141,15 +147,18 @@ export const isChild = (ctx: Pick<ExtensionContext, "sessionManager">) =>
   ctx.sessionManager.getEntries().some((e) => e.type === "custom" && e.customType === MARKER);
 
 const str = (description: string) => ({ type: "string", description });
-const params = (properties: Record<string, unknown>) => ({ type: "object", required: Object.keys(properties), additionalProperties: false, properties });
+const params = (properties: Record<string, unknown>, optional: string[] = []) =>
+  ({ type: "object", required: Object.keys(properties).filter((k) => !optional.includes(k)), additionalProperties: false, properties });
 
 function spawnParams(models?: string[]) {
   return params({
     description: str("3-5 word label"),
-    prompt: str("The whole task; the child has only this"),
+    prompt: str("The whole task; unless forked, the child has only this"),
     model: models?.length ? { type: "string", enum: models } : str("provider/id"),
     thinking: { type: "string", enum: THINKING },
-  });
+    isolation: { type: "string", enum: ["none", "worktree"], description: "worktree: its own git worktree on a new branch, kept if it leaves changes" },
+    fork: { type: "boolean", description: "Start from a copy of this conversation" },
+  }, ["fork"]);
 }
 
 const textOf = (m: any): string =>
@@ -190,7 +199,7 @@ export default function (pi: ExtensionAPI) {
 
   const queue: Agent[] = [];
   /** The tree's root when this session is no agent. */
-  const top: Root = { depth: 0, children: new Set(), pump };
+  const top: Root = { depth: 0, children: new Set(), pump, defs: new Map() };
   /** This session's node: `top`, or the agent it runs. */
   let node: Node = top;
   let scope: ExtensionContext["scopedModels"] = [];
@@ -314,10 +323,12 @@ export default function (pi: ExtensionAPI) {
     let from = 0;
     let text = "";
     let total: Omit<Stats, "ms"> | undefined;
+    let note: string | undefined;
     try {
       try {
+        if (a.worktree) await reopenWorktree(a.worktree);
         const session = (a.session = await open(a, inherit));
-        rememberTools(session);
+        rememberTools(session, a.root.defs);
         a.shutDown = undefined;
         a.prompted = false;
         await session.bindExtensions({});
@@ -360,6 +371,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
       await close(a);
+      if (a.worktree) note = await settleWorktree(a.worktree);
     } catch (e) {
       error ??= (e as Error).message;
     } finally {
@@ -367,7 +379,7 @@ export default function (pi: ExtensionAPI) {
       a.state = "done";
       if (!a.abandoned) {
         try {
-          finish(a, text, error, { ...stats, ms: fleet().now() - began }, total);
+          finish(a, text, error, { ...stats, ms: fleet().now() - began }, total, note);
         } catch (e) {
           if (!isFinished(fleet().get(a.id)?.status ?? "completed")) report(a, "failed", `Error: ${(e as Error).message}`, `Subagent ${a.id} failed: ${(e as Error).message}`);
         }
@@ -386,7 +398,7 @@ export default function (pi: ExtensionAPI) {
     changed(a); // an open transcript draws the final saved tail
   }
 
-  function finish(a: Agent, text: string, error: string | undefined, s: Stats, total?: Omit<Stats, "ms">) {
+  function finish(a: Agent, text: string, error: string | undefined, s: Stats, total?: Omit<Stats, "ms">, note?: string) {
     // Tokens and cost roll up through the sessions: this notice counts the children that
     // finished since the last one, which holds across pruning and restarts.
     const entries = a.manager.getEntries() as any[];
@@ -400,7 +412,7 @@ export default function (pi: ExtensionAPI) {
     a.manager.appendCustomEntry(REPORTED, {});
     if ("root" in a.parent) (a.parent as Agent).manager.appendCustomEntry(USAGE, { tokens: s.tokens, cost: s.cost });
     const status = a.stopped ? "stopped" : error ? "failed" : "completed";
-    const lines = [`${statsLine(s)} · ${duration(s.ms)}`, ...(total ? [`Session total: ${statsLine(total)}`] : [])];
+    const lines = [`${statsLine(s)} · ${duration(s.ms)}`, ...(total ? [`Session total: ${statsLine(total)}`] : []), ...(note ? [note] : [])];
     const head = `Subagent ${a.id} (${oneLine(a.label)}) ${status}. STATUS: ${a.stopped ? "STOPPED" : error ? "FAILED" : statusOf(text)}\n${lines.join("\n")}`;
     let body = text;
     const max = setting("maxInlineChars");
@@ -430,7 +442,8 @@ export default function (pi: ExtensionAPI) {
       const i = queue.indexOf(a);
       if (i >= 0) queue.splice(i, 1);
       a.state = "done";
-      report(a, "stopped", "stopped before it started", `Subagent ${a.id} (${oneLine(a.label)}) stopped before it started.`);
+      const note = a.worktree ? `\n${await settleWorktree(a.worktree)}` : "";
+      report(a, "stopped", "stopped before it started", `Subagent ${a.id} (${oneLine(a.label)}) stopped before it started.${note}`);
       prune(a);
       return;
     }
@@ -460,11 +473,13 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  /** Where worktrees are made, one per agent id. */
+  const worktrees = () => join(getAgentDir(), "rig-worktrees");
+
   /** Where this session's children are saved: a folder named after it, beside its own file. */
   const childDir = (c: ExtensionContext) =>
     join(c.sessionManager.getSessionDir() || join(getAgentDir(), "sessions"), c.sessionManager.getSessionId());
 
-  /** A child of this session saved by an earlier process: reopened from its session file. */
   /** A saved child of this session: its file, read without writing, and its marker. */
   function saved(id: string, c: ExtensionContext) {
     const dir = childDir(c);
@@ -472,25 +487,31 @@ export default function (pi: ExtensionAPI) {
     const name = readdirSync(dir).find((f) => f.endsWith(`_${id}.jsonl`));
     if (!name) return undefined;
     const file = join(dir, name);
-    const marker: any = parseSessionEntries(readFileSync(file, "utf8")).find((e: any) => e.type === "custom" && e.customType === MARKER);
+    const entries: any[] = parseSessionEntries(readFileSync(file, "utf8"));
+    const marker = entries.find((e) => e.type === "custom" && e.customType === MARKER);
     if (marker?.data?.agentId !== id || marker.data.parentSessionId !== c.sessionManager.getSessionId()) return undefined;
-    return { file, marker };
+    return { file, marker, entries };
   }
 
   /** A finished child of this session, to resume: still in memory, or reopened from its session file. */
-  function restore(id: string, c: ExtensionContext): Agent | undefined {
+  async function restore(id: string, c: ExtensionContext): Promise<Agent | undefined> {
     // Still in memory (its transcript may be open): the same agent. The owner check keeps it under the
     // session that spawned it; `node` is that session's node, new if the session was reopened.
     const held = remembered.get(id)?.deref();
     if (held?.state === "done" && held.owner === c.sessionManager.getSessionId()) return Object.assign(held, { parent: node, root: "root" in node ? (node as Agent).root : top });
     const found = saved(id, c);
     if (!found) return undefined;
-    const manager = SessionManager.open(found.file); // the resume writes to it
-    const context = manager.buildSessionContext();
+    // The model is checked before the file is opened: opening can write to it.
+    const context = buildSessionContext(found.entries.filter((e) => e.type !== "session"));
     const model = context.model && c.modelRegistry.find(context.model.provider, context.model.modelId);
     if (!model) return undefined;
+    // Checked like the model, before the file is opened: the saved entry must name the worktree the spawn made.
+    const kept = found.marker.data.worktree;
+    const worktree = kept === undefined ? undefined : await checkWorktree(kept, id, worktrees(), c.cwd);
+    const manager = SessionManager.open(found.file); // the resume writes to it
     const owner = c.sessionManager.getSessionId();
-    return agent({ id, owner, depth: found.marker.data.depth ?? node.depth + 1, label: manager.getSessionName() ?? id, model, thinking: context.thinkingLevel, state: "done", prompt: "", cwd: c.cwd, manager });
+    const fields = { id, owner, depth: found.marker.data.depth ?? node.depth + 1, label: manager.getSessionName() ?? id, model, thinking: context.thinkingLevel, state: "done" as const };
+    return agent({ ...fields, prompt: "", cwd: worktree?.cwd ?? c.cwd, manager, worktree });
   }
 
   /** A new agent below this session. */
@@ -502,10 +523,10 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** Only the session that spawned a child can message it. */
-  const find = (id: string, c: ExtensionContext) => {
+  const find = async (id: string, c: ExtensionContext) => {
     const owner = c.sessionManager.getSessionId();
     const a = [...node.children].find((x) => x.id === id);
-    const mine = a && a.owner === owner ? a : !a ? restore(id, c) : undefined;
+    const mine = a && a.owner === owner ? a : !a ? await restore(id, c) : undefined;
     if (!mine) throw new Error(`No subagent ${id} of yours. Use an id that your subagent_spawn returned.`);
     return mine;
   };
@@ -515,11 +536,11 @@ export default function (pi: ExtensionAPI) {
     name: "subagent_spawn",
     label: "Agent",
     description:
-      "Start a subagent: a background copy of you with the same instructions and tools but a fresh context. Returns its id at once; " +
+      "Start a subagent: a background copy of you with the same instructions and tools, and a fresh context unless forked. Returns its id at once; " +
       "its full result arrives later as a notice, so end your turn to wait. " +
       "Pick the cheapest model and thinking level that can do the task.",
     parameters: spawnParams(models),
-    async execute(_id: string, p: { description: string; prompt: string; model: string; thinking: string }, _signal: unknown, _update: unknown, c: ExtensionContext) {
+    async execute(_id: string, p: { description: string; prompt: string; model: string; thinking: string; isolation: string; fork?: boolean }, signal: AbortSignal | undefined, _update: unknown, c: ExtensionContext) {
       // enabledModels when set, else every model Pi knows; a model without credentials fails in the child.
       const allowed = c.scopedModels.length ? c.scopedModels.map((s) => s.model) : c.modelRegistry.getAll();
       const model = allowed.find((m) => `${m.provider}/${m.id}` === p.model);
@@ -531,12 +552,16 @@ export default function (pi: ExtensionAPI) {
       admit();
       // The child's session id is its agent id, so a later process can find its file.
       const id = randomUUID().slice(0, 8);
-      const manager = SessionManager.create(c.cwd, childDir(c), { id, parentSession: c.sessionManager.getSessionFile() });
-      manager.appendCustomEntry(MARKER, { agentId: id, parentSessionId: owner, depth: node.depth + 1 });
+      const worktree = p.isolation === "worktree" ? await createWorktree(c.cwd, worktrees(), id, signal) : undefined;
+      const cwd = worktree?.cwd ?? c.cwd;
+      const manager = SessionManager.create(cwd, childDir(c), { id, parentSession: c.sessionManager.getSessionFile() });
+      manager.appendCustomEntry(MARKER, { agentId: id, parentSessionId: owner, depth: node.depth + 1, ...(worktree && { worktree }) });
       manager.appendSessionInfo(p.description);
-      const a = agent({ id, owner, depth: node.depth + 1, label: p.description, model, thinking: p.thinking, state: "queued", prompt: p.prompt, cwd: c.cwd, manager });
+      // A fork copies what the parent's model sees now: compacted history as its summary, then the rest.
+      if (p.fork) for (const m of c.sessionManager.buildSessionProjection().messages) manager.appendMessage(m as any);
+      const a = agent({ id, owner, depth: node.depth + 1, label: p.description, model, thinking: p.thinking, state: "queued", prompt: p.prompt, cwd, manager, worktree });
       start(a);
-      return reply(`Subagent ${id} ${a.state === "queued" ? "queued" : "started"}.`, id);
+      return reply(`Subagent ${id} ${a.state === "queued" ? "queued" : "started"}${worktree ? ` in worktree ${worktree.path} (branch ${worktree.branch})` : ""}.`, id);
     },
     ...toolRenderers({
       title: "Agent",
@@ -554,7 +579,7 @@ export default function (pi: ExtensionAPI) {
       "a queued one gets it added to its prompt. Answer NEEDS_CONTEXT here.",
     parameters: params({ id: str("Subagent id"), message: str("What to tell it") }),
     async execute(_id: string, p: { id: string; message: string }, _signal: unknown, _update: unknown, c: ExtensionContext) {
-      const a = find(p.id, c);
+      const a = await find(p.id, c);
       const was = a.state;
       await message(a, p.message);
       return reply(`Subagent ${a.id} ${was === "done" ? (a.state === "queued" ? "queued to resume" : "resumed") : was === "queued" ? "prompt extended" : "steered"}.`, a.id);
@@ -620,5 +645,6 @@ export default function (pi: ExtensionAPI) {
       a.session = undefined;
     }
     for (const a of all) if (!a.abandoned) node.children.delete(a);
+    top.defs.clear();
   });
 }

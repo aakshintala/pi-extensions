@@ -136,6 +136,22 @@ shutting down) drops its commands. The fleet extension binds Ctrl+B and calls
 `backgroundAll()`, which runs each `background` once and drops one that throws;
 `foregrounds()` counts them, and the hint shows while it is above 0.
 
+### `git/`
+
+Git that never runs a repository's own code: every run passes
+`-c core.fsmonitor=false -c core.hooksPath=/dev/null --no-optional-locks`.
+Used by `extensions/status` (the footer's dirty check) and `extensions/subagents`
+(worktrees).
+
+- `runGit(args, cwd, signal, { first?, limits? })` resolves `{ ok, out, err, stopped }`
+  once git exits. On timeout (`limits.timeoutMs`, 5 s by default) or abort, git gets
+  SIGTERM, then SIGKILL after `graceMs`; the promise resolves then even if git is
+  stuck. `first` kills git at its first output.
+- `blankRepoFilters(cwd, signal, limits?)` returns `-c filter.<name>.<key>=` for every
+  clean, smudge or process filter the repository configures itself (local or worktree
+  scope, includes too), to put before a command that reads or writes file contents.
+  The user's global and system filters stay. `undefined` when git did not finish.
+
 ### `tui/`
 
 `editorFocused(tui)` says whether Pi's main editor has focus, so no picker,

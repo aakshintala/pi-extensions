@@ -1,11 +1,11 @@
-// Subagents core (#52) and nesting (#53) in scripted SDK sessions, which run without the UI. The parent
+// Subagents core (#52), nesting (#53), and worktrees and fork (#54) in scripted SDK sessions, which run without the UI. The parent
 // is a scripted session; each child is a real Pi session the extension creates, loading
 // the extensions listed in the sealed agent dir's settings.json, with replies from the
 // "kid" model (tests/fixtures/subagents/kid.ts).
 import "./fixtures/tool-display/pi-tui.mjs"; // lets the extension module load in plain node
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxText, fauxToolCall, scriptedSession } from "./helpers/session.mjs";
@@ -26,7 +26,7 @@ const textOf = (m) => (typeof m.content === "string" ? m.content : m.content.map
 const lastText = (context) => textOf(context.messages.at(-1));
 const says = (text) => () => fauxAssistantMessage(fauxText(text));
 const calls = (...toolCalls) => () => fauxAssistantMessage(toolCalls.map(([n, a]) => fauxToolCall(n, a)), { stopReason: "toolUse" });
-const spawn = (prompt, extra = {}) => ["subagent_spawn", { description: `do ${prompt}`, prompt, model: "kid/kid-1", thinking: "low", ...extra }];
+const spawn = (prompt, extra = {}) => ["subagent_spawn", { description: `do ${prompt}`, prompt, model: "kid/kid-1", thinking: "low", isolation: "none", ...extra }];
 
 /** The first user message of a child's context: its task. */
 const taskOf = (context) => textOf(context.messages.find((m) => m.role === "user")).split("\n\nEnd your final message")[0];
@@ -78,7 +78,7 @@ async function freshInstance() {
   const pi = {
     registerTool: (tool) => tools.set(tool.name, tool),
     on() {},
-    getActiveTools: () => ["read", ...SUBAGENT_TOOLS],
+    getActiveTools: () => ["read", "bash", ...SUBAGENT_TOOLS],
     setActiveTools() {},
     sendMessage() {},
   };
@@ -137,7 +137,7 @@ const { money } = await import("../extensions/subagents/index.ts");
 
 const STATS = /^\d+ turns? · \d+ tool uses? · [\d,]+ tokens? · \$0\.00 · 0s$/;
 
-test("spawn rejects an unknown model or thinking level and requires both", async (t) => {
+test("spawn rejects an unknown model or thinking level and requires model, thinking and isolation", async (t) => {
   const { session, results } = await start(t, [
     calls(
       spawn("a", { model: "kid/nope" }),
@@ -153,7 +153,7 @@ test("spawn rejects an unknown model or thinking level and requires both", async
   assert.deepEqual(r.map(([e]) => e), [true, true, true, true, true]);
   assert.match(r[0][1], /^Unknown model "kid\/nope"\.$/);
   assert.match(r[1][1], /^Validation failed for tool "subagent_spawn":\n  - thinking: must be equal to one of the allowed values\n/);
-  assert.match(r[2][1], /^Validation failed for tool "subagent_spawn":\n  - model: must have required properties model\n/);
+  assert.match(r[2][1], /^Validation failed for tool "subagent_spawn":\n  - model: must have required properties model, isolation\n/);
   // Pi would clamp these silently: xhigh above what kid-1 offers, any thinking on a model without it.
   assert.equal(r[3][1], 'kid/kid-1 cannot think at "xhigh". Use one of: off, minimal, low, medium, high.');
   assert.equal(r[4][1], 'faux/faux-1 cannot think at "low". Use one of: off.');
@@ -505,7 +505,7 @@ test("only the session that spawned a child can message or stop it", { timeout: 
     return new Promise((resolve) => options.signal.addEventListener("abort", () => resolve(fauxAssistantMessage([], { stopReason: "aborted" }))));
   });
   const { call } = await freshInstance();
-  const started = await call("subagent_spawn", { description: "mine", prompt: "p", model: "kid/kid-1", thinking: "low" }, ctx);
+  const started = await call("subagent_spawn", { description: "mine", prompt: "p", model: "kid/kid-1", thinking: "low", isolation: "none" }, ctx);
   const id = started.details.id;
   await held;
   const other = asSession(ctx, "someone-else");
@@ -969,4 +969,385 @@ test("a transcript opened on a finished agent follows the resume its parent send
   const task = "End your final message with one line: STATUS: DONE, STATUS: DONE_WITH_CONCERNS, STATUS: BLOCKED, STATUS: NEEDS_CONTEXT.";
   assert.deepEqual(plain(view.render(200)), [" scout", ` ${task}`, " found notes", " STATUS: DONE", " and the dates", ` ${task}`, " no dates", " STATUS: DONE"]);
   view.dispose();
+});
+
+// Worktrees and fork (#54), in a real temp git repository at the parent's cwd.
+const { execFileSync } = await import("node:child_process");
+const git = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, encoding: "utf8" }).trim();
+function repo(cwd) {
+  git(cwd, "init", "-q", "-b", "main");
+  writeFileSync(join(cwd, "README.md"), "hi\n");
+  git(cwd, "add", ".");
+  git(cwd, "commit", "-qm", "init");
+}
+/**
+ * A kid that runs one bash command per run, `pwd && <command>`, taken by task from
+ * `commands` ({ task: [run 1, run 2, ...] }), records each output's lines under the task in
+ * `out`, then finishes. A task's command may also be a tool call [name, args].
+ */
+function shell(commands, out = {}) {
+  return (context) => {
+    const task = taskOf(context);
+    const last = context.messages.at(-1);
+    if (last.role === "toolResult") {
+      (out[task] ??= []).push(textOf(last).trim().split("\n"));
+      return says("done\nSTATUS: DONE")();
+    }
+    const run = context.messages.filter((m) => m.role === "user" && !textOf(m).startsWith("Your run is ending")).length - 1;
+    const step = commands[task][run];
+    return calls(Array.isArray(step) ? step : ["bash", { command: `pwd && ${step}` }])();
+  };
+}
+const idIn = (text) => /Subagent (\w{8})/.exec(text)?.[1];
+
+const waitFinished = (id) =>
+  new Promise((resolve) => {
+    const done = () => fleet().get(id)?.status === "completed";
+    if (done()) return resolve();
+    const off = fleet().subscribe(() => done() && (off(), resolve()));
+  });
+
+test("a worktree child works in its own worktree: removed when clean, kept with unpushed commits or changes, and resumed in it after a restart", { timeout: 30_000 }, async (t) => {
+  const pwds = [];
+  let id;
+  // Each run runs one bash command in its cwd, then finishes.
+  const work = [":", "git -c user.name=t -c user.email=t@t commit -q --allow-empty -m work", "echo x > dirty.txt"];
+  const { session, ctx, cwd, agentDir, results, notices } = await start(
+    t,
+    [calls(spawn("lane", { isolation: "worktree" })), (context) => ((id = /^Subagent (\w+)/.exec(lastText(context))[1]), says("waiting")()), says("waiting"), says("noted"), says("noted"), says("noted")],
+    (context) => {
+      const last = context.messages.at(-1);
+      if (last.role === "toolResult") {
+        pwds.push(textOf(last).trim().split("\n")[0]);
+        return says("done\nSTATUS: DONE")();
+      }
+      const run = context.messages.filter((m) => m.role === "user").length - 1;
+      return calls(["bash", { command: `pwd && ${work[run]}` }])();
+    },
+    { before: (s) => repo(s.sessionManager.getCwd()) },
+  );
+  await session.prompt("go");
+  const path = join(agentDir, "rig-worktrees", id);
+  const where = `Worktree: ${path} (branch subagent/${id})`;
+  assert.equal(results()[0][1], `Subagent ${id} started in worktree ${path} (branch subagent/${id}).`);
+  assert.deepEqual(pwds, [path]);
+  // Clean: the worktree and its unmoved branch are gone.
+  assert.equal(notices().at(-1).split("\n")[2], `${where}, removed: nothing uncommitted, ignored or unpushed.`);
+  assert.equal(existsSync(path), false);
+  assert.equal(git(cwd, "branch", "--list", `subagent/${id}`), "");
+
+  // After a restart (no agents in memory), a resume recreates it at the same path, from its saved entry, and runs there.
+  globalThis[Symbol.for("pi-rig.subagents.known")].clear();
+  const fresh = await freshInstance();
+  await fresh.call("subagent_message", { id, message: "commit" }, ctx);
+  await waitFinished(id);
+  await session.waitForIdle();
+  assert.deepEqual(pwds, [path, path]);
+  assert.equal(notices().at(-1).split("\n")[3], `${where}, kept: it has unpushed commits.`);
+  assert.equal(git(path, "log", "-1", "--format=%s"), "work");
+
+  await fresh.call("subagent_message", { id, message: "change a file" }, ctx);
+  await waitFinished(id);
+  await session.waitForIdle();
+  assert.deepEqual(pwds, [path, path, path]);
+  assert.equal(notices().at(-1).split("\n")[3], `${where}, kept: it has uncommitted changes or ignored files.`);
+  assert.equal(readFileSync(join(path, "dirty.txt"), "utf8"), "x\n");
+  // The parent's own tree is untouched.
+  assert.equal(git(cwd, "status", "--porcelain"), "");
+});
+
+test("a worktree spawn outside a git repository is refused, and nothing is created", { timeout: 20_000 }, async (t) => {
+  const { session, agentDir, results } = await start(t, [calls(spawn("lane", { isolation: "worktree" })), says("ok")], says("never"));
+  await session.prompt("go");
+  const [[error, text]] = results();
+  assert.equal(error, true);
+  assert.match(text, /^Isolation "worktree" needs a git repository with a commit, and .+ has none \(fatal: not a git repository.*\)\. Use isolation "none"\.$/);
+  assert.equal(existsSync(join(agentDir, "rig-worktrees")), false);
+  assert.equal(fleet().items().length, 0);
+});
+
+test("a fork child starts from the parent's conversation as its model sees it; another starts fresh", { timeout: 20_000 }, async (t) => {
+  const seen = {};
+  const { session } = await start(
+    t,
+    [calls(spawn("forked", { fork: true }), spawn("fresh")), says("waiting"), says("waiting"), says("got one"), says("got both")],
+    (context) => {
+      const task = textOf(context.messages.findLast((m) => m.role === "user")).split("\n\nEnd your")[0];
+      seen[task] = context.messages.filter((m) => m.role !== "system").map((m) => `${m.role}: ${textOf(m)}`);
+      return says("ok\nSTATUS: DONE")();
+    },
+    {
+      // Earlier history: a compaction summarised "old secret" and kept "kept note".
+      before: (s) => {
+        const sm = s.sessionManager;
+        sm.appendMessage({ role: "user", content: "old secret", timestamp: 0 });
+        const kept = sm.appendMessage({ role: "user", content: "kept note", timestamp: 0 });
+        sm.appendCompaction("the summary", kept, 100);
+      },
+    },
+  );
+  await session.prompt("go");
+  const forked = seen["forked"];
+  const fresh = seen["fresh"];
+  assert.equal(fresh.length, 1);
+  assert.match(fresh[0], /^user: fresh\n\nEnd your final message/);
+  const text = forked.join("\n");
+  assert.ok(!text.includes("old secret"), text);
+  assert.match(forked[0], /^user: .*the summary/s);
+  assert.equal(forked[1], "user: kept note");
+  assert.equal(forked[2], "user: go");
+  assert.match(forked[3], /^assistant: call subagent_spawncall subagent_spawn$/);
+  assert.match(forked.at(-1), /^user: forked\n\nEnd your final message/);
+});
+
+test("after a restart, a resume of a child whose model is gone fails without writing its file", { timeout: 20_000 }, async (t) => {
+  let id;
+  const { session, ctx, agentDir } = await start(t, [calls(spawn("scout")), (context) => ((id = /^Subagent (\w+)/.exec(lastText(context))[1]), says("waiting")()), says("waiting"), says("got it")], says("first\nSTATUS: DONE"));
+  await session.prompt("go");
+  const dir = join(agentDir, "sessions", session.sessionId);
+  const file = join(dir, readdirSync(dir).find((f) => f.endsWith(`_${id}.jsonl`)));
+  // Without a final newline, as after a crash mid-write: opening the file would add one.
+  const bytes = readFileSync(file, "utf8").replace(/\n$/, "");
+  writeFileSync(file, bytes);
+  // A new process holds no agents in memory.
+  globalThis[Symbol.for("pi-rig.subagents.known")].clear();
+  const fresh = await freshInstance();
+  const gone = { ...ctx, modelRegistry: { find: () => undefined } };
+  await assert.rejects(fresh.call("subagent_message", { id, message: "more" }, gone), { message: `No subagent ${id} of yours. Use an id that your subagent_spawn returned.` });
+  assert.equal(readFileSync(file, "utf8"), bytes);
+});
+
+test("a worktree with only an ignored file new in it is kept", { timeout: 20_000 }, async (t) => {
+  let id;
+  const { session, agentDir, notices } = await start(
+    t,
+    [calls(spawn("lane", { isolation: "worktree" })), (c) => ((id = idIn(lastText(c))), says("waiting")()), says("waiting"), says("noted")],
+    shell({ lane: ["echo secret > .env"] }),
+    { before: (s) => (repo(s.sessionManager.getCwd()), writeFileSync(join(s.sessionManager.getCwd(), ".gitignore"), ".env\n"), git(s.sessionManager.getCwd(), "add", "."), git(s.sessionManager.getCwd(), "commit", "-qm", "ignore")) },
+  );
+  await session.prompt("go");
+  const path = join(agentDir, "rig-worktrees", id);
+  assert.equal(notices().at(-1).split("\n")[2], `Worktree: ${path} (branch subagent/${id}), kept: it has uncommitted changes or ignored files.`);
+  assert.equal(readFileSync(join(path, ".env"), "utf8"), "secret\n");
+});
+
+test("a clean worktree whose commits are pushed is removed, and its branch kept", { timeout: 20_000 }, async (t) => {
+  let id, cwd;
+  const { session, agentDir, notices } = await start(
+    t,
+    [calls(spawn("lane", { isolation: "worktree" })), (c) => ((id = idIn(lastText(c))), says("waiting")()), says("waiting"), says("noted")],
+    shell({ lane: ["git -c user.name=t -c user.email=t@t commit -q --allow-empty -m work && git push -q origin HEAD 2>&1"] }),
+    {
+      before: (s) => {
+        cwd = s.sessionManager.getCwd();
+        repo(cwd);
+        const remote = join(cwd, "..", "remote.git");
+        git(cwd, "init", "-q", "--bare", remote);
+        git(cwd, "remote", "add", "origin", remote);
+      },
+    },
+  );
+  await session.prompt("go");
+  const path = join(agentDir, "rig-worktrees", id);
+  assert.equal(notices().at(-1).split("\n")[2], `Worktree: ${path} (branch subagent/${id}), removed: nothing uncommitted, ignored or unpushed; the branch is kept.`);
+  assert.equal(existsSync(path), false);
+  assert.equal(git(cwd, "log", "-1", "--format=%s", `subagent/${id}`), "work");
+});
+
+test("a queued worktree child that is stopped has its clean worktree removed", { timeout: 20_000 }, async (t) => {
+  const held = gate();
+  let queued;
+  const { session, agentDir, results, notices } = await start(
+    t,
+    [
+      calls(spawn("busy"), spawn("lane", { isolation: "worktree" })),
+      (c) => {
+        queued = idIn(results()[1][1]);
+        return calls(["subagent_stop", { id: queued }])();
+      },
+      () => calls(["subagent_stop", { id: idIn(results()[0][1]) }])(),
+      says("stopped both"),
+      says("noted"),
+      says("noted"),
+    ],
+    (context, options) => (taskOf(context) === "busy" ? (held.open(), untilAborted(options)) : says("never")()),
+    { before: (s) => repo(s.sessionManager.getCwd()) },
+  );
+  setting(t, "maxConcurrent", 1);
+  await session.prompt("go");
+  const path = join(agentDir, "rig-worktrees", queued);
+  assert.match(results()[1][1], /queued in worktree/);
+  const notice = notices().find((n) => n.startsWith(`Subagent ${queued}`));
+  assert.equal(notice, `Subagent ${queued} (do lane) stopped before it started.\nWorktree: ${path} (branch subagent/${queued}), removed: nothing uncommitted, ignored or unpushed.`);
+  assert.equal(existsSync(path), false);
+});
+
+test("a child of a worktree agent works in that worktree by default", { timeout: 20_000 }, async (t) => {
+  const out = {};
+  let id;
+  const { session, agentDir } = await start(
+    t,
+    [calls(spawn("lane", { isolation: "worktree" })), (c) => ((id = idIn(lastText(c))), says("waiting")()), says("waiting"), says("noted")],
+    (context) => {
+      const task = taskOf(context);
+      if (task === "lane") {
+        // Spawns dig once, then waits for its notice.
+        if (context.messages.at(-1).role === "toolResult") return says("spawned")();
+        if (context.messages.some((m) => m.role === "assistant")) return says(lastText(context).includes("(do dig) completed") ? "done\nSTATUS: DONE" : "waiting")();
+        return calls(spawn("dig"))();
+      }
+      return shell({ dig: [":"] }, out)(context);
+    },
+    { before: (s) => repo(s.sessionManager.getCwd()) },
+  );
+  await session.prompt("go");
+  assert.deepEqual(out.dig, [[join(agentDir, "rig-worktrees", id)]]);
+});
+
+test("a repository's hooks, fsmonitor and filters never run for a worktree", { timeout: 20_000 }, async (t) => {
+  let id, cwd, marks;
+  const trap = (name, body = "") => {
+    const path = join(marks, `${name}.sh`);
+    writeFileSync(path, `#!/bin/sh\ntouch '${join(marks, name)}'\n${body}`);
+    chmodSync(path, 0o755);
+    return path;
+  };
+  const { session, agentDir, notices } = await start(
+    t,
+    [calls(spawn("lane", { isolation: "worktree" })), (c) => ((id = idIn(lastText(c))), says("waiting")()), says("waiting"), says("noted")],
+    shell({ lane: [":"] }),
+    {
+      before: (s) => {
+        cwd = s.sessionManager.getCwd();
+        repo(cwd);
+        marks = join(cwd, "..", "marks");
+        mkdirSync(marks);
+        git(cwd, "config", "core.fsmonitor", trap("fsmonitor", "exit 1\n"));
+        for (const hook of ["post-checkout", "reference-transaction"]) {
+          writeFileSync(join(cwd, ".git", "hooks", hook), `#!/bin/sh\ntouch '${join(marks, hook)}'\n`);
+          chmodSync(join(cwd, ".git", "hooks", hook), 0o755);
+        }
+        git(cwd, "config", "filter.evil.smudge", trap("smudge", "cat\n"));
+        git(cwd, "config", "filter.evil.clean", trap("clean", "cat\n"));
+        writeFileSync(join(cwd, ".gitattributes"), "* filter=evil\n");
+        git(cwd, "add", ".gitattributes");
+        git(cwd, "commit", "-qm", "attrs");
+        // Setting up ran the traps; start counting from here.
+        for (const f of readdirSync(marks)) if (!f.endsWith(".sh")) rmSync(join(marks, f));
+      },
+    },
+  );
+  await session.prompt("go");
+  const path = join(agentDir, "rig-worktrees", id);
+  assert.match(notices().at(-1), /removed: nothing uncommitted, ignored or unpushed/);
+  assert.equal(existsSync(path), false);
+  assert.deepEqual(readdirSync(marks).filter((f) => !f.endsWith(".sh")), []);
+  // The traps work: plain git runs them.
+  git(cwd, "worktree", "add", "-q", join(marks, "..", "plain"));
+  git(join(marks, "..", "plain"), "status", "--porcelain");
+  for (const m of ["post-checkout", "smudge", "fsmonitor"]) assert.ok(existsSync(join(marks, m)), m);
+});
+
+test("a resume refuses a tampered saved worktree, and a foreign directory at its path; it re-adds one deleted behind git's back", { timeout: 30_000 }, async (t) => {
+  const out = {};
+  let id, cwd;
+  const { session, ctx, agentDir, notices } = await start(
+    t,
+    [calls(spawn("lane", { isolation: "worktree" })), (c) => ((id = idIn(lastText(c))), says("waiting")()), ...Array.from({ length: 8 }, () => says("noted"))],
+    shell({ lane: ["echo x > dirty.txt", ":", ":"] }, out),
+    { before: (s) => ((cwd = s.sessionManager.getCwd()), repo(cwd)) },
+  );
+  await session.prompt("go");
+  const path = join(agentDir, "rig-worktrees", id);
+  assert.match(notices().at(-1), /kept: it has uncommitted changes/);
+
+  const dir = join(agentDir, "sessions", session.sessionId);
+  const file = join(dir, readdirSync(dir).find((f) => f.endsWith(`_${id}.jsonl`)));
+  const original = readFileSync(file, "utf8");
+  const known = globalThis[Symbol.for("pi-rig.subagents.known")];
+  const tamper = (change) => {
+    const lines = original.split("\n");
+    const marker = JSON.parse(lines[1]);
+    change(marker.data.worktree);
+    lines[1] = JSON.stringify(marker);
+    writeFileSync(file, lines.join("\n"));
+  };
+  const fresh = await freshInstance();
+  const refusal = { message: `Subagent ${id}'s saved worktree is not the one its spawn made in this repository, so it is not resumed.` };
+  for (const change of [(w) => (w.branch = "main"), (w) => (w.path = cwd), (w) => (w.cwd = "/"), (w) => (w.git = join(cwd, "..", "other.git"))]) {
+    tamper(change);
+    const bytes = readFileSync(file, "utf8");
+    known.clear();
+    await assert.rejects(fresh.call("subagent_message", { id, message: "go on" }, ctx), refusal);
+    assert.equal(readFileSync(file, "utf8"), bytes);
+  }
+  assert.equal(git(cwd, "branch", "--list", "main"), "* main");
+
+  // Deleted behind git's back: pruned and added again, on its branch, at its path.
+  writeFileSync(file, original);
+  known.clear();
+  rmSync(path, { recursive: true, force: true });
+  await fresh.call("subagent_message", { id, message: "go on" }, ctx);
+  await waitFinished(id);
+  await session.waitForIdle();
+  assert.deepEqual(out.lane[1], [path]);
+  assert.match(notices().at(-1), /removed: nothing uncommitted, ignored or unpushed\.\n/);
+
+  // A plain directory at its path: the run is refused there, and the directory is left alone.
+  mkdirSync(path);
+  writeFileSync(join(path, "mine.txt"), "mine\n");
+  known.clear();
+  await fresh.call("subagent_message", { id, message: "go on" }, ctx);
+  await new Promise((resolve) => {
+    const done = () => fleet().get(id)?.status === "failed";
+    if (done()) return resolve();
+    const off = fleet().subscribe(() => done() && (off(), resolve()));
+  });
+  await session.waitForIdle();
+  assert.equal(out.lane.length, 2);
+  assert.match(notices().at(-1), new RegExp(`Error: ${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} is not this agent's worktree, so it does not run there\\.`));
+  assert.deepEqual(readdirSync(path), ["mine.txt"]);
+});
+
+test("the tree's tool definitions go with its root: after its shutdown a transcript draws raw calls", { timeout: 20_000 }, async (t) => {
+  const { initTheme } = await import("@earendil-works/pi-coding-agent");
+  const THEME = Symbol.for("@earendil-works/pi-coding-agent:theme");
+  const previous = globalThis[THEME];
+  t.after(() => (globalThis[THEME] = previous));
+  initTheme("dark", false);
+  const ui = { getToolsExpanded: () => false, theme: globalThis[THEME] };
+  const plain = (lines) => lines.map((l) => l.replace(/\x1b\][^\x07]*\x07/g, "").replace(/\x1b\[[0-9;]*m/g, "").trimEnd()).filter(Boolean).join("\n");
+  let id;
+  const { session } = await start(
+    t,
+    [calls(spawn("scout")), (c) => ((id = idIn(lastText(c))), says("waiting")()), says("waiting"), says("noted")],
+    shell({ scout: [["subagent_stop", { id: "ffffffff" }]] }),
+  );
+  await session.prompt("go");
+  const draw = () => {
+    const view = fleet().get(id).view.transcript({ requestRender() {} }, ui);
+    const text = plain(view.render(100));
+    view.dispose();
+    return text;
+  };
+  // The rig's own renderer, from the child session this tree ran.
+  assert.match(draw(), /⏺ Stop\(ffffffff\)/);
+  await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+  const after = draw();
+  assert.doesNotMatch(after, /Stop\(/);
+  assert.match(after, /"id": "ffffffff"/);
+});
+
+test("a worktree spawn whose tool call is aborted stops git and creates nothing", async (t) => {
+  const { createWorktree } = await import("../extensions/subagents/worktree.ts");
+  const { mkdtempSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const box = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-lane54-abort-")));
+  t.after(() => rmSync(box, { recursive: true, force: true }));
+  const cwd = join(box, "repo");
+  mkdirSync(cwd);
+  repo(cwd);
+  await assert.rejects(createWorktree(cwd, join(box, "trees"), "abcdef12", AbortSignal.abort()), { message: "Could not create the worktree: git timed out or was stopped." });
+  assert.equal(existsSync(join(box, "trees")), false);
+  assert.equal(git(cwd, "branch", "--list", "subagent/abcdef12"), "");
 });
