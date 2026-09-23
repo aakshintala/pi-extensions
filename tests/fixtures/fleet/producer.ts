@@ -4,7 +4,7 @@
 //   {"act": id, "text"}                       new activity line
 //   {"update": id, ...fields}                 registry.update(id, fields)
 //   {"add": ..., "throws": true}              activity() throws
-//   {"finish": id, "status", "result", "notice"?}  notice: the model's line
+//   {"finish": id, "status", "result", "notice"?}  notice: the model's line; none if absent
 //   {"notify": id, "text"}
 //   {"clock": seconds}                        the registry's clock (starts at 0)
 import { appendFileSync } from "node:fs";
@@ -43,7 +43,7 @@ export default function (pi: ExtensionAPI) {
         } else if ("update" in op) {
           const { update, ...change } = op;
           registry.update(update, change);
-        } else if ("finish" in op) registry.finish(op.finish, op.status, op.result, op.notice);
+        } else if ("finish" in op) registry.finish(op.finish, op.status, op.result, op.notice ?? null);
         else if ("notify" in op) registry.notify(op.notify, op.text);
         else if ("clock" in op) {
           now = op.clock;

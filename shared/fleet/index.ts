@@ -51,11 +51,15 @@ export interface Fleet {
   register(spec: ItemSpec): void;
   /** Changes an item's fields and redraws. Call with no change to redraw a new activity line. Ignored once the item is finished. */
   update(id: string, change?: Partial<Pick<ItemSpec, "label" | "parentId" | "status">>): void;
-  /** `result` is the user's summary; a failed or stopped result carries the error or reason. `notice`, if given, is the model's line, delivered with `notify`. */
-  finish(id: string, status: FinalStatus, result: string, notice?: string): void;
-  /** Sends `text` to the item's owner session: it starts a turn when idle and joins the running turn otherwise. Dropped when the owner has no fleet extension. */
+  /**
+   * `result` is the user's summary; a failed or stopped result carries the error or reason.
+   * `notice` is the model's line, delivered with `notify`: omitted, a default line built from
+   * the item; `null`, none (the model already has the result).
+   */
+  finish(id: string, status: FinalStatus, result: string, notice?: string | null): void;
+  /** Sends `text` to the item's owner session: it starts a turn when idle and joins the running turn otherwise. Held until the owner attaches. */
   notify(id: string, text: string): void;
-  /** The fleet extension's delivery for one session. Returns a detach function. */
+  /** The fleet extension's delivery for one session; notices held for it are delivered now. Returns a detach function; notices for a detached owner, or one whose sink threw, are dropped until it attaches again. */
   attach(owner: string, deliver: (notice: Notice) => void): () => void;
   get(id: string): Item | undefined;
   /** In registration order. */
@@ -68,12 +72,37 @@ export interface Fleet {
   now: () => number;
 }
 
+/** Running time as `5s`, `1m05s` or `1h02m`. */
+export function duration(ms: number) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
+
 export const isFinished = (s: Status) => s === "completed" || s === "failed" || s === "stopped";
 
 export function createFleet(): Fleet {
   const items = new Map<string, Item>();
   const listeners = new Set<() => void>();
   const sinks = new Map<string, (notice: Notice) => void>();
+  const held = new Map<string, Notice[]>(); // for owners not attached yet
+  const gone = new Set<string>(); // detached owners: their notices are dropped
+  const send = (owner: string, notice: Notice) => {
+    const deliver = sinks.get(owner);
+    if (!deliver) {
+      if (!gone.has(owner)) held.set(owner, [...(held.get(owner) ?? []), notice]);
+      return;
+    }
+    try {
+      deliver(notice);
+    } catch {
+      // A disposed session's sink: drop the notice and detach it.
+      sinks.delete(owner);
+      gone.add(owner);
+    }
+  };
   const changed = () => {
     for (const l of [...listeners]) l();
   };
@@ -96,19 +125,25 @@ export function createFleet(): Fleet {
       if (!item) return;
       Object.assign(item, { status, result, endedAt: fleet.now() });
       changed();
-      if (notice !== undefined) fleet.notify(id, notice);
+      if (notice === null) return;
+      fleet.notify(id, notice ?? `${item.kind} ${item.label} (id ${id}) ${status} after ${duration(item.endedAt! - item.startedAt)}: ${result}`);
     },
     notify(id, text) {
       const item = items.get(id);
-      const deliver = item && sinks.get(item.owner);
-      if (!deliver) return;
+      if (!item) return;
       const { kind, label, status, result } = item;
-      deliver({ text, item: { id, kind, label, status, result, ms: (item.endedAt ?? fleet.now()) - item.startedAt } });
+      send(item.owner, { text, item: { id, kind, label, status, result, ms: (item.endedAt ?? fleet.now()) - item.startedAt } });
     },
     attach(owner, deliver) {
       sinks.set(owner, deliver);
+      gone.delete(owner);
+      const notices = held.get(owner) ?? [];
+      held.delete(owner);
+      for (const notice of notices) send(owner, notice);
       return () => {
-        if (sinks.get(owner) === deliver) sinks.delete(owner);
+        if (sinks.get(owner) !== deliver) return;
+        sinks.delete(owner);
+        gone.add(owner);
       };
     },
     get: (id) => items.get(id),
