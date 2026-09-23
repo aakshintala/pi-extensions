@@ -26,13 +26,12 @@ test("widget: markers, one collapsed done line, overflow cap, hidden when cleare
 
   await send(tui, "plan", 1);
   await tui.waitForScreen(`
+
  plan
 
 
-
- todo_write
- Todo list saved: 8 pending, 1 in_progress, 2 completed.
-
+ ⏺ TodoWrite
+   ⎿  Todo list saved: 8 pending, 1 in_progress, 2 completed.
 
  Planned.
 
@@ -49,14 +48,16 @@ test("widget: markers, one collapsed done line, overflow cap, hidden when cleare
 
 ────────────────────────────────────────────────────────────────────────────────
 ~/cwd
-↑132 ↓109 R3 W133 CH1.1% 0.2%/128k (auto)                              harness-1`);
+↑132 ↓109 R3 W133 CH1.1% 0.2%/128k (auto)                              harness-1
+`);
   await send(tui, "clear", 2);
   await tui.waitForScreen(`
 
+ plan
 
- todo_write
- Todo list saved: 8 pending, 1 in_progress, 2 completed.
 
+ ⏺ TodoWrite
+   ⎿  Todo list saved: 8 pending, 1 in_progress, 2 completed.
 
  Planned.
 
@@ -64,10 +65,8 @@ test("widget: markers, one collapsed done line, overflow cap, hidden when cleare
  clear
 
 
-
- todo_write
- Todo list cleared: 0 pending, 0 in_progress, 0 completed.
-
+ ⏺ TodoWrite
+   ⎿  Todo list cleared: 0 pending, 0 in_progress, 0 completed.
 
  Cleared.
 
@@ -75,7 +74,8 @@ test("widget: markers, one collapsed done line, overflow cap, hidden when cleare
 
 ────────────────────────────────────────────────────────────────────────────────
 ~/cwd
-↑169 ↓117 R275 W170 CH70.7% 0.2%/128k (auto)                           harness-1`);
+↑169 ↓117 R275 W170 CH70.7% 0.2%/128k (auto)                           harness-1
+`);
 });
 
 test("widget: a fully completed list is hidden after the next prompt", async (t) => {
@@ -88,10 +88,8 @@ test("widget: a fully completed list is hidden after the next prompt", async (t)
  finish
 
 
-
- todo_write
- Todo list saved: 0 pending, 0 in_progress, 3 completed.
-
+ ⏺ TodoWrite
+   ⎿  Todo list saved: 0 pending, 0 in_progress, 3 completed.
 
  All done.
 
@@ -107,6 +105,8 @@ test("widget: a fully completed list is hidden after the next prompt", async (t)
 
 
 
+
+
 `);
   await send(tui, "thanks", 2);
   await tui.waitForScreen(`
@@ -114,10 +114,8 @@ test("widget: a fully completed list is hidden after the next prompt", async (t)
  finish
 
 
-
- todo_write
- Todo list saved: 0 pending, 0 in_progress, 3 completed.
-
+ ⏺ TodoWrite
+   ⎿  Todo list saved: 0 pending, 0 in_progress, 3 completed.
 
  All done.
 
@@ -133,6 +131,8 @@ test("widget: a fully completed list is hidden after the next prompt", async (t)
 ~/cwd
 ↑65 ↓38 R60 W66 CH77.0% 0.1%/128k (auto)                               harness-1
 
+
+
 `);
 });
 
@@ -145,10 +145,8 @@ test("widget: a subagent session (rig.subagent entry) draws none", async (t) => 
  delegated
 
 
-
- todo_write
- Todo list saved: 0 pending, 1 in_progress, 0 completed.
-
+ ⏺ TodoWrite
+   ⎿  Todo list saved: 0 pending, 1 in_progress, 0 completed.
 
  Working.
 
@@ -157,6 +155,8 @@ test("widget: a subagent session (rig.subagent entry) draws none", async (t) => 
 ────────────────────────────────────────────────────────────────────────────────
 ~/cwd
 ↑43 ↓19 R4 W44 CH4.8% 0.1%/128k (auto)                                 harness-1
+
+
 
 
 

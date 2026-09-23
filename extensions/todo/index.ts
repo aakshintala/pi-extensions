@@ -3,6 +3,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { oneLine } from "../../shared/text/index.ts"; // item text is model input
+import { resultText, toolRenderers } from "../../shared/tool-display/index.ts";
 
 type Status = "pending" | "in_progress" | "completed";
 type Todo = { text: string; status: Status };
@@ -115,6 +116,12 @@ export default function (pi: ExtensionAPI) {
       },
       required: ["todos"],
     } as never,
+    ...toolRenderers({
+      title: "TodoWrite",
+      arg: () => "",
+      result: (r) => ({ summary: resultText(r), body: [] }),
+      summary: { tool: "todo_write", verb: "updated", many: "todos" },
+    }),
     async execute(_id, params: { todos: Todo[] }, _signal, _onUpdate, ctx) {
       const next = params.todos.map(({ text, status }, i) => {
         if (typeof text !== "string" || !text.trim()) throw new Error(`todos[${i}].text is empty`);

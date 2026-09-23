@@ -2,6 +2,7 @@
 // concurrent requests merged into one fetch. Serves get_quotas and /quota,
 // and (ticket #66) the footer. Polls only while a TUI session is active.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { resultText, toolRenderers } from "../../shared/tool-display/index.ts";
 
 export const FOOTER_TIMEOUT_MS = 5_000;
 export const CALL_TIMEOUT_MS = 8_000;
@@ -219,6 +220,12 @@ export function registerQuota(pi: ExtensionAPI, settings: Settings, deps: Partia
       type: "object",
       properties: { provider: { type: "string", description: "Provider id, e.g. claude, codex, cursor. Omit for all." } },
     } as never,
+    ...toolRenderers({
+      title: "GetQuotas",
+      arg: (a: { provider?: string }) => a.provider ?? "",
+      result: (r, _a, _e, theme) => ({ summary: "Checked quotas", body: resultText(r).split("\n").map((l) => theme.fg("toolOutput", l)) }),
+      summary: { tool: "get_quotas", verb: "checked", many: "quotas" },
+    }),
     async execute(_id, params: { provider?: string }) {
       const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: undefined });
       const feed = await client.get();

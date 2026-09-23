@@ -78,3 +78,18 @@ test("a saved transcript groups the same way as the live session", async (t) => 
   await session.extensionRunner.emit({ type: "session_start", reason: "resume" });
   assert.deepEqual(transcript(), live);
 });
+
+test("rig tools count in a group summary with their own verbs", async (t) => {
+  initTheme("dark", false);
+  const extensions = await Promise.all(["todo", "status", "search"].map(async (n) => (await import(`../extensions/${n}/index.ts`)).default));
+  const { session, cwd } = await scriptedSession(t, { extensions: [toolDisplay, ...extensions] });
+  const { trackMessage, settle } = await import("../shared/tool-display/index.ts");
+  const calls = [
+    ["grep", { pattern: "a" }], ["grep", { pattern: "b" }], ["find", { pattern: "*.ts" }],
+    ["todo_write", { todos: [] }], ["get_quotas", {}], ["todo_write", { todos: [] }],
+  ].map(([name, args], i) => ({ type: "toolCall", id: `r${i}`, name, arguments: args }));
+  trackMessage({ role: "assistant", content: calls });
+  for (const c of calls) settle(c.id, "done");
+  const leader = new ToolExecutionComponent(calls[0].name, calls[0].id, calls[0].arguments, {}, session.getToolDefinition("grep"), { requestRender() {} }, cwd);
+  assert.deepEqual(leader.render(80).map(plain), ["", " ⏺ Searched 2 patterns, found files, updated todos, checked quotas"]);
+});

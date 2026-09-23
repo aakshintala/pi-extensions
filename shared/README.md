@@ -47,7 +47,7 @@ settings.onChange((key, value) => { /* apply */ });
 ### `tool-display/`
 
 The rig's tool style (spec #40), Claude Code-like. Rig tools and the built-in
-`read`/`edit`/`write` render through it.
+`read`/`edit`/`write` render through it, and runs of calls group into one line.
 
 ```ts
 import { toolRenderers, plural } from "../../shared/tool-display/index.ts";
@@ -68,6 +68,27 @@ pi.registerTool({
   lines, expanded capped at 200), `errorLines`, `unifiedDiff` (from old/new
   text, no file reads, skipped over 100,000 characters) and `diffBody`.
 - Colours come only from theme keys; every line fits the width it is given.
+
+**Groups** (#56). Give a tool a `summary` and consecutive calls to such tools in
+one assistant message collapse into one live line, e.g. "Read 3 files, edited
+2 files +442 −12 · 1 failed":
+
+```ts
+summary: { tool: "edit", verb: "edited", one: "file", lines: (args) => ({ added, removed }) } // "edited N files +a −r"
+summary: { tool: "todo_write", verb: "updated", many: "todos" }                              // no `one`: "updated todos"
+```
+
+- The first call draws the summary; the others draw nothing. Failed calls always
+  show. Ctrl+O (`context.expanded`) or a click on the group shows every call.
+- A tool without `summary` (such as `ask_user`) is never grouped and splits a run,
+  as does text between calls.
+- `extensions/tool-display` feeds the groups from Pi's events. To group a
+  transcript built from saved messages, call `trackMessage(assistantMessage)`,
+  `settle(toolCallId, "done" | "error" | "cancelled")` for each result, then
+  `endRun()` (calls with no result become `cancelled`). `resetGroups()` forgets
+  them and stops the one spinner timer.
+- `summaryText(theme, calls, thought)` builds the text; `thought` starts it with
+  "thought ·" (#57).
 
 ### `text/`
 
