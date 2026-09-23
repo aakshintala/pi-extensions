@@ -39,3 +39,28 @@ settings.onChange((key, value) => { /* apply */ });
 - `/rig` itself is registered by `extensions/rig`, which also sends the
   load warnings at session start; other extensions need not call
   `notifyWarnings`.
+
+### `tool-display/`
+
+The rig's tool style (spec #40), Claude Code-like. Rig tools and the built-in
+`read`/`edit`/`write` render through it.
+
+```ts
+import { toolRenderers, plural } from "../../shared/tool-display/index.ts";
+
+pi.registerTool({
+  ...definition,
+  ...toolRenderers({
+    title: "Read",                                  // ⏺ Read(a.txt)
+    arg: (args, cwd) => args.path,
+    result: (result, args, expanded, theme) => ({ summary: "Read 3 lines", body: [] }), // ⎿ Read 3 lines
+  }),
+});
+```
+
+- `toolRenderers` sets `renderShell: "self"`; partial results draw nothing and
+  errors always show as `⎿ Error: …`.
+- Pieces for other layouts: `callLine`, `resultLines` (collapsed to 4 body
+  lines, expanded capped at 200), `errorLines`, `unifiedDiff` (from old/new
+  text, no file reads, skipped over 100,000 characters) and `diffBody`.
+- Colours come only from theme keys; every line fits the width it is given.

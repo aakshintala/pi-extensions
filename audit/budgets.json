@@ -3,6 +3,9 @@
   "maxPromptTokens": 4000,
   "maxSkills": 5,
   "tools": {
-    "get_quotas": 100
+    "get_quotas": 100,
+    "read": 180,
+    "edit": 420,
+    "write": 110
   }
 }
