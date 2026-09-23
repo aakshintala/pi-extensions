@@ -75,9 +75,13 @@ Expanded, each call looks like this:
 - **Guarded Pi patch** (one of the rig's three, #1). It wraps
   `AssistantMessageComponent.prototype.updateContent` on Pi 0.87.x only, and
   only when the message's children are exactly what Pi 0.87 builds; anything
-  else keeps Pi's own render. A block you clicked open or closed keeps Pi's
-  render too. The patch is installed once while any session uses the
-  extension and removed with the last one, so `/new`, `/resume` and a
-  `/reload` without the extension get Pi's stock render.
+  else, or an error while restyling, keeps Pi's own render. A thinking block
+  you clicked open or closed keeps Pi's render; the message's other blocks are
+  still restyled.
+- **One patch per process.** It is installed once while any session, including
+  in-process subagent sessions, uses the extension, and removed with the last
+  one. `/new`, `/resume` and a `/reload` without the extension get Pi's stock
+  render; a `/reload` with a subagent session up runs the reloaded code. If
+  something else wraps the same method later, the patch goes inert instead.
 
 No commands, keys or settings.
