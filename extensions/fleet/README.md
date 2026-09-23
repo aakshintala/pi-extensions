@@ -1,6 +1,6 @@
 # fleet
 
-FleetView: one list below the editor of all background work (agents, shell jobs and monitors) that other rig extensions register. It also delivers their notices to the model. Spec: #29.
+FleetView: one list below the editor of all background work (agents, shell jobs and monitors) that other rig extensions register. Opening a row shows that item in the viewer. It also delivers their notices to the model. Spec: #29.
 
 - The first row is the main session. Every item follows, and nested items are indented under their parent.
 - Each row shows kind, label, running time and the latest activity. A finished row shows its status and result.
@@ -8,6 +8,17 @@ FleetView: one list below the editor of all background work (agents, shell jobs 
 - FleetView shows at most 6 lines. A `… N more` line counts the hidden rows, and the list scrolls to keep the selection visible.
 - FleetView is hidden when nothing is registered.
 - Terminal control sequences are stripped from every row. A row whose activity line throws shows `activity failed`.
+
+## Viewer
+
+- Enter or a click on a row shows that item in place of the chat. `●` marks the item on screen.
+- Enter on another row switches straight to it. Enter on `main`, or Esc, returns to the chat.
+- A shell job or monitor shows its log file, read as it grows, with colours kept and other control sequences stripped. An agent shows its transcript.
+- Main-session output keeps going to the chat while you view an item, so you see it when you return.
+- In fullscreen mode the viewer scrolls like the chat: it follows new output, scrolling up pauses it, and End jumps back to the end.
+- What you type while viewing an agent steers it and shows in the viewer. Other items take no steering, and the main session gets nothing.
+- The viewer stays open when its item finishes.
+- The chat swap reaches into Pi's layout. If Pi is not version 0.87.1 or its layout differs, the viewer opens as a full-size overlay instead. The overlay has its own steer line, and PageUp, PageDown, Home, End and the mouse wheel scroll it.
 
 ## Notices
 
@@ -31,8 +42,12 @@ Interactive sessions end their runs as usual: their work keeps running and its n
 |---|---|---|
 | Down or Left | Empty prompt | Focuses FleetView |
 | Up / Down | FleetView focused | Moves the selection |
+| Enter | FleetView focused | Opens the selected row |
 | Esc | FleetView focused | Returns to the prompt |
-| Click | Fullscreen mode | Selects the row |
+| Click | Fullscreen mode | Opens the row |
+| Esc | Viewing an item | Returns to the chat |
+| Ctrl+Q, then y | Viewing an item | Stops it. Any other key cancels |
+| End | Viewing an item | Jumps to the end and follows again |
 
 Typing at a non-empty prompt is never captured.
 
