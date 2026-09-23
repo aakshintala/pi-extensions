@@ -127,7 +127,6 @@ test("a probe that arrives after its 5 s timeout is still aborted and leaves no 
   assert.deepEqual(transcript(session), []);
 
   await session.prompt("hello");
-  console.log(session.isIdle, JSON.stringify(session.sessionManager.getEntries().map(e=>[e.type,e.message?.role,e.message?.content,e.message?.stopReason,e.message?.errorMessage])));
   assert.deepEqual(transcript(session), ["user: hello", "assistant: hi"]);
 });
 
