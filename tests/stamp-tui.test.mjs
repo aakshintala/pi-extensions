@@ -1,6 +1,8 @@
 // Stamps in a real pi (spec #36, ADR 0001): fixed clock in UTC, full-screen asserts.
 import { test } from "node:test";
 import assert from "node:assert";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { liveGroup, startTui } from "./helpers/tui.mjs";
 
@@ -106,4 +108,73 @@ ${FOOTER}`, 48);
   await tui.waitForScreen(menu(true));
   tui.keys("Escape");
   await tui.waitForScreen(editor(true));
+});
+
+test("/rig: a typed locale is validated, saved, and stays in the Enter cycle", async (t) => {
+  const tui = await start(t, []);
+  const FOOTER = `~/cwd
+0.0%/128k (auto)                                                       harness-1`;
+  const list = (locale) => fill(`
+
+ [stamp]
+
+  hourCycle                   24h
+  showSeconds                 true
+  dateContext                 day-change
+→ locale                      ${locale}
+  timeZone                    local
+  responseTiming              off
+  assistantMetadata           off
+  showExactTimeline           true
+  showThinkingLevel           true
+  showCompactAbnormalOutcome  true
+  (4/12)
+
+  Time format locale. Default: invariant.
+
+  Enter/Space to change · Esc to cancel
+  ←/→ to switch tab · r to reset to default · e to type a value
+${FOOTER}`, 24);
+  const editor = (input, error) => fill(`
+
+ [stamp]
+
+locale
+Time format locale. Default: invariant.
+
+>${input ? ` ${input}` : ""}
+${error ? "locale must be one of invariant, system or a BCP 47 tag\n" : ""}
+  Enter to save · Esc to go back
+${FOOTER}`, 24);
+
+  tui.type("/rig");
+  tui.keys("Enter");
+  await tui.waitForScreen(
+    list("invariant")
+      .replace("  hourCycle", "→ hourCycle")
+      .replace("→ locale", "  locale")
+      .replace("(4/12)", "(1/12)")
+      .replace("Time format locale. Default: invariant.", "Clock format. Default: 24h.")
+      .replace(" · e to type a value", ""),
+  );
+  tui.keys("Down", "Down", "Down");
+  await tui.waitForScreen(list("invariant"));
+  tui.keys("e");
+  await tui.waitForScreen(editor(""));
+  tui.type("en_US");
+  tui.keys("Enter");
+  await tui.waitForScreen(editor("en_US", true));
+  tui.keys("BSpace", "BSpace", "BSpace", "BSpace", "BSpace");
+  tui.type("de-DE");
+  tui.keys("Enter");
+  await tui.waitForEvent("stamp.locale=de-DE");
+  await tui.waitForScreen(list("de-DE"));
+  // Enter cycles the named values and comes back to the typed one.
+  for (const [value, n] of [["invariant", 1], ["system", 1], ["de-DE", 2]]) {
+    tui.keys("Enter");
+    await tui.waitForEvent(`stamp.locale=${value}`, n);
+    await tui.waitForScreen(list(value));
+  }
+  const rigJson = JSON.parse(readFileSync(join(dirname(tui.home), "agent", "rig.json"), "utf8"));
+  assert.deepEqual(rigJson, { stamp: { locale: "de-DE" } });
 });

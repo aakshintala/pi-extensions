@@ -6,16 +6,12 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerHooks } from "node:module";
-
-// pi-tui is nested under pi-coding-agent (Pi supplies it at runtime), so point the
-// bare import at that copy.
-const piTui = import.meta.resolve("@earendil-works/pi-coding-agent").replace(/dist\/index\.js$/, "node_modules/@earendil-works/pi-tui/dist/index.js");
-registerHooks({ resolve: (specifier, context, next) => next(specifier === "@earendil-works/pi-tui" ? piTui : specifier, context) });
+import "../../tests/fixtures/tool-display/pi-tui.mjs";
 const { createRigSettings } = await import("../../shared/settings/index.ts");
 const { MAX_FORMATTERS } = await import("./format.ts");
 const { stampRenderer } = await import("./render.ts");
-const { frozenSettings, importPiStamp, SETTINGS } = await import("./settings.ts");
+const { frozenSettings, importPiStamp, IMPORTED, SETTINGS } = await import("./settings.ts");
+const { isLocale } = await import("./format.ts");
 
 const DEFAULTS = Object.fromEntries(SETTINGS.map((s) => [s.key, s.default]));
 const T = Date.UTC(2026, 8, 23, 14, 5, 9); // 2026-09-23 14:05:09 UTC
@@ -125,7 +121,8 @@ test("rendering many stamps over many frames takes one settings snapshot per cha
   let snapshots = 0;
   const values = section.values;
   section.values = () => (snapshots++, values());
-  const settings = frozenSettings(section);
+  const frozen = frozenSettings(section);
+  const settings = frozen.get;
   const renderer = stampRenderer(settings);
   const components = Array.from({ length: 500 }, (_, i) =>
     renderer({ type: "custom", customType: "pi-stamp", data: user({ timestamp: T + i * 1000 }) }, { expanded: false }, theme),
@@ -186,9 +183,14 @@ test("pi-stamp.json is imported once: valid non-default values only, and pi-stam
   assert.equal(section.get("toolStamps"), true);
   assert.equal(section.get("hourCycle"), "24h");
   assert.deepEqual(rigFile(), { stamp: { locale: "system", timeZone: "Asia/Kolkata", toolStamps: true } });
-  // A later /rig edit is not undone by the next start.
+  // Later /rig edits, even resetting every stamp setting, are not undone by the next start.
   section.set("toolStamps", false);
   assert.equal(run().get("toolStamps"), false);
+  for (const s of SETTINGS) run().reset(s.key);
+  assert.deepEqual(rigFile(), {});
+  assert.equal(run().get("locale"), "invariant");
+  assert.deepEqual(rigFile(), {});
+  assert.ok(existsSync(join(d, IMPORTED)));
   assert.equal(readFileSync(join(d, "pi-stamp.json"), "utf8"), before);
 });
 
@@ -214,4 +216,46 @@ test("invalidate() drops themed output, so a theme change restyles the stamp", (
   assert.equal(component.render(20)[0].trim(), "A14:05:09");
   component.invalidate();
   assert.equal(component.render(20)[0].trim(), "B14:05:09");
+});
+
+test("the import is one write of every value", () => {
+  const { d } = importDir({ locale: "system", toolStamps: true, showSeconds: false });
+  const settings = createRigSettings(d);
+  const section = settings.declare("stamp", SETTINGS);
+  const writes = [];
+  const setMany = section.setMany;
+  section.set = (k, v) => writes.push({ [k]: v });
+  section.setMany = (changes) => (writes.push(changes), setMany(changes));
+  importPiStamp(section, settings.path, d);
+  assert.deepEqual(writes, [{ showSeconds: false, locale: "system", toolStamps: true }]);
+});
+
+test("locale: POSIX names are imported as BCP 47 tags; only well-formed tags are valid", () => {
+  const { run, rigFile } = importDir({ locale: "en_US.UTF-8" });
+  assert.equal(run().get("locale"), "en-US");
+  assert.deepEqual(rigFile(), { stamp: { locale: "en-US" } });
+  for (const good of ["en-US", "de", "de-CH-u-hc-h23", "zh-Hant-TW"]) assert.equal(isLocale(good), true, good);
+  for (const bad of ["en_US", "en_US.UTF-8", "local", "posix", "", "e"]) assert.equal(isLocale(bad), false, bad);
+});
+
+test("frozenSettings stops following changes once stopped", () => {
+  const section = createRigSettings(mkdtempSync(join(tmpdir(), "stamp-"))).declare("stamp", SETTINGS);
+  const frozen = frozenSettings(section);
+  section.set("showSeconds", false);
+  assert.equal(frozen.get().showSeconds, false);
+  frozen.stop();
+  section.set("showSeconds", true);
+  assert.equal(frozen.get().showSeconds, false);
+});
+
+test("the extension factory only registers; the import runs at session_start", async () => {
+  const { d, rigFile } = importDir({ locale: "system" });
+  process.env.PI_CODING_AGENT_DIR = d;
+  const { default: stamp } = await import("./index.ts");
+  const handlers = {};
+  stamp({ on: (name, h) => (handlers[name] = h), registerEntryRenderer() {}, appendEntry() {} });
+  assert.equal(rigFile(), undefined);
+  handlers.session_start({}, { mode: "tui", hasUI: false, sessionManager: { getBranch: () => [] } });
+  assert.deepEqual(rigFile(), { stamp: { locale: "system" } });
+  handlers.session_shutdown({});
 });

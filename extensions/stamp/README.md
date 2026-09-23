@@ -5,6 +5,8 @@ response timing, model metadata, cost and tool durations. Ported from the local
 fork of [`@narumitw/pi-stamp`](https://www.npmjs.com/package/@narumitw/pi-stamp)
 0.51.0 (MIT) for spec [#36](https://github.com/aakshintala/pi-rig/issues/36).
 
+It registers no tools and no commands.
+
 ## What it records
 
 In TUI sessions, every user message and every response gets a `pi-stamp` session
@@ -38,8 +40,11 @@ Edit with `/rig`; there is no `/stamp` command.
 | `showCostSinceUser` | `false` | Cost since your last message |
 | `toolStamps` | `false` | `tool <name> · <duration> · <outcome>` for each tool |
 
-The `/rig` menu cycles `locale` and `timeZone` through their named values; set a
-tag or zone in `rig.json` and `/reload`.
+In `/rig`, press `e` on `locale` or `timeZone` to type a tag or zone; Enter
+cycles the named values and the last typed one.
 
-On first run, when `rig.json` has no `stamp` section, valid values are imported
-once from the old fork's `pi-stamp.json`. That file is never written.
+At the first session start with a `pi-stamp.json` from the old fork, its valid
+values are imported in one write, unless `rig.json` already has a `stamp`
+section. POSIX locales such as `en_US.UTF-8` become `en-US`. The marker file
+`rig-stamp-imported` beside `rig.json` stops later imports; `pi-stamp.json` is
+never written.

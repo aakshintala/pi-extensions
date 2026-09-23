@@ -27,7 +27,9 @@ export interface MessageStampInput {
   firstContentAt?: number;
 }
 
+/** A well-formed BCP 47 tag with a 2–3 letter language, such as `en-US` or `de-CH-u-hc-h23`. */
 export function isLocale(value: string): boolean {
+  if (!/^[a-z]{2,3}(-[a-z0-9]{1,8})*$/i.test(value)) return false;
   try {
     return Intl.getCanonicalLocales(value).length === 1;
   } catch {

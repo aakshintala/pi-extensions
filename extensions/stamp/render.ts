@@ -1,6 +1,6 @@
 // Stamp entries: their persisted shapes (every version ever written, so old sessions
 // still render) and the renderer that draws them right-aligned.
-import type { EntryRenderer } from "@earendil-works/pi-coding-agent";
+import type { EntryRenderer, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
   formatExactTimelineLine,
@@ -154,7 +154,7 @@ export function stampRenderer(settings: () => Readonly<StampSettings>): EntryRen
     } else if (isMessageStamp(data)) {
       lines = (s) => messageLines(data, s, options.expanded);
     } else return undefined;
-    return rightAligned(lines, settings, (text) => theme.fg("dim", text));
+    return rightAligned(lines, settings, theme);
   };
 }
 
@@ -207,7 +207,8 @@ function exactLines(observations: ReadonlyArray<readonly [TimelineBoundary, numb
 function rightAligned(
   build: (s: Readonly<StampSettings>) => Line[],
   settings: () => Readonly<StampSettings>,
-  style: (text: string) => string,
+  // Pi's theme is live (a proxy over the current theme), so colours are read when output is rebuilt.
+  theme: Pick<Theme, "fg">,
 ): Component {
   let seen: Readonly<StampSettings> | undefined;
   let lines: Line[] = [];
@@ -224,6 +225,7 @@ function rightAligned(
       }
       if (w !== width) {
         width = w;
+        const style = (text: string) => theme.fg("dim", text);
         output = lines.flatMap((source) => {
           const wrapped = source.exact ? hardWrap(source.text, w).map(style) : wrapTextWithAnsi(style(source.text), w);
           return wrapped.map((l) => " ".repeat(Math.max(0, w - visibleWidth(l))) + l);

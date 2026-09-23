@@ -248,3 +248,16 @@ test("an open enum also accepts values its test passes, and names them in the wa
   assert.equal(section.get("zone"), "Asia/Kolkata");
   assert.throws(() => section.set("zone", 5), /must be one of local or an IANA zone/);
 });
+
+test("setMany validates every key before writing, then writes them in one file update", () => {
+  const d = dir();
+  const { section } = load(d);
+  const heard = [];
+  section.onChange((k, v) => heard.push([k, v]));
+  assert.throws(() => section.setMany({ verbose: true, maxConcurrent: 99 }), /maxConcurrent must be between 1 and 32/);
+  assert.equal(existsSync(join(d, "rig.json")), false);
+  assert.equal(section.get("verbose"), false);
+  section.setMany({ verbose: true, mode: "slow", maxConcurrent: 10 });
+  assert.deepEqual(readFile(d), { subagents: { verbose: true, mode: "slow" } });
+  assert.deepEqual(heard, [["verbose", true], ["mode", "slow"], ["maxConcurrent", 10]]);
+});

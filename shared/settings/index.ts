@@ -25,6 +25,8 @@ export interface Section {
   values(): Record<string, Value>;
   /** Validates, merges into the current file and writes it atomically. Throws on an invalid value or unreadable file. */
   set(key: string, value: Value): void;
+  /** `set` for several keys in one write; all are validated before anything is written. */
+  setMany(values: Record<string, Value>): void;
   reset(key: string): void;
   onChange(listener: (key: string, value: Value) => void): () => void;
 }
@@ -126,25 +128,33 @@ export function createRigSettings(agentDir: string): RigSettings {
         return values.get(key)!;
       },
       values: () => Object.fromEntries(values),
-      set(key, value) {
+      set: (key, value) => section.setMany({ [key]: value }),
+      setMany(changes) {
         if (sections.get(name) !== section) throw new Error(`rig section ${name} was redeclared; use the new handle`);
-        const setting = byKey.get(key);
-        const p = setting ? problem(setting, value) : "is not a known setting";
-        if (p) throw new Error(`rig setting ${name}.${key} ${p}`);
+        const entries = Object.entries(changes);
+        for (const [key, value] of entries) {
+          const setting = byKey.get(key);
+          const p = setting ? problem(setting, value) : "is not a known setting";
+          if (p) throw new Error(`rig setting ${name}.${key} ${p}`);
+        }
         // Re-read so another session's changes to other keys survive.
         const current = read();
         const found = own(current, name);
         const sec = isObject(found) ? found : {};
-        if (value === setting!.default) delete sec[key];
-        else put(sec, key, value);
+        for (const [key, value] of entries) {
+          if (value === byKey.get(key)!.default) delete sec[key];
+          else put(sec, key, value);
+        }
         if (Object.keys(sec).length) put(current, name, sec);
         else delete current[name];
         mkdirSync(agentDir, { recursive: true });
         const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
         writeFileSync(tmp, JSON.stringify(current, null, 2) + "\n");
         renameSync(tmp, path);
-        values.set(key, value);
-        for (const l of listeners) l(key, value);
+        for (const [key, value] of entries) {
+          values.set(key, value);
+          for (const l of listeners) l(key, value);
+        }
       },
       reset(key) {
         const setting = byKey.get(key);

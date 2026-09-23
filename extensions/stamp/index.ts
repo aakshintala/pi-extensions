@@ -32,12 +32,9 @@ const noCost = (): Cost => ({ total: 0, reported: false, valid: true });
 export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () => number } = {}) {
   const rig = rigSettings(getAgentDir());
   const section = rig.declare("stamp", SETTINGS);
-  try {
-    importPiStamp(section, rig.path, getAgentDir());
-  } catch {
-    // An unreadable rig.json is already reported as a load warning.
-  }
-  pi.registerEntryRenderer(STAMP_ENTRY_TYPE, stampRenderer(frozenSettings(section)));
+  // Subscribed on first use, released on shutdown.
+  let live: ReturnType<typeof frozenSettings> | undefined;
+  pi.registerEntryRenderer(STAMP_ENTRY_TYPE, stampRenderer(() => (live ??= frozenSettings(section)).get()));
 
   let tui = false;
   let lastStamp: number | undefined;
@@ -69,6 +66,11 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
   };
 
   pi.on("session_start", (_event, ctx) => {
+    try {
+      importPiStamp(section, rig.path, getAgentDir());
+    } catch (e) {
+      if (ctx.hasUI) ctx.ui.notify(`stamp: could not import pi-stamp.json: ${(e as Error).message}`, "warning");
+    }
     reset();
     pendingUsers.length = 0;
     tui = ctx.mode === "tui";
@@ -189,6 +191,8 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
   });
 
   pi.on("session_shutdown", () => {
+    live?.stop();
+    live = undefined;
     flushUsers();
     reset();
     tui = false;
