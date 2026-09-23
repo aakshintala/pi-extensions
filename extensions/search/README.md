@@ -9,28 +9,33 @@
 - `grep({ pattern, path?, glob?, ignoreCase?, literal?, context?, limit? })`:
   the built-in's parameters and output format. Smart case unless `ignoreCase`
   is set (`false` means case-sensitive). Respects `.gitignore`; `.git/` is
-  never searched.
+  never searched. Whitespace in a regex is sent to FFF hex-encoded, so an
+  extended-mode `(?x)` pattern matches its spaces literally instead of
+  ignoring them.
 - `find({ pattern, path?, limit? })`: a pattern with `*`, `?`, `[` or `{` is a
   glob, matched at any depth like the built-in; other text is a fuzzy name
-  search. Git-changed and frequently used files rank first. Files only, no
-  directories.
+  search, returned in FFF's ranking up to `limit`. Git-changed and
+  frequently used files rank first. `path` scopes the search inside FFF, before
+  ranking. Files only, no directories.
 
 ## Index
 
 One index per session, for the session's working directory, built in the
 background from `session_start` and kept current by FFF's file watcher. A
-search waits up to 5 s for the first scan. Frecency lives in
+search waits up to 5 s for the binding to load and the first scan to finish;
+cancelling the call ends the wait. Frecency lives in
 `<agent dir>/fff/frecency`. The index is destroyed on shutdown, `/reload` and
-session switch.
+session switch; a search still waiting for it then falls back.
 
 ## Fallback
 
 The built-in `grep` and `find` run instead, with a one-time warning, when:
 
 - FFF's native library is missing or fails to load
-- the session starts in `$HOME` or `/`
-- the first scan is not done within 5 s (that call only)
-- a path lies outside the working directory
+- FFF cannot create the index (a failing frecency database only costs ranking)
+- the session starts in `$HOME` or `/` (symlinks resolved)
+- loading and the first scan take over 5 s (that call only)
+- a path lies outside the working directory, or holds glob characters
 
 ## Parity
 
