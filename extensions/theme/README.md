@@ -5,7 +5,11 @@
 
 - Moving through the list previews each theme in memory.
 - Enter applies the theme; Pi saves it to `settings.json` itself.
-- Esc restores the previous theme and saves nothing.
+- Esc restores Pi's exact prior state and saves nothing: the theme, its file
+  watcher and automatic light/dark switching are untouched.
+- Preview swaps the active theme on the global Pi's theme module reads, the
+  way Pi's own picker previews. It is guarded: if Pi stops keeping the theme
+  there, moving through the list only moves the cursor.
 - Without the TUI, `/theme` says so.
 
 ## Tools and settings

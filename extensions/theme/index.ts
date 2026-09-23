@@ -1,7 +1,18 @@
 // /theme: Pi's own theme picker (the one /settings uses), opened directly.
-// Preview and cancel change the theme in memory only; select goes through
-// ctx.ui.setTheme(name), which Pi persists to settings.json itself.
-import { type ExtensionAPI, ThemeSelectorComponent } from "@earendil-works/pi-coding-agent";
+//
+// Pi's picker previews through its theme module, which swaps the active Theme
+// in memory and never touches the theme setting, the theme file watcher or the
+// light/dark auto-sync, so cancelling restores Pi's exact prior state. That
+// module is not reachable from an extension: ctx.ui.setTheme() with a Theme
+// instance marks the theme "<in-memory>", stops the watcher and turns
+// auto-sync off. So preview and cancel swap the active Theme on the global slot
+// Pi's theme module reads (guarded: without it, moving only moves the cursor),
+// and redraw. Select goes through ctx.ui.setTheme(name), which Pi persists.
+import { type ExtensionAPI, type Theme, ThemeSelectorComponent } from "@earendil-works/pi-coding-agent";
+
+// Pi 0.87 keeps the active Theme on these globals (modes/interactive/theme/theme.js).
+const THEME_SLOTS = [Symbol.for("@earendil-works/pi-coding-agent:theme"), Symbol.for("@mariozechner/pi-coding-agent:theme")];
+const slots = globalThis as unknown as Record<symbol, Theme | undefined>;
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("theme", {
@@ -11,18 +22,24 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("/theme needs the interactive TUI", "error");
 				return;
 			}
-			// ctx.ui.theme is a live proxy, so keep a real instance to restore on cancel.
 			const name = ctx.ui.theme.name ?? "";
-			const original = ctx.ui.getTheme(name);
-			const chosen = await ctx.ui.custom<string | undefined>((_tui, _theme, _kb, done) => {
+			const original = slots[THEME_SLOTS[0]!];
+			const canPreview = typeof original?.fg === "function";
+			const chosen = await ctx.ui.custom<string | undefined>((tui, _theme, _kb, done) => {
+				const show = (theme: Theme | undefined) => {
+					if (!canPreview || !theme) return;
+					for (const slot of THEME_SLOTS) slots[slot] = theme;
+					tui.invalidate();
+					tui.requestRender();
+				};
 				const picker = new ThemeSelectorComponent(
 					name,
 					(n) => done(n),
-					() => done(undefined),
-					(n) => {
-						const preview = ctx.ui.getTheme(n);
-						if (preview) ctx.ui.setTheme(preview);
+					() => {
+						show(original); // nothing else changed, so this is Pi's prior state
+						done(undefined);
 					},
+					(n) => show(ctx.ui.getTheme(n)),
 				);
 				return {
 					render: (w: number) => picker.render(w),
@@ -30,10 +47,7 @@ export default function (pi: ExtensionAPI) {
 					handleInput: (data: string) => picker.getSelectList().handleInput(data),
 				};
 			});
-			if (chosen === undefined) {
-				if (original) ctx.ui.setTheme(original);
-				return;
-			}
+			if (chosen === undefined) return;
 			const result = ctx.ui.setTheme(chosen);
 			if (!result.success) ctx.ui.notify(`Theme ${chosen} failed to load: ${result.error}`, "error");
 		},

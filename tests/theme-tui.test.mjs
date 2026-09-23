@@ -2,7 +2,7 @@
 // through Pi, cancel restores the old theme and writes nothing.
 import { test } from "node:test";
 import assert from "node:assert";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { liveGroup, startTui } from "./helpers/tui.mjs";
@@ -46,4 +46,33 @@ test("/theme Enter applies the theme and Pi saves it", async (t) => {
   tui.keys("Enter");
   await tui.waitForScreen(screen("light"));
   assert.equal(settings().theme, "light");
+});
+
+// After /reload with an automatic light/dark setting: the reload notice sits above.
+const RELOADED = " Reloaded keybindings, extensions, skills, prompts, themes, and context files";
+const autoScreen = (name, body = "") =>
+  [`\n\n${RELOADED}`, "", `theme: ${name}`, BORDER, body, BORDER, FOOTER].join("\n") +
+  "\n".repeat(body.split("\n").length === 1 ? 15 : 14);
+
+test("/theme cancel keeps Pi following the terminal's light/dark scheme", async (t) => {
+  const tui = await startTui(t, { extensions });
+  t.after(() => assert.deepEqual(liveGroup(tui.pid), []));
+  const path = join(dirname(tui.home), "agent", "settings.json");
+  const auto = JSON.stringify({ quietStartup: true, theme: "light/dark" });
+  writeFileSync(path, auto);
+  tui.type("/reload");
+  tui.keys("Enter");
+  await tui.waitForScreen(autoScreen("dark"));
+
+  tui.type("/theme");
+  tui.keys("Enter");
+  await tui.waitForScreen(autoScreen("dark", "→ dark        (current)\n  light"));
+  tui.keys("Down");
+  await tui.waitForScreen(autoScreen("light", "  dark        (current)\n→ light")); // preview
+  tui.keys("Escape");
+  await tui.waitForScreen(autoScreen("dark"));
+
+  tui.type("\x1b[?997;2n"); // the terminal reports that it switched to light
+  await tui.waitForScreen(autoScreen("light"));
+  assert.equal(readFileSync(path, "utf8"), auto);
 });
