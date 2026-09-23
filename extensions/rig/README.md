@@ -13,8 +13,9 @@ The rig's settings menu (spec [#32](https://github.com/aakshintala/pi-rig/issues
 | ←/→ | Switch tab |
 | ↑/↓ | Select a setting |
 | Enter/Space | Cycle a boolean or enum; type a new integer (only a valid value is saved) |
+| e | Type a value for an open enum, such as a locale tag (only a valid value is saved) |
 | r | Reset the selected setting to its default |
-| Esc | Close the integer editor, then the menu |
+| Esc | Close the text editor, then the menu |
 
 A change is saved to `~/.pi/agent/rig.json` at once (only non-default keys) and reaches the extension that owns it without a reload.
 
