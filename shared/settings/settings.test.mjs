@@ -232,3 +232,19 @@ for (const [bounds, bad, message] of [
     assert.match(warnings[0], new RegExp(`s\\.n ${message};`));
   });
 }
+
+test("an open enum also accepts values its test passes, and names them in the warning", () => {
+  const zone = {
+    key: "zone", type: "enum", values: ["local"], default: "local", description: "Zone",
+    other: { label: "an IANA zone", test: (v) => v === "Asia/Kolkata" },
+  };
+  const rig = createRigSettings(dir({ s: { zone: "Mars/Olympus" } }));
+  const section = rig.declare("s", [zone]);
+  const warnings = [];
+  rig.notifyWarnings({ notify: (m) => warnings.push(m) });
+  assert.equal(section.get("zone"), "local");
+  assert.match(warnings[0], /s\.zone must be one of local or an IANA zone;/);
+  section.set("zone", "Asia/Kolkata");
+  assert.equal(section.get("zone"), "Asia/Kolkata");
+  assert.throws(() => section.set("zone", 5), /must be one of local or an IANA zone/);
+});

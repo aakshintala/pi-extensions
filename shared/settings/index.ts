@@ -9,7 +9,13 @@ export type Value = boolean | number | string;
 export type Setting = { key: string; description: string } & (
   | { type: "boolean"; default: boolean }
   | { type: "integer"; default: number; min?: number; max?: number }
-  | { type: "enum"; default: string; values: readonly string[] }
+  | {
+      type: "enum";
+      default: string;
+      values: readonly string[];
+      /** Makes the enum open: strings passing `test` are valid too, e.g. `{ label: "an IANA zone", test: isZone }`. */
+      other?: { label: string; test(value: string): boolean };
+    }
 );
 
 export interface Section {
@@ -45,8 +51,11 @@ export function problem(setting: Setting, value: unknown): string | undefined {
       if (min === undefined) return `must be at most ${max}`;
       return `must be between ${min} and ${max}`;
     }
-    case "enum":
-      return setting.values.includes(value as string) ? undefined : `must be one of ${setting.values.join(", ")}`;
+    case "enum": {
+      const { values, other } = setting;
+      if (values.includes(value as string) || (other && typeof value === "string" && other.test(value))) return undefined;
+      return `must be one of ${values.join(", ")}${other ? ` or ${other.label}` : ""}`;
+    }
   }
 }
 
