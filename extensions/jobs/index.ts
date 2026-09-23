@@ -197,6 +197,8 @@ export default function (pi: ExtensionAPI) {
     if (alive(pgid)) {
       await grace;
       signalGroup(pgid, "SIGKILL");
+      // Killed processes linger briefly as zombies until init reaps them; the group is gone after.
+      for (let i = 0; i < 100 && alive(pgid); i++) await new Promise((r) => setTimeout(r, 10));
     }
     await j.done;
     groups().delete(pgid);

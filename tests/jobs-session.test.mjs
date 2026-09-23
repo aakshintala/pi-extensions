@@ -278,8 +278,9 @@ test("cancelling a wait leaves the job running", async (t) => {
 
 test("stop sends SIGTERM to the process group and SIGKILL 800 ms later; the row's stop sends one notice", async (t) => {
   let id;
-  // The shell and a grandchild both ignore SIGTERM.
-  const script = `echo $$ > pgid; trap '' TERM; sh -c 'trap "" TERM; echo child; ${hold("never")}' & ${hold("never")}`;
+  // The shell and everything it starts ignore SIGTERM (an ignored signal stays ignored
+  // across fork and exec): the shell, a tail and a grandchild tail, none of which come and go.
+  const script = `echo $$ > pgid; trap '' TERM; sh -c 'echo child; exec tail -f /dev/null' & tail -f /dev/null`;
   const s = await start(t, [
     calls(bg(script)),
     (context) => ((id = s.jobId(lastText(context))), says("waiting")()),
@@ -289,11 +290,10 @@ test("stop sends SIGTERM to the process group and SIGKILL 800 ms later; the row'
   const run = s.session.prompt("go");
   await until(() => id && readFileSync(fleet().get(id).view.log, "utf8").includes("child"), "the grandchild");
   const pgid = Number(readFileSync(join(s.cwd, "pgid"), "utf8"));
-  const alive = liveGroup(pgid).length;
-  assert.ok(alive >= 2, `shell and grandchild alive (${alive})`);
+  await until(() => liveGroup(pgid).length === 3, "the shell and both tails");
   const stopped = fleet().get(id).stop(); // FleetView's stop, as from the viewer
   await s.timers.waitFor(800);
-  assert.equal(liveGroup(pgid).length, alive, "SIGTERM is ignored; nothing is killed before the grace ends");
+  assert.equal(liveGroup(pgid).length, 3, "SIGTERM is ignored; nothing is killed before the grace ends");
   await s.timers.fire(800);
   await settles(stopped, "the stop to finish");
   await run;
