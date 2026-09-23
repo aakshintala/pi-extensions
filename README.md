@@ -17,3 +17,4 @@ pi install /path/to/pi-rig
 | [rig](extensions/rig/README.md) | `/rig` settings menu over every extension's `rig.json` section | [#32](https://github.com/aakshintala/pi-rig/issues/32) |
 | [fleet](extensions/fleet/README.md) | FleetView: one list below the editor of all running background work | [#29](https://github.com/aakshintala/pi-rig/issues/29) |
 | [tool-display](extensions/tool-display/README.md) | Claude Code-style call lines, collapsed results and edit diffs for the built-in `read`, `edit` and `write` | [#40](https://github.com/aakshintala/pi-rig/issues/40) |
+| [todo](extensions/todo/README.md) | A TODO list the agent keeps while it works, via `todo_write` and a widget above the editor | [#28](https://github.com/aakshintala/pi-rig/issues/28) |
