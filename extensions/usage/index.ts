@@ -8,6 +8,8 @@ import type { ExtensionAPI, ExtensionCommandContext, Theme, ThemeColor } from "@
 import { DynamicBorder, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { CancellableLoader, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
+import { oneLine } from "../../shared/text/index.ts";
+
 import { collectUsageData, resolveSessionsDir, TAB_ORDER, usageCachePath } from "./data.ts";
 import type { BaseStats, CollectProgress, TabName, UsageData } from "./data.ts";
 import { buildGraphModel, GROUP_LABELS, GROUP_ORDER, METRIC_LABELS, METRIC_ORDER, renderChart, TOTAL_SERIES_KEY } from "./graph.ts";
@@ -196,7 +198,8 @@ const TAB_LABELS: Record<TabName, string> = {
 /** Lines around the table body: border, title, tabs, header, totals, help, bottom border. */
 const TABLE_CHROME_ROWS = 16;
 
-class UsageComponent {
+/** Exported for render tests; `/usage` creates it after collecting. */
+export class UsageComponent {
 	private activeTab: TabName = "allTime";
 	private viewMode: ViewMode = "graph";
 	private selectedIndex = 0;
@@ -214,13 +217,18 @@ class UsageComponent {
 	private graphModel: GraphModel | null = null;
 	private rendered: { width: number; rows: number; lines: string[] } | null = null;
 
-	constructor(
-		private theme: Theme,
-		private data: UsageData,
-		private terminalRows: () => number,
-		private requestRender: () => void,
-		private done: () => void,
-	) {
+	private readonly theme: Theme;
+	private readonly data: UsageData;
+	private readonly terminalRows: () => number;
+	private readonly requestRender: () => void;
+	private readonly done: () => void;
+
+	constructor(theme: Theme, data: UsageData, terminalRows: () => number, requestRender: () => void, done: () => void) {
+		this.theme = theme;
+		this.data = data;
+		this.terminalRows = terminalRows;
+		this.requestRender = requestRender;
+		this.done = done;
 		this.updateProviderOrder();
 	}
 
@@ -394,7 +402,9 @@ class UsageComponent {
 				s.key !== TOTAL_SERIES_KEY && model.groupedTotal > 0
 					? ` ${th.fg("dim", `${Math.round((s.total / model.groupedTotal) * 100)}%`)}`
 					: "";
-			const label = s.hidden ? th.fg("dim", s.label) : s.key === TOTAL_SERIES_KEY ? th.bold(s.label) : s.label;
+			// Labels come from session files: strip terminal sequences before they reach the screen.
+			const text = oneLine(s.label);
+			const label = s.hidden ? th.fg("dim", text) : s.key === TOTAL_SERIES_KEY ? th.bold(text) : text;
 			lines.push(`${cursor}${marker} ${padRight(label, 24)} ${padLeft(value, 8)}${pct}`);
 		}
 		lines.push("");
@@ -437,7 +447,8 @@ class UsageComponent {
 		const rawPrefix = prefix ?? " ".repeat(indent);
 		const safePrefix = layout.nameWidth > 0 ? truncateToWidth(rawPrefix, layout.nameWidth, "") : "";
 		const innerNameWidth = Math.max(layout.nameWidth - visibleWidth(safePrefix), 0);
-		const truncName = innerNameWidth > 0 ? truncateToWidth(name, innerNameWidth) : "";
+		// Provider and model names come from session files: strip terminal sequences.
+		const truncName = innerNameWidth > 0 ? truncateToWidth(oneLine(name), innerNameWidth) : "";
 		const styledName = selected ? th.fg("accent", truncName) : dimAll ? th.fg("dim", truncName) : truncName;
 		let row = safePrefix + (innerNameWidth > 0 ? padRight(styledName, innerNameWidth) : "");
 		for (const col of layout.columns) {
@@ -540,10 +551,12 @@ export default function (pi: ExtensionAPI) {
 			const agentDir = getAgentDir();
 			const sessionsDir = resolveSessionsDir(
 				agentDir,
+				ctx.sessionManager.getSessionDir(),
 				SettingsManager.create(ctx.cwd, agentDir, { projectTrusted: ctx.isProjectTrusted() }).getSessionDir(),
 			);
 
 			let failure: unknown;
+			let collection: Promise<void> | undefined;
 			const data = await ctx.ui.custom<UsageData | null>((tui, theme, _kb, done) => {
 				const loader = new CancellableLoader(
 					tui,
@@ -560,7 +573,13 @@ export default function (pi: ExtensionAPI) {
 					done(value);
 				};
 				loader.onAbort = () => finish(null);
-				stopLoading = () => finish(null);
+				// Shutdown aborts the collection itself, so it can never write the
+				// cache after a newer collection has.
+				const shutdown = new AbortController();
+				stopLoading = () => {
+					shutdown.abort();
+					finish(null);
+				};
 
 				const onProgress = (p: CollectProgress): void => {
 					if (finished || p.filesToParse === 0) return;
@@ -575,7 +594,8 @@ export default function (pi: ExtensionAPI) {
 					}
 				};
 
-				collectUsageData({ signal: loader.signal, onProgress, sessionsDir, cachePath: usageCachePath(agentDir) })
+				const signal = AbortSignal.any([loader.signal, shutdown.signal]);
+				collection = collectUsageData({ signal, onProgress, sessionsDir, cachePath: usageCachePath(agentDir) })
 					.then(finish)
 					.catch((error: unknown) => {
 						failure = error;
@@ -585,8 +605,10 @@ export default function (pi: ExtensionAPI) {
 				return loader;
 			});
 
+			// A cancelled or shut-down collection settles at its next abort check.
+			await collection;
 			if (failure !== undefined) {
-				ctx.ui.notify(`/usage could not read sessions in ${sessionsDir}: ${failure instanceof Error ? failure.message : String(failure)}`, "error");
+				ctx.ui.notify(oneLine(`/usage could not read sessions in ${sessionsDir}: ${failure instanceof Error ? failure.message : String(failure)}`), "error");
 				return;
 			}
 			if (!data) return;

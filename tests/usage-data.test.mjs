@@ -14,11 +14,16 @@ const SESSIONS = fileURLToPath(new URL("./fixtures/usage/sessions", import.meta.
 const NOW = new Date("2026-09-20T12:00:00+05:30");
 const collect = () => collectUsageData({ sessionsDir: SESSIONS, cachePath: null, now: NOW });
 
-test("session folder: PI_CODING_AGENT_SESSION_DIR, then the sessionDir setting, then <agentDir>/sessions", () => {
-  assert.equal(resolveSessionsDir("/agent", undefined, {}), "/agent/sessions");
-  assert.equal(resolveSessionsDir("/agent", "/custom", {}), "/custom");
-  assert.equal(resolveSessionsDir("/agent", "/custom", { PI_CODING_AGENT_SESSION_DIR: "/env" }), "/env");
-  assert.equal(resolveSessionsDir("/agent", undefined, { PI_CODING_AGENT_SESSION_DIR: "~/s" }), join(homedir(), "s"));
+test("session folder: Pi's effective folder, else PI_CODING_AGENT_SESSION_DIR, the sessionDir setting, the default", () => {
+  // --session-dir, the env var or the setting: Pi's session manager already points there.
+  assert.equal(resolveSessionsDir("/agent", "/other", "/custom", { PI_CODING_AGENT_SESSION_DIR: "/env" }), "/other");
+  // Pi's default per-cwd folder: read every project's sessions.
+  assert.equal(resolveSessionsDir("/agent", "/agent/sessions/--work--", undefined, {}), "/agent/sessions");
+  // --no-session: resolved here in Pi's order.
+  assert.equal(resolveSessionsDir("/agent", "", undefined, {}), "/agent/sessions");
+  assert.equal(resolveSessionsDir("/agent", "", "/custom", {}), "/custom");
+  assert.equal(resolveSessionsDir("/agent", "", "/custom", { PI_CODING_AGENT_SESSION_DIR: "/env" }), "/env");
+  assert.equal(resolveSessionsDir("/agent", "", undefined, { PI_CODING_AGENT_SESSION_DIR: "~/s" }), join(homedir(), "s"));
 });
 
 test("hours are local: a UTC+5:30 hour starts at :30 UTC", () => {

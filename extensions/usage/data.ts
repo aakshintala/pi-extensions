@@ -165,11 +165,22 @@ export interface ParsedSessionFile {
 // =============================================================================
 
 /**
- * The folder holding session files, resolved the way Pi does:
- * PI_CODING_AGENT_SESSION_DIR, then the `sessionDir` setting, then
- * `<agentDir>/sessions`. A custom folder is scanned whole.
+ * The folder whose session files /usage reads. `effectiveDir` is the running
+ * session's folder from Pi (`ctx.sessionManager.getSessionDir()`), which already
+ * reflects `--session-dir`, PI_CODING_AGENT_SESSION_DIR and the `sessionDir`
+ * setting. Pi's default is one folder per cwd under `<agentDir>/sessions`, so
+ * that case reads the whole `<agentDir>/sessions`. An in-memory session
+ * (`--no-session`) has no folder; then the env var, the setting and the
+ * default are resolved here in Pi's order.
  */
-export function resolveSessionsDir(agentDir: string, sessionDirSetting?: string, env: NodeJS.ProcessEnv = process.env): string {
+export function resolveSessionsDir(
+	agentDir: string,
+	effectiveDir: string,
+	sessionDirSetting?: string,
+	env: NodeJS.ProcessEnv = process.env,
+): string {
+	const root = resolve(agentDir, "sessions");
+	if (effectiveDir) return dirname(resolve(effectiveDir)) === root ? root : effectiveDir;
 	const fromEnv = env.PI_CODING_AGENT_SESSION_DIR;
 	if (fromEnv) return fromEnv === "~" ? homedir() : fromEnv.startsWith("~/") ? join(homedir(), fromEnv.slice(2)) : fromEnv;
 	return sessionDirSetting || join(agentDir, "sessions");

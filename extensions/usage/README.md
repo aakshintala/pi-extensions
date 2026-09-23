@@ -4,15 +4,18 @@
 or a provider table, for today, this week, last week, the last 30 days or all
 time. Spec: [#36](https://github.com/aakshintala/pi-rig/issues/36).
 
-- Sessions are read from Pi's session folder: `PI_CODING_AGENT_SESSION_DIR`,
-  else the `sessionDir` setting, else `<agentDir>/sessions`.
+- Sessions are read from the folder Pi is using, so `--session-dir`,
+  `PI_CODING_AGENT_SESSION_DIR` and the `sessionDir` setting all apply. With
+  Pi's default per-project folders it reads all of `<agentDir>/sessions`.
+- Names from session files are drawn without terminal control sequences.
 - The graph and the table bucket usage by the same local hours and days, in
   any time zone.
 - Every recorded cost counts, whatever shape it was stored in, including
   usage reported by tools, compactions and branch summaries (shown as
   `Tools / summaries`).
 - Parsed sessions are cached in `<agentDir>/usage-extension-cache.json`
-  (upstream's format), so later runs only read changed files.
+  (upstream's layout, version 7), so later runs only read changed files. A
+  session shutdown aborts a collection in progress.
 - Long tables scroll with the selection. Graph colours come from the theme.
 - Without the TUI, or when reading sessions fails, `/usage` says so.
 
