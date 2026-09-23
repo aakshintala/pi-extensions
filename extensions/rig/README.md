@@ -12,6 +12,7 @@ The rig's settings menu (spec [#32](https://github.com/aakshintala/pi-rig/issues
 |---|---|
 | ←/→ | Switch tab |
 | ↑/↓ | Select a setting |
+| Click | Select a setting and change it, as Enter does (fullscreen only) |
 | Enter/Space | Cycle a boolean or enum; type a new integer (only a valid value is saved) |
 | e | Type a value for an open enum, such as a locale tag (only a valid value is saved) |
 | r | Reset the selected setting to its default |
