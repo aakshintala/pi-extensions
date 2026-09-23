@@ -32,8 +32,9 @@ settings.onChange((key, value) => { /* apply */ });
   cycles the named values plus the current other value, and `e` types one.
 - Loading never throws: a bad value, unknown key or invalid JSON queues one
   warning and uses the default. `notifyWarnings(ui)` sends each once.
-- `set`/`reset` (and `setMany`, several keys in one write) validate, re-read the file, change only that key, keep only
-  non-default keys, and write atomically (temp file, then rename).
+- `set`/`reset`, and `setMany` for several keys in one write, validate,
+  re-read the file, change only the given keys, keep only non-default keys,
+  and write atomically (temp file, then rename).
 - Redeclaring a section (on `/reload`) re-reads the file, drops the
   section's old listeners and retires the old handle: its `set`/`reset`
   throw. There is no file watcher and no project file.
