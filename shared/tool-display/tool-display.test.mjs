@@ -101,3 +101,11 @@ test("toolRenderers: partial results draw nothing, errors show, results use the 
 test("colours come only from theme keys", () => {
   assert.doesNotMatch(readFileSync(new URL("./index.ts", import.meta.url), "utf8"), /\\x1b|\\u001b|\\e\[/);
 });
+
+test("a result without a content array renders instead of throwing", () => {
+  assert.equal(td.resultText({}), "");
+  assert.equal(td.resultText({ content: "text" }), "");
+  const r = td.toolRenderers({ title: "T", arg: () => "", result: () => ({ summary: "ok", body: [] }) });
+  const ctx = { args: {}, cwd: "/w", isPartial: false, isError: true, expanded: false };
+  assert.deepEqual(plainLines(r.renderResult({}, { expanded: false, isPartial: false }, recordingTheme(), ctx).render(80)), ["   ⎿  Error: failed"]);
+});

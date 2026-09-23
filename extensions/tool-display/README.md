@@ -20,15 +20,14 @@ tool style (`shared/tool-display/`), the way Claude Code shows them:
   characters show no diff.
 - **Errors always shown.** A failed call shows `Error:` and the message, wrapped
   to the terminal width.
-- **Built-ins only.** A tool another extension registers under one of these
-  names keeps its own look.
+- **Pi's own tools.** `read`, `edit`, `write` and `ls` are built from Pi's
+  exported tool definitions, so their descriptions, parameters and execution
+  are Pi's. Registering them under the same names replaces the built-ins; only
+  the rendering changes. Pi activates extension tools by default, so `ls`,
+  inactive as a built-in, is active (about 100 prompt tokens). `read` always
+  resizes images (the built-in default), whatever Pi's image setting says.
 
-Pi does not expose built-in tool definitions to extensions, so the decoration
-sits on `ToolExecutionComponent`'s renderer lookups. It is installed once at
-`session_start` and removed at `session_shutdown`, including on `/new`,
-`/resume`, fork and `/reload`.
-
-No tools, commands, keys, settings or prompt text.
+No commands, keys or settings.
 
 Grouping runs of calls into one summary line is
 [#56](https://github.com/aakshintala/pi-rig/issues/56); hidden thinking and

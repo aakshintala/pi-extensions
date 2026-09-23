@@ -94,11 +94,14 @@ export const diffBody = (theme: Theme, diff: Diff): string[] =>
 export const plural = (n: number, one: string, many = `${one}s`) => (n === 1 ? one : many);
 
 /** Text of a tool result's text blocks. */
-export const resultText = (result: { content: { type: string; text?: string }[] }) =>
-  result.content
-    .filter((c) => c.type === "text")
-    .map((c) => c.text ?? "")
+export const resultText = (result: unknown): string => {
+  const content = (result as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((c) => c?.type === "text")
+    .map((c) => (typeof c.text === "string" ? c.text : ""))
     .join("\n");
+};
 
 /** What one tool contributes: a title, the call's argument, and its result summary and body. */
 export interface ToolStyle<Args = any, Result = any> {
@@ -122,7 +125,7 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
     renderResult(result: Result, options: { expanded: boolean; isPartial: boolean }, theme: Theme, context: ToolRenderContext): Component {
       if (options.isPartial) return lines(() => []);
       if (context.isError) {
-        const message = resultText(result as any).replaceAll(`${context.cwd}/`, "");
+        const message = resultText(result).replaceAll(`${context.cwd}/`, "");
         return lines((w) => errorLines(theme, message, options.expanded, w));
       }
       const { summary, body } = style.result(result, context.args ?? {}, options.expanded, theme);
