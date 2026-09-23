@@ -38,7 +38,10 @@ settings.onChange((key, value) => { /* apply */ });
 - There is one live section per name for the process. Redeclaring it (on
   `/reload`, or when an in-process subagent session runs the factory again)
   returns the same handle, takes the new settings, and re-reads and
-  re-validates the file; listeners stay and hear any value that changed.
+  re-validates the file; listeners stay and hear every changed or added
+  key, and each removed key with value `undefined`. A warning repeats only
+  when its value changes, and a file that cannot be read keeps the current
+  values.
   Unsubscribe with the function `onChange` returns on `session_shutdown`, or
   listeners pile up across sessions. There is no file watcher and no project
   file.
