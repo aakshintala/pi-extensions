@@ -9,6 +9,7 @@
     "write": 110,
     "todo_write": 200,
     "grep": 215,
-    "find": 135
+    "find": 135,
+    "ask_user": 300
   }
 }
