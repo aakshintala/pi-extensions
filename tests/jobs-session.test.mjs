@@ -4,8 +4,9 @@
 import "./fixtures/tool-display/pi-tui.mjs"; // lets the extension modules load in plain node
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -59,6 +60,17 @@ function fakeTimers(t) {
   const has = (ms) => [...pending].some((h) => h.ms === ms);
   return {
     has,
+    /** Fires every pending `ms` timer until `p` settles: for kill graces that may or may not start. */
+    async pumping(ms, p) {
+      const timer = setInterval(() => {
+        for (const h of [...pending]) if (h.ms === ms) (pending.delete(h), h.fn());
+      }, 10);
+      try {
+        return await settles(p, "the kill to finish");
+      } finally {
+        clearInterval(timer);
+      }
+    },
     waitFor: (ms) => until(() => has(ms), `a ${ms} ms timer`),
     async fire(ms) {
       await until(() => has(ms), `a ${ms} ms timer`);
@@ -133,6 +145,7 @@ test("run_in_background returns the job ID and log path at once; one notice when
   const id = s.jobId(result);
   const log = s.logOf(result);
   assert.equal(result, `Started job ${id}. Log: ${log}\nA notice arrives when it ends.`);
+  assert.equal(statSync(log).mode & 0o777, 0o600);
   assert.equal(readFileSync(log, "utf8"), "started\nfinished\n");
   const got = s.notices().filter((n) => n.startsWith("Job "));
   assert.deepEqual(got, [`Job ${id} completed (exit 0) after 0s. Log: ${log}`]);
@@ -343,4 +356,92 @@ test("aborting the turn kills a foreground command", async (t) => {
   assert.deepEqual(s.results(), [[true, "Command aborted"]]);
   assert.deepEqual(liveGroup(pgid), []);
   assert.equal(fleet().items().length, 0);
+});
+
+/** The group id a job's script wrote to `file` in the session cwd. */
+const pgidIn = async (s, file = "pgid") => {
+  const path = join(s.cwd, file);
+  await until(() => existsSync(path) && readFileSync(path, "utf8").endsWith("\n"), path);
+  return Number(readFileSync(path, "utf8"));
+};
+
+test("a job whose shell exits with a child still running says so, and stop ends the child", async (t) => {
+  let id;
+  const s = await start(t, [
+    calls(bg("echo $$ > pgid; sleep 60 & echo spawned")),
+    async (context) => {
+      id = s.jobId(lastText(context));
+      await until(() => fleet().get(id)?.status === "completed", "the shell to exit");
+      return calls(["jobs", { action: "stop", id }])();
+    },
+    says("done"),
+  ]);
+  await s.timers.pumping(800, s.session.prompt("go"));
+  const pgid = await pgidIn(s);
+  const log = fleet().get(id).view.log;
+  assert.deepEqual(s.notices().filter((n) => n.startsWith("Job ")), [
+    `Job ${id} completed (exit 0) after 0s. Log: ${log}\nIts shell exited, but processes it started are still running; stop ends them.`,
+  ]);
+  assert.deepEqual(s.results().at(-1), [false, `Job ${id} completed (exit 0) after 0s. Log: ${log}\nLast lines:\nspawned`]);
+  await until(() => liveGroup(pgid).length === 0, "the child to be stopped");
+});
+
+test("shutdown ends what finished commands left running, background and foreground", async (t) => {
+  const s = await start(t, [
+    calls(bg("echo $$ > pgid; sleep 60 &"), ["bash", { command: "echo $$ > fgpgid; sleep 60 &" }]),
+    says("done"),
+  ]);
+  await s.session.prompt("go");
+  const groups = [await pgidIn(s), await pgidIn(s, "fgpgid")];
+  for (const g of groups) assert.notDeepEqual(liveGroup(g), [], `group ${g} has its sleep`);
+  await s.timers.pumping(800, s.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }));
+  for (const g of groups) await until(() => liveGroup(g).length === 0, `group ${g} to be gone`);
+});
+
+test("one session's shutdown stops only its own jobs; the other keeps getting notices", async (t) => {
+  let id;
+  const s = await start(t, [
+    calls(bg(hold("go"))),
+    (context) => ((id = s.jobId(lastText(context))), says("waiting")()),
+    async () => {
+      // A second session in this process, with its own instance of the extension.
+      const tools = new Map();
+      const handlers = new Map();
+      const { default: jobs } = await import("../extensions/jobs/index.ts");
+      jobs({ registerTool: (tool) => tools.set(tool.name, tool), on: (name, fn) => handlers.set(name, fn) });
+      const other = { cwd: s.cwd, sessionManager: { getSessionId: () => "other", getSessionFile: () => undefined } };
+      await tools.get("bash").execute("b1", { command: `echo $$ > otherpgid; ${FOREVER}`, run_in_background: true }, undefined, undefined, other);
+      const otherPgid = await pgidIn(s, "otherpgid");
+      await handlers.get("session_shutdown")();
+      await until(() => liveGroup(otherPgid).length === 0, "the other session's job to stop");
+      assert.equal(fleet().get(id).status, "running");
+      writeFileSync(join(s.cwd, "go"), "");
+      return says("still waiting")();
+    },
+    says("done"),
+  ]);
+  await s.session.prompt("go");
+  assert.deepEqual(s.notices().filter((n) => n.startsWith("Job ")), [`Job ${id} completed (exit 0) after 0s. Log: ${fleet().get(id).view.log}`]);
+});
+
+test("tool output is drawn without terminal sequences or control characters", async (t) => {
+  const s = await start(t, []);
+  const theme = { fg: (_k, text) => text, bold: (text) => text };
+  const result = { content: [{ type: "text", text: "\x1b[2Jfirst\x1b[31m red\x1b[0m\x07\r\n\x1b]0;title\x07tab\there\x1b[1A" }] };
+  for (const name of ["bash", "jobs"]) {
+    const tool = s.session.extensionRunner.getToolDefinition(name);
+    const context = { toolCallId: `x-${name}`, args: {}, cwd: s.cwd, isError: false, isPartial: false, expanded: true };
+    const lines = tool.renderResult(result, { expanded: true, isPartial: false }, theme, context).render(80).map((l) => l.trimEnd());
+    assert.deepEqual(lines, ["   ⎿  first red", "      tab\there"], name);
+  }
+});
+
+test("a Pi that exits without shutting down still kills its job groups", async (t) => {
+  const box = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-jobs-crash-")));
+  t.after(() => rmSync(box, { recursive: true, force: true }));
+  const r = spawnSync(process.execPath, [path("./fixtures/jobs/crash.mjs")], { cwd: box, env: { ...process.env, PI_CODING_AGENT_DIR: box, HOME: box }, encoding: "utf8", timeout: 20_000 });
+  assert.equal(r.status, 1, r.stderr);
+  const [pgid, log] = r.stdout.trim().split("\n");
+  t.after(() => rmSync(dirname(log), { recursive: true, force: true }));
+  await until(() => liveGroup(Number(pgid)).length === 0, `group ${pgid} to be killed at exit`);
 });

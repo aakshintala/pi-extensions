@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { createBashToolDefinition, getAgentDir, getShellConfig, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { duration, fleet, type FinalStatus } from "../../shared/fleet/index.ts";
 import { rigSettings } from "../../shared/settings/index.ts";
-import { oneLine } from "../../shared/text/index.ts";
+import { keepSgr, oneLine } from "../../shared/text/index.ts";
 import { resultText, toolRenderers } from "../../shared/tool-display/index.ts";
 
 /** Grace between SIGTERM and SIGKILL to a job's process group. */
@@ -27,7 +27,8 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
 type Timers = Pick<typeof globalThis, "setTimeout" | "clearTimeout">;
 /** The auto-background, wait and kill timers. Tests replace them through this symbol. */
 const timers = (): Timers => (globalThis as any)[Symbol.for("pi-rig.jobs.timers")] ?? globalThis;
-const delay = (ms: number) => new Promise<void>((r) => (timers().setTimeout(r, Math.min(ms, MAX_TIMER_MS)) as any)?.unref?.());
+// Referenced: a headless Pi must not exit before a pending SIGKILL fires.
+const delay = (ms: number) => new Promise<void>((r) => timers().setTimeout(r, Math.min(ms, MAX_TIMER_MS)));
 
 type Job = {
   id: string;
@@ -90,6 +91,28 @@ const signalGroup = (pgid: number | undefined, signal: NodeJS.Signals) => {
   } catch {}
 };
 
+/**
+ * Every job group of this process that may still be alive. A crash or a hard exit skips
+ * `session_shutdown`, so one `exit` handler per process SIGKILLs them.
+ */
+function groups(): Set<number> {
+  const g = globalThis as { [GROUPS]?: Set<number> };
+  if (!g[GROUPS]) {
+    const live = (g[GROUPS] = new Set<number>());
+    process.on("exit", () => {
+      for (const pgid of live) signalGroup(pgid, "SIGKILL");
+    });
+  }
+  return g[GROUPS];
+}
+const GROUPS = Symbol.for("pi-rig.jobs.groups");
+
+/** Output as Pi's bash renderer shows it: no terminal sequences, no control characters but tab and newline. */
+const clean = (s: string) =>
+  keepSgr(s)
+    .replace(/\x1b\[[0-9;:]*m/g, "")
+    .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+
 export default function (pi: ExtensionAPI) {
   const section = rigSettings(getAgentDir()).declare("jobs", [
     { key: "autoBackgroundSeconds", type: "integer", min: 1, max: 3600, default: 30, description: "Seconds before a running bash command moves to the background" },
@@ -101,14 +124,17 @@ export default function (pi: ExtensionAPI) {
   let closing = false;
 
   const now = () => fleet().now();
+  /** A finished job whose shell left processes behind in its group. */
+  const lingers = (j: Job) => !!j.status && !!j.child.pid && alive(j.child.pid);
   const state = (j: Job) =>
-    `Job ${j.id} ${j.status ?? "running"}${j.code === undefined ? "" : ` (exit ${j.code})`}${j.timedOut ? `, timed out after ${j.timedOut}s` : ""} after ${duration((j.endedAt ?? now()) - j.startedAt)}. Log: ${j.log}`;
+    `Job ${j.id} ${j.status ?? "running"}${j.code === undefined ? "" : ` (exit ${j.code})`}${j.timedOut ? `, timed out after ${j.timedOut}s` : ""} after ${duration((j.endedAt ?? now()) - j.startedAt)}. Log: ${j.log}` +
+    (lingers(j) ? "\nIts shell exited, but processes it started are still running; stop ends them." : "");
 
   function start(command: string, cwd: string, env: NodeJS.ProcessEnv | undefined, owner: string): Job {
     dir ??= mkdtempSync(join(tmpdir(), "pi-jobs-"));
     const id = randomUUID().slice(0, 8);
     const log = join(dir, `${id}.log`);
-    const out = openSync(log, "a");
+    const out = openSync(log, "a", 0o600);
     const shell = getShellConfig();
     const stdin = shell.commandTransport === "stdin";
     let child: ChildProcess;
@@ -126,6 +152,7 @@ export default function (pi: ExtensionAPI) {
       child.once("exit", (code, signal) => resolve(code ?? 128 + (signal ? constants.signals[signal] ?? 0 : 0)));
       child.once("error", () => resolve(127));
     });
+    if (child.pid) groups().add(child.pid);
     const job: Job = { id, owner, command, log, child, startedAt: now(), bg: false, waiters: 0, done: undefined as any };
     job.done = exited.then((code) => settle(job, code));
     jobs.set(id, job);
@@ -136,6 +163,7 @@ export default function (pi: ExtensionAPI) {
     j.code = code;
     j.endedAt = now();
     j.status = j.stopped ? "stopped" : code === 0 && !j.timedOut ? "completed" : "failed";
+    if (!lingers(j)) groups().delete(j.child.pid!);
     if (j.fg) return j.fg(code);
     const tail = j.status === "failed" ? failureTail(j.log) : "";
     const result = j.status === "stopped" ? "stopped" : `exit ${code}${j.timedOut ? `, timed out` : ""}${tail ? `\n${tail}` : ""}`;
@@ -156,22 +184,28 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  /** SIGTERM to the process group, SIGKILL after KILL_MS if any of it is still alive. */
+  /**
+   * SIGTERM to the process group, SIGKILL after KILL_MS if any of it is still alive. The
+   * group, not the shell: processes the shell left behind are signalled after it exits.
+   * A process that calls setsid leaves the group, and nothing here reaches it.
+   */
   async function kill(j: Job) {
-    const pgid = j.child.pid;
+    const pgid = j.child.pid!;
     signalGroup(pgid, "SIGTERM");
     const grace = delay(KILL_MS);
     await Promise.race([j.done, grace]);
-    if (pgid && alive(pgid)) {
+    if (alive(pgid)) {
       await grace;
       signalGroup(pgid, "SIGKILL");
     }
     await j.done;
+    groups().delete(pgid);
   }
 
+  /** Stops a running job, or what a finished one left running in its group. */
   function stop(j: Job) {
-    if (j.status) return j.done;
-    j.stopped = true;
+    if (j.status && !lingers(j)) return j.done;
+    if (!j.status) j.stopped = true;
     return kill(j);
   }
 
@@ -182,6 +216,15 @@ export default function (pi: ExtensionAPI) {
         if (o.signal?.aborted) return reject(new Error("aborted"));
         const j = (handle.job = start(command, cwd, o.env, owner));
         const t = timers();
+        let fd = -1;
+        if (!runInBackground) {
+          try {
+            fd = openSync(j.log, "r");
+          } catch (e) {
+            void stop(j).then(() => jobs.delete(j.id));
+            return reject(e);
+          }
+        }
         if (o.timeout !== undefined) {
           const limit = o.timeout;
           const timer = t.setTimeout(() => {
@@ -195,7 +238,6 @@ export default function (pi: ExtensionAPI) {
           background(j);
           return reject(handle);
         }
-        const fd = openSync(j.log, "r");
         let offset = 0;
         const drain = () => {
           const buf = Buffer.alloc(64 * 1024);
@@ -208,6 +250,7 @@ export default function (pi: ExtensionAPI) {
         const auto = t.setTimeout(() => {
           if (j.status) return;
           handle.auto = seconds;
+          drain();
           end();
           background(j);
           reject(handle);
@@ -221,7 +264,7 @@ export default function (pi: ExtensionAPI) {
         j.fg = (code) => {
           drain();
           end();
-          jobs.delete(j.id);
+          if (!lingers(j)) jobs.delete(j.id); // else kept, so shutdown ends what it left running
           rmSync(j.log, { force: true }); // ran in the foreground: its output is in the result
           if (o.signal?.aborted) reject(new Error("aborted"));
           else if (j.timedOut) reject(new Error(`timeout:${j.timedOut}`));
@@ -245,9 +288,9 @@ export default function (pi: ExtensionAPI) {
       required: ["command"],
       additionalProperties: false,
       properties: {
-        command: { type: "string" },
-        timeout: { type: "number", description: "Seconds before the command is killed" },
-        run_in_background: { type: "boolean" },
+        command: { type: "string", description: "Bash command" },
+        timeout: { type: "number", description: "Seconds, then killed" },
+        run_in_background: { type: "boolean", description: "Return the job ID at once" },
       },
     },
     async execute(toolCallId: string, p: { command: string; timeout?: number; run_in_background?: boolean }, signal: AbortSignal | undefined, onUpdate: any, ctx: ExtensionContext) {
@@ -268,7 +311,7 @@ export default function (pi: ExtensionAPI) {
       arg: (a: any) => oneLine(a?.command ?? ""),
       summary: { verb: "ran", one: "shell command" },
       result: (r: any, _a, _e, theme) => {
-        const [first = "", ...rest] = resultText(r).replace(/\n$/, "").split("\n");
+        const [first = "", ...rest] = clean(resultText(r)).replace(/\n$/, "").split("\n");
         return { summary: first || "(no output)", body: rest.map((l) => theme.fg("toolOutput", l)) };
       },
     }),
@@ -299,8 +342,8 @@ export default function (pi: ExtensionAPI) {
       additionalProperties: false,
       properties: {
         action: { type: "string", enum: ["list", "wait", "stop"] },
-        id: { type: "string" },
-        timeout: { type: "number" },
+        id: { type: "string", description: "For wait and stop" },
+        timeout: { type: "number", description: "wait only" },
       },
     },
     async execute(_id: string, p: { action: "list" | "wait" | "stop"; id?: string; timeout?: number }, signal: AbortSignal | undefined, _u: unknown, c: ExtensionContext) {
@@ -309,7 +352,7 @@ export default function (pi: ExtensionAPI) {
         return reply(mine.length ? mine.map((j) => `${state(j)}\n  $ ${oneLine(j.command)}`).join("\n") : "No jobs.");
       }
       const j = find(p.id, c, p.action);
-      if (j.status) return reply(withTail(j));
+      if (j.status && (p.action === "wait" || !lingers(j))) return reply(withTail(j));
       j.waiters++;
       try {
         if (p.action === "stop") await stop(j);
@@ -339,7 +382,7 @@ export default function (pi: ExtensionAPI) {
       title: "Jobs",
       arg: (a: any) => [a?.action, a?.id].filter(Boolean).join(" "),
       result: (r: any, _a, _e, theme) => {
-        const [first = "", ...rest] = resultText(r).split("\n");
+        const [first = "", ...rest] = clean(resultText(r)).split("\n");
         return { summary: first, body: rest.map((l) => theme.fg("toolOutput", l)) };
       },
     }),

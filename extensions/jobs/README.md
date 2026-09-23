@@ -22,7 +22,8 @@ and Ctrl+B (#51) come later.
     clamped to 10-3,600), with its status and last lines. Cancelling the wait
     leaves the job running.
   - `stop`: SIGTERM to the job's process group, then SIGKILL 800 ms later if
-    any of it is still alive.
+    any of it is still alive. It also ends processes a finished job left
+    running, such as `sleep 60 &`.
 
 Only the session that started a job can see, wait on or stop it.
 
@@ -32,14 +33,21 @@ Only the session that started a job can see, wait on or stop it.
   written straight to a log file in a per-session temporary directory. The
   logs are left for the OS to clean.
 - A job ends when its shell exits, so a daemon that keeps the log open cannot
-  hold it.
+  hold it. If the shell left processes running in its group, the notice, `wait`
+  and `list` say so.
 - Each job is a `shell` row in FleetView. Opening it shows the live log, and
   Ctrl+Q stops it.
 - Each job ends with exactly one notice: status, exit code, running time and
   log path. A failed job's notice carries its last 20 lines, cut to 2,000
   characters. A `wait` or `stop` that returned the final state replaces the
   notice.
-- Shutdown, `/reload` and a session switch stop every job, without a notice.
+- Shutdown, `/reload` and a session switch stop every job of that session,
+  and whatever its finished commands left running, without a notice. Other
+  sessions in the process keep theirs.
+- If Pi exits without shutting down (a crash, a lost terminal), an `exit`
+  handler sends SIGKILL to every job group it started.
+- Tool output is drawn without terminal sequences or control characters, as
+  Pi's own `bash` draws it.
 
 ## Settings
 
@@ -55,5 +63,7 @@ No commands or keys.
 
 - `bash` uses Pi's default shell. Pi's `shellPath` and `shellCommandPrefix`
   settings are not applied: extensions cannot read them.
+- A process that calls `setsid` (or a daemon that does) leaves the job's
+  process group, so stop, shutdown and the exit handler cannot reach it.
 - A command's running time on its FleetView row counts from when it became a
   job; its notice counts from when it started.

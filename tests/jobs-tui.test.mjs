@@ -51,6 +51,7 @@ test("a job is a FleetView row; its viewer follows the log and stops it", async 
   await tui.waitForScreen(screen(view("0s", ["first", "second"]), ["   main", " ● shell sh job.sh · 0s · second"]));
 
   const pgid = Number(readFileSync(join(tui.cwd, "pgid"), "utf8"));
+  t.after(() => assert.deepEqual(liveGroup(pgid), [], "the job's own group is gone"));
   assert.notDeepEqual(liveGroup(pgid), []);
   tui.keys("C-q");
   tui.type("y");
