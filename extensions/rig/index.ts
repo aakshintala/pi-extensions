@@ -1,6 +1,6 @@
 // /rig: one tabbed settings menu over every declared rig.json section (spec #32).
 import { getAgentDir, getSettingsListTheme, type ExtensionAPI, type Theme } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, Input, matchesKey, SettingsList, type Component, type SettingItem } from "@earendil-works/pi-tui";
+import { Input, matchesKey, SettingsList, type Component, type SettingItem } from "@earendil-works/pi-tui";
 import { problem, rigSettings, type Section, type Setting, type Value } from "../../shared/settings/index.ts";
 
 const parse = (s: Setting, text: string): Value =>
@@ -24,7 +24,6 @@ export default function (pi: ExtensionAPI) {
 function menu(sections: Section[], theme: Theme, notify: (e: unknown) => void, render: () => void, close: () => void): Component {
   let tab = 0;
   let editing = false;
-  const selected = sections.map(() => 0);
   // Open enums (`other`): the typed editor, when open, replaces the list.
   let typing: Component | undefined;
   const items = new Map<Setting, SettingItem>();
@@ -57,6 +56,12 @@ function menu(sections: Section[], theme: Theme, notify: (e: unknown) => void, r
     return list;
   });
   // Runs a change, then shows the value the section now holds.
+  // ponytail: SettingsList keeps its selection private, and a click or wheel moves it, so read it.
+  // A missing or out-of-range index gives undefined, and r, e and the hint then do nothing.
+  const current = (): Setting | undefined => {
+    const i = (lists[tab] as unknown as { selectedIndex?: unknown }).selectedIndex;
+    return Number.isInteger(i) ? sections[tab].settings[i as number] : undefined;
+  };
   function apply(section: Section, key: string, change: () => void) {
     try {
       change();
@@ -73,8 +78,8 @@ function menu(sections: Section[], theme: Theme, notify: (e: unknown) => void, r
   return {
     render(width) {
       const tabs = sections.map((s, i) => (i === tab ? theme.fg("accent", theme.bold(`[${s.name}]`)) : theme.fg("muted", ` ${s.name} `)));
-      const current = sections[tab].settings[selected[tab]];
-      const open = current?.type === "enum" && current.other;
+      const s = current();
+      const open = s?.type === "enum" && s.other;
       return [
         ` ${tabs.join(" ")}`,
         "",
@@ -83,29 +88,25 @@ function menu(sections: Section[], theme: Theme, notify: (e: unknown) => void, r
       ];
     },
     invalidate: () => lists.forEach((l) => l.invalidate()),
+    // The list starts below the tab row and a blank line. An open editor takes no clicks.
+    handleMouse: (event) => (typing || editing ? undefined : lists[tab].handleMouse({ ...event, y: event.y - 2 })),
     handleInput(data) {
-      const kb = getKeybindings();
-      const n = sections[tab].settings.length;
-      const current = sections[tab].settings[selected[tab]];
+      const s = current();
       if (typing) typing.handleInput(data);
       else if (editing) lists[tab].handleInput(data);
-      else if (data === "e" && current?.type === "enum" && current.other) {
+      else if (data === "e" && s?.type === "enum" && s.other) {
         const section = sections[tab];
-        typing = textEditor(current, theme, (v) => {
+        typing = textEditor(s, theme, (v) => {
           typing = undefined;
-          if (v !== undefined) apply(section, current.key, () => section.set(current.key, v));
+          if (v !== undefined) apply(section, s.key, () => section.set(s.key, v));
           render();
         });
       }
       else if (matchesKey(data, "left") || matchesKey(data, "right")) {
         tab = (tab + (matchesKey(data, "left") ? sections.length - 1 : 1)) % sections.length;
-      } else if (kb.matches(data, "tui.select.up") || kb.matches(data, "tui.select.down")) {
-        // Tracked here (and pushed with selectItem) so `r` knows the selected row.
-        selected[tab] = (selected[tab] + (kb.matches(data, "tui.select.up") ? n - 1 : 1)) % n;
-        lists[tab].selectItem(sections[tab].settings[selected[tab]].key);
       } else if (data === "r") {
         const section = sections[tab];
-        apply(section, current.key, () => section.reset(current.key));
+        if (s) apply(section, s.key, () => section.reset(s.key));
       } else lists[tab].handleInput(data);
       render();
     },
@@ -134,6 +135,11 @@ function textEditor(s: Setting, theme: Theme, done: (value?: string) => void): C
       theme.fg("dim", "  Enter to save · Esc to go back"),
     ],
     invalidate: () => input.invalidate(),
-    handleInput: (data) => input.handleInput(data),
+    // An edit clears the refusal; only the next refused submit shows one again.
+    handleInput: (data) => {
+      const before = input.getValue();
+      input.handleInput(data);
+      if (input.getValue() !== before) error = "";
+    },
   };
 }

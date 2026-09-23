@@ -13,7 +13,17 @@ export default function (_pi: ExtensionAPI) {
       { key: "count", type: "integer", min: 1, max: 32, default: 10, description: "How many alphas" },
       { key: "mode", type: "enum", values: ["fast", "slow", "off"], default: "fast", description: "Alpha mode" },
     ]),
-    rig.declare("beta", [{ key: "limit", type: "integer", min: 0, max: 4, default: 2, description: "Beta limit" }]),
+    rig.declare("beta", [
+      { key: "limit", type: "integer", min: 0, max: 4, default: 2, description: "Beta limit" },
+      {
+        key: "tone",
+        type: "enum",
+        values: ["low", "high"],
+        other: { label: "a number", test: (v) => /^\d+$/.test(v) },
+        default: "low",
+        description: "Beta tone",
+      },
+    ]),
     rig.declare("gamma", []),
   ];
   for (const section of sections) {
