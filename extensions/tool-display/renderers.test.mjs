@@ -40,3 +40,32 @@ test("a child session's start, agent_end and shutdown leave the parent's groups 
   assert.deepEqual(["p1", "p2"].flatMap((id) => draw(id).render(80)), [" ⠋ Read 2 files"]);
   parent("session_shutdown");
 });
+
+// Some providers make ids from the clock (Gemini: `name_${Date.now()}_n`), so two
+// in-process sessions can share one. Each keeps its own; the child's shutdown
+// leaves the parent's untouched.
+test("sessions that share a call id keep their own groups", async () => {
+  const { default: toolDisplay } = await import("./index.ts");
+  const session = () => {
+    const on = {};
+    toolDisplay({ registerTool() {}, on: (name, f) => (on[name] = f) });
+    const ctx = { sessionManager: { getBranch: () => [] } };
+    return (name, event = {}) => on[name]?.(event, ctx);
+  };
+  const read = (id, args = { path: id }) => ({ type: "toolCall", id, name: "read", arguments: args });
+  const parentCalls = [read("dup"), read("p2")];
+  const parent = session();
+  parent("session_start");
+  parent("message_end", { message: { role: "assistant", content: parentCalls } });
+
+  const child = session();
+  child("session_start");
+  child("message_end", { message: { role: "assistant", content: [read("dup")] } });
+  child("tool_execution_end", { toolCallId: "dup", isError: false, result: { content: [] } });
+  const draw = (b) => RENDERERS.read.renderCall(b.arguments, theme, { ...ctx(b.arguments), toolCallId: b.id, invalidate() {} });
+  parentCalls.forEach(draw);
+  assert.deepEqual(parentCalls.flatMap((b) => draw(b).render(80)), [" ⠋ Read 2 files"], "while both run");
+  child("session_shutdown");
+  assert.deepEqual(parentCalls.flatMap((b) => draw(b).render(80)), [" ⠋ Read 2 files"], "after the child shuts down");
+  parent("session_shutdown");
+});

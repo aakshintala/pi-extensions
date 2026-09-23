@@ -121,7 +121,7 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
   return {
     renderShell: "self" as const,
     renderCall(args: Args, theme: Theme, context: ToolRenderContext): Component {
-      const groups = sessionOf(context.toolCallId);
+      const groups = sessionOf(context.toolCallId, context.args ?? args);
       const c = groups?.describe(context.toolCallId, style.summary, context.invalidate);
       const g = c && groups!.group(context.toolCallId);
       const own = (w: number) => {
@@ -136,7 +136,7 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
       return clickable(g, lines((w) => [...(summary ? [summaryLine(theme, g, w)] : []), ...(shown ? [own(w)] : [])]));
     },
     renderResult(result: Result, options: { expanded: boolean; isPartial: boolean }, theme: Theme, context: ToolRenderContext): Component {
-      const groups = sessionOf(context.toolCallId);
+      const groups = sessionOf(context.toolCallId, context.args);
       const g = groups?.group(context.toolCallId);
       const c = g?.calls.find((m) => m.id === context.toolCallId);
       if (options.isPartial || (g && !context.expanded && !g.open && !c!.alwaysShown())) return lines(() => []);
@@ -216,12 +216,24 @@ class Call {
 }
 
 interface Group {
+  session: ToolGroups;
   calls: Call[];
   open: boolean;
 }
 
-const INDEX: Map<string, ToolGroups> = ((globalThis as any)[Symbol.for("pi-rig.tool-groups")] ??= new Map());
-const sessionOf = (id: string) => INDEX.get(id);
+// Call id → the sessions that have it. Ids can repeat across sessions (some providers
+// build them from the clock), so each session adds and removes only itself, and a
+// renderer picks the session whose call has its arguments object.
+const INDEX: Map<string, ToolGroups[]> = ((globalThis as any)[Symbol.for("pi-rig.tool-groups")] ??= new Map());
+const sessionOf = (id: string, args: unknown) => {
+  const owners = INDEX.get(id);
+  return owners && (owners.find((g) => g.argsOf(id) === args) ?? owners[0]);
+};
+const unindex = (id: string, groups: ToolGroups) => {
+  const rest = INDEX.get(id)?.filter((g) => g !== groups) ?? [];
+  if (rest.length) INDEX.set(id, rest);
+  else INDEX.delete(id);
+};
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -280,7 +292,7 @@ export class ToolGroups {
 
   /** Forgets every call (session start and shutdown). */
   reset(): void {
-    for (const id of this.calls.keys()) if (INDEX.get(id) === this) INDEX.delete(id);
+    for (const id of this.calls.keys()) unindex(id, this);
     this.calls.clear();
     this.early.clear();
   }
@@ -324,7 +336,12 @@ export class ToolGroups {
     while (start > 0 && has(start - 1)) start--;
     while (end < ids.length - 1 && has(end + 1)) end++;
     const calls = ids.slice(start, end + 1).map((i) => this.calls.get(i)!);
-    return { calls, open: calls[0].open };
+    return { session: this, calls, open: calls[0].open };
+  }
+
+  /** The arguments this session holds for a call (how a renderer tells sessions apart). */
+  argsOf(id: string): unknown {
+    return this.calls.get(id)?.args;
   }
 
   /** Opens or closes a group (a click on it). */
@@ -335,7 +352,8 @@ export class ToolGroups {
 
   private add(c: Call) {
     this.calls.set(c.id, c);
-    INDEX.set(c.id, this);
+    const owners = INDEX.get(c.id) ?? [];
+    if (!owners.includes(this)) INDEX.set(c.id, [...owners, this]);
     const early = this.early.get(c.id);
     if (early) {
       this.early.delete(c.id);
@@ -345,7 +363,7 @@ export class ToolGroups {
 
   private forget(id: string) {
     this.calls.delete(id);
-    if (INDEX.get(id) === this) INDEX.delete(id);
+    unindex(id, this);
   }
 
   private refresh(run: Run) {
@@ -357,7 +375,7 @@ export class ToolGroups {
 const clickable = (g: Group, child: Component): Component =>
   new MouseRegion(child, (e) => {
     if (e.type !== "click" || e.button !== "left") return undefined;
-    sessionOf(g.calls[0].id)?.toggle(g);
+    g.session.toggle(g);
     return { handled: true };
   });
 
@@ -365,7 +383,7 @@ function summaryLine(theme: Theme, g: Group, width: number): string {
   const calls = g.calls.map((c) => ({ summary: c.summary!, status: c.state(), args: c.args }));
   const live = calls.some((c) => c.status === "pending");
   const bad = calls.some((c) => c.status === "error" || c.status === "cancelled");
-  const frame = SPINNER[(sessionOf(g.calls[0].id)?.frame ?? 0) % SPINNER.length];
+  const frame = SPINNER[g.session.frame % SPINNER.length];
   const bullet = live ? theme.fg("muted", frame) : theme.fg(bad ? "error" : "success", CALL);
   return truncateToWidth(`${PAD}${bullet} ${summaryText(theme, calls)}`, width);
 }
