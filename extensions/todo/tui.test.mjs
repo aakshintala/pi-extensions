@@ -66,7 +66,7 @@ test("widget: markers, one collapsed done line, overflow cap, hidden when cleare
 
 
  todo_write
- Todo list cleared.
+ Todo list cleared: 0 pending, 0 in_progress, 0 completed.
 
 
  Cleared.
@@ -75,7 +75,7 @@ test("widget: markers, one collapsed done line, overflow cap, hidden when cleare
 
 ────────────────────────────────────────────────────────────────────────────────
 ~/cwd
-↑200 ↓117 R275 W202 CH78.7% 0.1%/128k (auto)                           harness-1`);
+↑169 ↓117 R275 W170 CH70.7% 0.2%/128k (auto)                           harness-1`);
 });
 
 test("widget: a fully completed list is hidden after the next prompt", async (t) => {

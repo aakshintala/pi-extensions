@@ -1,6 +1,7 @@
 // todo_write and its widget (spec #28). The list lives in todo_write result details
 // and is rebuilt from the active branch; nothing is written to disk.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 
 type Status = "pending" | "in_progress" | "completed";
 type Todo = { text: string; status: Status };
@@ -9,11 +10,15 @@ const STATUSES: Status[] = ["pending", "in_progress", "completed"];
 const MARK = { completed: "✔", in_progress: "◼", pending: "◻" };
 const MAX_OPEN_ROWS = 7; // open items shown before "… N more"
 
+// Item text is model input: one row each, no terminal control sequences.
+const oneLine = (text: string) =>
+  text.replace(/\s*[\r\n]+\s*/g, " ").replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]|[\x00-\x1f\x7f-\x9f]/g, "");
+
 export const widgetLines = (todos: Todo[]): string[] => {
   const done = todos.filter((t) => t.status === "completed").length;
   const open = todos.filter((t) => t.status !== "completed");
   const lines = done ? [`${MARK.completed} ${done} done`] : [];
-  for (const t of open.slice(0, MAX_OPEN_ROWS)) lines.push(`${MARK[t.status]} ${t.text}`);
+  for (const t of open.slice(0, MAX_OPEN_ROWS)) lines.push(`${MARK[t.status]} ${oneLine(t.text)}`);
   if (open.length > MAX_OPEN_ROWS) lines.push(`… ${open.length - MAX_OPEN_ROWS} more`);
   return lines;
 };
@@ -31,7 +36,13 @@ export default function (pi: ExtensionAPI) {
 
   const draw = (ctx: ExtensionContext) => {
     if (ctx.mode !== "tui" || isChild(ctx)) return;
-    ctx.ui.setWidget("todo", todos.length && !hidden ? widgetLines(todos) : undefined);
+    const lines = widgetLines(todos);
+    ctx.ui.setWidget(
+      "todo",
+      todos.length && !hidden
+        ? () => ({ render: (width: number) => lines.map((l) => ` ${truncateToWidth(l, width - 2)}`), invalidate() {} })
+        : undefined,
+    );
   };
 
   const rebuild = (_event: unknown, ctx: ExtensionContext) => {
@@ -59,21 +70,21 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // Reminder: the last turn ended with no tool call while an item is in progress.
+  // Reminder: on the first request of a prompt, when the previous turn (everything between
+  // the last two user messages) made no tool call while an item is in progress.
   // Added to this request only; the returned copy is never saved.
   pi.on("context", (event) => {
     const active = todos.filter((t) => t.status === "in_progress");
-    const lastAssistant = event.messages.findLast((m: any) => m.role === "assistant");
-    if (!active.length || !lastAssistant || hasToolCall(lastAssistant)) return;
+    const users = event.messages.flatMap((m: any, i) => (m.role === "user" ? [i] : []));
+    const end = users.at(-1);
+    if (!active.length || end !== event.messages.length - 1 || users.length < 2) return;
+    const turn = event.messages.slice(users.at(-2)! + 1, end);
+    if (!turn.some((m: any) => m.role === "assistant") || turn.some(hasToolCall)) return;
     const text = `<system-reminder>Todo items still in progress: ${active.map((t) => JSON.stringify(t.text)).join(", ")}. Update your list with todo_write: mark finished items completed and stalled ones pending.</system-reminder>`;
     const messages = [...event.messages];
-    const last: any = messages.at(-1);
-    if (last?.role === "user") {
-      const content = typeof last.content === "string" ? [{ type: "text", text: last.content }] : last.content;
-      messages[messages.length - 1] = { ...last, content: [...content, { type: "text", text }] };
-    } else {
-      messages.push({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() } as any);
-    }
+    const last: any = messages[end];
+    const content = typeof last.content === "string" ? [{ type: "text", text: last.content }] : last.content;
+    messages[end] = { ...last, content: [...content, { type: "text", text }] };
     return { messages };
   });
 
@@ -81,15 +92,23 @@ export default function (pi: ExtensionAPI) {
     name: "todo_write",
     label: "Todo",
     description:
-      "Replace your whole todo list. Use it to plan and track multi-step work: send the full list on every call, marking an item in_progress when you start it and completed as soon as it is done. An empty list clears it.",
+      "Replace your whole todo list. Use it to plan and track multi-step work, sending the full list on every call.",
     parameters: {
       type: "object",
       properties: {
         todos: {
           type: "array",
+          description: "The full list, in order; it replaces the previous one. [] clears it.",
           items: {
             type: "object",
-            properties: { text: { type: "string" }, status: { type: "string", enum: STATUSES } },
+            properties: {
+              text: { type: "string", description: "The task, in a few words." },
+              status: {
+                type: "string",
+                enum: STATUSES,
+                description: "in_progress when you start the item; completed as soon as it is done.",
+              },
+            },
             required: ["text", "status"],
           },
         },
@@ -107,7 +126,7 @@ export default function (pi: ExtensionAPI) {
       draw(ctx);
       const counts = STATUSES.map((s) => `${next.filter((t) => t.status === s).length} ${s}`).join(", ");
       return {
-        content: [{ type: "text" as const, text: next.length ? `Todo list saved: ${counts}.` : "Todo list cleared." }],
+        content: [{ type: "text" as const, text: next.length ? `Todo list saved: ${counts}.` : `Todo list cleared: ${counts}.` }],
         details: { todos: next },
       };
     },

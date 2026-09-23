@@ -18,18 +18,20 @@ const recorded = (requests, reply) => (context) => {
   return typeof reply === "function" ? reply(context) : reply;
 };
 
-// A TUI-mode UI that records every widget the extension sets; everything else is a no-op.
-function fakeUi() {
+// A TUI-mode UI that records every widget the extension sets, rendered `width` columns
+// wide; everything else is a no-op.
+function fakeUi(width = 80) {
   const widgets = [];
-  const ui = new Proxy({ setWidget: (key, lines) => widgets.push([key, lines]) }, {
+  const setWidget = (key, w) => widgets.push([key, typeof w === "function" ? w().render(width) : w]);
+  const ui = new Proxy({ setWidget }, {
     get: (target, prop) => target[prop] ?? (() => undefined),
   });
   return { ui, widgets };
 }
 
-async function start(t, replies) {
+async function start(t, replies, width) {
   const s = await scriptedSession(t, { replies, extensions: [EXT], tools: ["todo_write"] });
-  const { ui, widgets } = fakeUi();
+  const { ui, widgets } = fakeUi(width);
   await s.session.bindExtensions({ uiContext: ui, mode: "tui" });
   return { ...s, widgets };
 }
@@ -51,7 +53,7 @@ test("todo_write replaces the list, clears it, and rejects invalid input", async
   assert.deepEqual(results(session).slice(0, 3), [
     [false, "Todo list saved: 1 pending, 1 in_progress, 1 completed."],
     [false, "Todo list saved: 0 pending, 1 in_progress, 0 completed."],
-    [false, "Todo list cleared."],
+    [false, "Todo list cleared: 0 pending, 0 in_progress, 0 completed."],
   ]);
   const [badStatus, emptyText] = results(session).slice(3);
   assert.equal(badStatus[0], true);
@@ -60,8 +62,8 @@ test("todo_write replaces the list, clears it, and rejects invalid input", async
 
   assert.deepEqual(widgets, [
     ["todo", undefined], // session start, no list
-    ["todo", ["✔ 1 done", "◼ build", "◻ ship"]],
-    ["todo", ["◼ ship"]],
+    ["todo", [" ✔ 1 done", " ◼ build", " ◻ ship"]],
+    ["todo", [" ◼ ship"]],
     ["todo", undefined],
   ]);
   assert.deepEqual(readdirSync(cwd), []);
@@ -71,16 +73,18 @@ test("reminder rides only the next request after a no-tool-call turn with an ite
   const requests = [];
   const { session } = await start(t, [
     write([{ text: "build", status: "in_progress" }, { text: "ship", status: "pending" }]),
-    say("stopping here"),
+    say(),
+    say("stopping here"), // a turn with no tool call
     recorded(requests, write([{ text: "build", status: "completed" }, { text: "ship", status: "in_progress" }])),
     recorded(requests, say()),
   ]);
   await session.prompt("one");
   await session.prompt("two");
+  await session.prompt("three");
 
   assert.equal(requests.length, 2);
   assert.match(requests[0], /Todo items still in progress: \\"build\\"\. Update your list with todo_write/);
-  assert.doesNotMatch(requests[1], REMINDER); // the turn that followed called a tool
+  assert.doesNotMatch(requests[1], REMINDER); // the same run, after a tool call
   assert.doesNotMatch(JSON.stringify(session.sessionManager.getEntries()), REMINDER);
 });
 
@@ -93,13 +97,15 @@ test("no reminder without an in-progress item or after a tool-call turn", async 
     recorded(requests, say()), // list has nothing in progress
     recorded(requests, write([{ text: "c", status: "in_progress" }])),
     recorded(requests, say()), // same run, right after the tool call
+    recorded(requests, say()), // next prompt: that turn called a tool, then ended in plain text
   ]);
   await session.prompt("one");
   await session.prompt("two");
   await session.prompt("three");
   await session.prompt("four");
+  await session.prompt("five");
 
-  assert.equal(requests.length, 6);
+  assert.equal(requests.length, 7);
   for (const r of requests) assert.doesNotMatch(r, REMINDER);
 });
 
@@ -107,27 +113,28 @@ test("the list is rebuilt on resume and at a branch point", async (t) => {
   const requests = [];
   const { session, widgets } = await start(t, [
     write([{ text: "first", status: "in_progress" }]),
-    say("one done"),
+    say(),
+    say("idle"), // the branch point: a turn with no tool call
     write([{ text: "second", status: "in_progress" }]),
-    say("two done"),
+    say(),
+    say(),
     recorded(requests, say()),
     recorded(requests, say()),
   ]);
-  await session.prompt("one");
-  await session.prompt("two");
+  for (const p of ["one", "one more", "two", "two more"]) await session.prompt(p);
 
   // Resume: a fresh extension instance rebuilds from the saved entries.
   await session.reload();
-  assert.deepEqual(widgets.at(-1), ["todo", ["◼ second"]]);
+  assert.deepEqual(widgets.at(-1), ["todo", [" ◼ second"]]);
   await session.prompt("three");
   assert.match(requests[0], /in progress: \\"second\\"/);
 
   // Branch back to the end of the first run: the list from that timeline returns.
   const branchPoint = session.sessionManager
     .getBranch()
-    .find((e) => e.type === "message" && e.message.role === "assistant" && e.message.content[0]?.text === "one done");
+    .find((e) => e.type === "message" && e.message.role === "assistant" && e.message.content[0]?.text === "idle");
   await session.navigateTree(branchPoint.id);
-  assert.deepEqual(widgets.at(-1), ["todo", ["◼ first"]]);
+  assert.deepEqual(widgets.at(-1), ["todo", [" ◼ first"]]);
   await session.prompt("four");
   assert.match(requests[1], /in progress: \\"first\\"/);
   assert.doesNotMatch(requests[1], /second/);
@@ -138,12 +145,15 @@ test("a subagent session keeps its own list and draws no widget", async (t) => {
   const { session, widgets, faux, cwd, agentDir } = await start(t, [
     write([{ text: "parent task", status: "in_progress" }]),
     say(),
+    say(),
     write([{ text: "child task", status: "in_progress" }]),
+    say(),
     say(),
     recorded(requests, say()),
     recorded(requests, say()),
   ]);
   await session.prompt("parent plans");
+  await session.prompt("parent idle");
 
   // A child in the same process, loading the extension itself, marked with rig.subagent.
   const sessionManager = SessionManager.inMemory(cwd);
@@ -162,6 +172,7 @@ test("a subagent session keeps its own list and draws no widget", async (t) => {
   const childUi = fakeUi();
   await child.bindExtensions({ uiContext: childUi.ui, mode: "tui" });
   await child.prompt("child plans");
+  await child.prompt("child idle");
 
   await child.prompt("child again");
   await session.prompt("parent again");
@@ -170,5 +181,24 @@ test("a subagent session keeps its own list and draws no widget", async (t) => {
   assert.match(requests[1], /in progress: \\"parent task\\"/);
   assert.doesNotMatch(requests[1], /child task/);
   assert.deepEqual(childUi.widgets, []);
-  assert.deepEqual(widgets.at(-1), ["todo", ["◼ parent task"]]);
+  assert.deepEqual(widgets.at(-1), ["todo", [" ◼ parent task"]]);
+});
+
+// The widget row for one item, rendered 20 columns wide.
+async function row(t, text) {
+  const { session, widgets } = await start(t, [write([{ text, status: "pending" }]), say()], 20);
+  await session.prompt("go");
+  return widgets.at(-1)[1][0];
+}
+
+test("widget row: newlines in item text collapse to one space", async (t) => {
+  assert.equal(await row(t, "one\n  two"), " ◻ one two");
+});
+
+test("widget row: terminal control sequences are stripped", async (t) => {
+  assert.equal(await row(t, "clear\x1b[2J it\x07"), " ◻ clear it");
+});
+
+test("widget row: long text is truncated to the width", async (t) => {
+  assert.equal((await row(t, "a very long item that cannot fit")).replace(/\x1b\[0m/g, ""), " ◻ a very long i...");
 });
