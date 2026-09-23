@@ -4,7 +4,7 @@
 // notice. Every session runs this factory, so a child spawns its own children with
 // its own instance. The agents form a tree of objects: each instance holds its
 // session's node, found for a child through its SessionManager.
-// Worktrees and fork (#54) and the transcript viewer (#68) are later tickets.
+// Its viewer content is its transcript (#68, transcript.ts). Worktrees and fork (#54) come later.
 import { existsSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -19,11 +19,12 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import type { TUI } from "@earendil-works/pi-tui";
 import { duration, fleet, isFinished, type FinalStatus } from "../../shared/fleet/index.ts";
 import { rigSettings } from "../../shared/settings/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
 import { toolRenderers, resultText } from "../../shared/tool-display/index.ts";
+import { transcript, type Source } from "./transcript.ts";
 
 const MARKER = "rig.subagent";
 /** Tokens and cost of a finished child, saved in its parent's session: the parent's next notice and `Session total:` count them. */
@@ -66,7 +67,7 @@ type Node = {
 };
 type Root = Node & { pump(): void };
 
-type Agent = Node & {
+type Agent = Node & Source & {
   id: string;
   /** The parent's session id. */
   owner: string;
@@ -78,9 +79,6 @@ type Agent = Node & {
   state: "queued" | "running" | "done";
   /** The next run's prompt: the spawn prompt, a resume message, or those plus messages sent while queued. */
   prompt: string;
-  cwd: string;
-  manager: SessionManager;
-  session?: AgentSession;
   /** Set once the session's first prompt is sent; before that, messages join the prompt. */
   prompted?: boolean;
   /** The current run, settled once its notice is sent. */
@@ -96,9 +94,19 @@ type Agent = Node & {
   halt?: () => Promise<void>;
 };
 
+/** Agents by id while anything holds them (such as the viewer), so a resume keeps their open transcript. */
+const KNOWN = Symbol.for("pi-rig.subagents.known");
+const known: Map<string, WeakRef<Agent>> = ((globalThis as any)[KNOWN] ??= new Map());
+
 /** Each agent by its SessionManager, so the child session's own instance finds its node. */
 const NODES = Symbol.for("pi-rig.subagents.nodes");
 const byManager: WeakMap<object, Agent> = ((globalThis as any)[NODES] ??= new WeakMap());
+
+/** Redraws the agent's row and marks its transcript out of date. */
+function changed(a: Agent) {
+  a.version++;
+  fleet().update(a.id);
+}
 
 /** Running agents below `n`. A stopped one no longer counts while it winds down, but counts again once abandoned. */
 function running(n: Node): number {
@@ -235,10 +243,12 @@ export default function (pi: ExtensionAPI) {
       parentId: "root" in a.parent ? (a.parent as Agent).id : undefined,
       status: a.state === "queued" ? "queued" : "running",
       activity: () => a.activity,
-      // ponytail: the transcript viewer is #68; until then the item shows where the session lives.
-      view: { transcript: () => new Text(`Session: ${a.manager.getSessionFile() ?? "not saved yet"}`, 0, 0) },
+      view: { transcript: (tui, ui) => transcript(a, tui as TUI, ui as any), showsSteers: true },
       stop: () => stop(a),
-      steer: (text) => message(a, text),
+      steer: async (text) => {
+        await message(a, text);
+        changed(a); // the transcript shows the pending steer
+      },
     });
   }
 
@@ -305,6 +315,9 @@ export default function (pi: ExtensionAPI) {
         a.prompted = false;
         await session.bindExtensions({});
         session.subscribe((e: any) => {
+          if (e.type === "tool_execution_update") a.partial.set(e.toolCallId, e.partialResult);
+          else if (e.type === "tool_execution_end") a.partial.delete(e.toolCallId);
+          changed(a);
           if (e.type === "turn_end") stats.turns++;
           else if (e.type === "tool_execution_start") {
             stats.tools++;
@@ -315,8 +328,7 @@ export default function (pi: ExtensionAPI) {
             stats.cost += e.message.usage?.cost?.total ?? 0;
             const last = textOf(e.message).trim().split("\n").at(-1);
             if (last) a.activity = last;
-          } else return;
-          fleet().update(a.id);
+          }
         });
         from = session.messages.length;
         const prompt = a.prompt;
@@ -361,9 +373,13 @@ export default function (pi: ExtensionAPI) {
 
   async function close(a: Agent) {
     if (!a.session) return;
+    // Kept for its transcript, which draws the calls with these definitions once the session is gone.
+    const s = a.session;
+    a.tools = new Map(s.getAllTools().map((t) => [t.name, s.getToolDefinition(t.name)]));
     await shutdown(a);
     a.session.dispose();
     a.session = undefined;
+    a.version++;
   }
 
   function finish(a: Agent, text: string, error: string | undefined, s: Stats, total?: Omit<Stats, "ms">) {
@@ -446,6 +462,9 @@ export default function (pi: ExtensionAPI) {
 
   /** A child of this session saved by an earlier process: reopened from its session file. */
   function restore(id: string, c: ExtensionContext): Agent | undefined {
+    // Still in memory (its transcript may be open): the same agent, under this session.
+    const held = known.get(id)?.deref();
+    if (held?.state === "done" && held.owner === c.sessionManager.getSessionId()) return Object.assign(held, { parent: node, root: "root" in node ? (node as Agent).root : top });
     const dir = childDir(c);
     if (!/^[0-9a-f]{8}$/.test(id) || !existsSync(dir)) return undefined;
     const file = readdirSync(dir).find((f) => f.endsWith(`_${id}.jsonl`));
@@ -461,8 +480,10 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** A new agent below this session. */
-  function agent(fields: Omit<Agent, "parent" | "root" | "children" | "stopped" | "activity">): Agent {
-    return { ...fields, parent: node, root: "root" in node ? (node as Agent).root : top, children: new Set(), stopped: false, activity: "" };
+  function agent(fields: Omit<Agent, "parent" | "root" | "children" | "stopped" | "activity" | "partial" | "version">): Agent {
+    const a: Agent = { ...fields, parent: node, root: "root" in node ? (node as Agent).root : top, children: new Set(), stopped: false, activity: "", partial: new Map(), version: 0 };
+    known.set(a.id, new WeakRef(a));
+    return a;
   }
 
   /** Only the session that spawned a child can message it. */

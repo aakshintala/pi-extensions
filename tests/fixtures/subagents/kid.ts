@@ -8,7 +8,8 @@
 // (relative to the agent dir) exists. kid.json is that list, or an object of such lists
 // keyed by the child's task (its spawn prompt), each read in its own order. File mode
 // also stops the fleet clock at 0, and a child session reports event "child_start" to
-// $PI_HARNESS_EVENTS (tests/helpers/tui.mjs); the first child to start first writes its
+// $PI_HARNESS_EVENTS (tests/helpers/tui.mjs), and "kid_reply" as each reply is asked for,
+// before its `after` wait; the first child to start first writes its
 // agent id to <agent dir>/child-id.
 //
 // In a parent (no rig.subagent entry), globalThis[Symbol.for("pi-rig.test.parentPrompt")],
@@ -31,25 +32,29 @@ import { fleet } from "../../../shared/fleet/index.ts";
 const g = globalThis as any;
 const STEP = Symbol.for("pi-rig.test.kidStep");
 
-function exists(path: string) {
+/** Resolves once `path` exists, or the request is aborted (a stopped child). */
+function exists(path: string, signal?: AbortSignal) {
   return new Promise<void>((resolve) => {
     const watcher = watch(join(path, ".."), () => existsSync(path) && done());
     const done = () => {
       watcher.close();
+      signal?.removeEventListener("abort", done);
       resolve();
     };
-    if (existsSync(path)) done();
+    signal?.addEventListener("abort", done);
+    if (existsSync(path) || signal?.aborted) done();
   });
 }
 
-async function fromFile(context: any) {
+async function fromFile(context: any, options?: { signal?: AbortSignal }) {
   const all = JSON.parse(readFileSync(join(getAgentDir(), "kid.json"), "utf8"));
   const first = context.messages.find((m: any) => m.role === "user");
   const text = typeof first.content === "string" ? first.content : first.content.map((c: any) => c.text ?? "").join("");
   const task = Array.isArray(all) ? "" : text.split("\n\nEnd your final message")[0];
   const counts = (g[STEP] ??= {});
   const step = (Array.isArray(all) ? all : all[task])[(counts[task] = (counts[task] ?? -1) + 1)];
-  if (step.after) await exists(join(getAgentDir(), step.after));
+  appendFileSync(process.env.PI_HARNESS_EVENTS!, JSON.stringify({ event: "kid_reply" }) + "\n");
+  if (step.after) await exists(join(getAgentDir(), step.after), options?.signal);
   const tools = Array.isArray(step.content) && step.content.some((b: any) => b.type === "toolCall");
   return fauxAssistantMessage(step.content, { stopReason: tools ? "toolUse" : "stop" });
 }

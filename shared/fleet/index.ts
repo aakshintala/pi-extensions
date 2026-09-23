@@ -13,8 +13,12 @@ export type Kind = "agent" | "shell" | "monitor";
 export type Status = "queued" | "running" | "completed" | "failed" | "stopped";
 export type FinalStatus = "completed" | "failed" | "stopped";
 
-/** What the viewer (#45) shows for an item: a transcript component or a log file read in increments. */
-export type ItemView = { transcript(): unknown } | { log: string };
+/**
+ * What the viewer (#45) shows for an item: a transcript component or a log file read in increments.
+ * `transcript` gets the viewer's TUI and UI context. With `showsSteers`, the transcript shows
+ * steers itself and the viewer does not echo them.
+ */
+export type ItemView = { transcript(tui: unknown, ui: unknown): unknown; showsSteers?: boolean } | { log: string };
 
 export interface ItemSpec {
   id: string;

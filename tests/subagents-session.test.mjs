@@ -936,3 +936,32 @@ test("a grandchild resumed after its parent finished counts in the parent's next
   assert.equal(tokens(run), own + usage[1]);
   assert.equal(cost(run), money(tokens(run) * 1e-6));
 });
+
+test("a transcript opened on a finished agent follows the resume its parent sends", { timeout: 20_000 }, async (t) => {
+  const { initTheme, theme } = await import("@earendil-works/pi-coding-agent");
+  initTheme("dark", false);
+  const plain = (lines) => lines.map((l) => l.replace(/\x1b\][^\x07]*\x07/g, "").replace(/\x1b\[[0-9;]*m/g, "").trimEnd()).filter(Boolean);
+  let id;
+  let view;
+  const { session } = await start(
+    t,
+    [
+      calls(spawn("scout")),
+      (context) => {
+        id = /^Subagent (\w+) started\.$/.exec(lastText(context))[1];
+        return says("waiting")();
+      },
+      // The child's notice: it is finished and dropped from memory. Open it, then resume it.
+      () => {
+        view = fleet().get(id).view.transcript({ requestRender() {} }, { getToolsExpanded: () => false, theme });
+        return calls(["subagent_message", { id, message: "and the dates" }])();
+      },
+      says("waiting"),
+      says("thanks"),
+    ],
+    (context) => fauxAssistantMessage(fauxText(context.messages.filter((m) => m.role === "user").length > 1 ? "no dates\nSTATUS: DONE" : "found notes\nSTATUS: DONE")),
+  );
+  await session.prompt("go");
+  const task = "End your final message with one line: STATUS: DONE, STATUS: DONE_WITH_CONCERNS, STATUS: BLOCKED, STATUS: NEEDS_CONTEXT.";
+  assert.deepEqual(plain(view.render(200)), [" scout", ` ${task}`, " found notes", " STATUS: DONE", " and the dates", ` ${task}`, " no dates", " STATUS: DONE"]);
+});
