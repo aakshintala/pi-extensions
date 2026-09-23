@@ -1,0 +1,796 @@
+/**
+ * Pure measurement logic: split a captured system prompt into semantic items
+ * and estimate token sizes. No pi API access — unit-testable.
+ *
+ * Pi 0.86+ renders the prompt as independently replaceable XML sections. Their
+ * wrappers locate content; custom sections (such as the ones rig extensions
+ * add) remain System Prompt parts. Text outside every section, after the
+ * preamble, counts as unattributed extension additions.
+ */
+import {
+	AGGREGATE_SOURCE,
+	BUILT_IN_TOOLS_LABEL,
+	extensionSource,
+	type InjectedReference,
+	INSTRUCTION_FILES_LABEL,
+	type InjectionItem,
+	type InjectionKind,
+	type InjectionSection,
+	type InjectionSource,
+	type JsonSpan,
+	PI_SOURCE,
+	SKILLS_LABEL,
+	SYSTEM_PROMPT_LABEL,
+} from "./model.ts";
+import {
+	AVAILABLE_TOOLS_BLOCK,
+	BASE_PROMPT_BLOCKS,
+	DOCUMENTATION_BLOCK,
+	findPromptSections,
+	findSectionToolBlocks,
+	GUIDELINES_BLOCK,
+	type LocatedPromptBlock,
+	type PromptSection,
+} from "./prompt-blocks.ts";
+
+/** Part names shared by a tool's carved prompt lines and pi's own prompt blocks. */
+const AVAILABLE_TOOLS_LABEL = AVAILABLE_TOOLS_BLOCK.label;
+const GUIDELINES_LABEL = GUIDELINES_BLOCK.label;
+
+/** System Prompt part hosting the text extensions appended after pi's footer. */
+const EXTENSION_ADDITIONS_BLOCK = { id: "base-prompt:additions", label: "Extension Additions" };
+
+/** Item name every prompt-addition owner carries, pi-adjacent rather than tool-shaped. */
+const PROMPT_ADDITIONS_LABEL = "system prompt additions";
+
+/** Leading part of pi's prompt, before the first block header pi renders. */
+const PREAMBLE_BLOCK = { id: "base-prompt:preamble", label: "Preamble" };
+
+/** Known XML section names retain the existing semantic ids and labels. */
+const SECTION_PARTS: Readonly<Record<string, { id: string; label: string }>> = {
+	tools: AVAILABLE_TOOLS_BLOCK,
+	rules: GUIDELINES_BLOCK,
+	docs: DOCUMENTATION_BLOCK,
+	addendum: { id: "base-prompt:appended", label: "Appended Prompt" },
+	cwd: { id: "base-prompt:current-dir", label: "Current Dir" },
+	project_context: { id: "base-prompt:context-files", label: INSTRUCTION_FILES_LABEL },
+	skills: { id: "base-prompt:skills", label: SKILLS_LABEL },
+};
+
+/** One visible skill before pi adds XML transport framing. */
+export interface SkillSlice {
+	name: string;
+	description: string;
+	filePath: string;
+}
+
+/** Minimal slice of BuildSystemPromptOptions that measurement needs. */
+export interface PromptOptionsSlice {
+	cwd: string;
+	/** Home directory used to abbreviate context-file paths; omitted disables it. */
+	homeDir?: string;
+	customPrompt?: string;
+	appendSystemPrompt?: string;
+	/** Custom section bodies, including overrides of Pi's named sections. */
+	sections?: Record<string, string>;
+	contextFilePaths?: string[];
+	skills?: SkillSlice[];
+}
+
+/** One active tool as it contributes to the initial context. */
+export interface ToolSlice {
+	name: string;
+	/** Sent to the provider with every request. */
+	description: string;
+	/** JSON-serialized parameter schema; sent to the provider with every request. */
+	parametersJson: string;
+	/** One-line snippet rendered into the prompt's Available tools list. */
+	snippet?: string;
+	/** Guideline bullets rendered into the prompt's Guidelines section. */
+	guidelines: string[];
+	/** Provenance, e.g. "builtin" or "npm:pi-web-providers". */
+	source: string;
+}
+
+/**
+ * Split a captured system prompt into semantic items: pi base prompt,
+ * appended prompt, context files, skills, active tool contributions, and the
+ * text extensions added outside pi's sections.
+ */
+export function analyzeSystemPrompt(
+	systemPrompt: string,
+	options: PromptOptionsSlice,
+	tools: ToolSlice[] = [],
+): InjectionItem[] {
+	const names = new Set<string>();
+	const sections = findPromptSections(systemPrompt).filter((section) => {
+		if (names.has(section.name)) return false;
+		names.add(section.name);
+		return true;
+	});
+	return analyzePromptSections(systemPrompt, sections, options, tools);
+}
+
+/** Measure XML section bodies once, keeping arbitrary sections out of extension attribution. */
+function analyzePromptSections(
+	prompt: string,
+	sections: readonly PromptSection[],
+	options: PromptOptionsSlice,
+	tools: ToolSlice[],
+): InjectionItem[] {
+	const items: InjectionItem[] = [];
+	const spans: Span[] = [];
+	const parts: PromptPart[] = [];
+	const blocks = findSectionToolBlocks(prompt, sections);
+	const replaced = Boolean(options.customPrompt);
+	const droppedIds = replaced ? BASE_PROMPT_BLOCKS
+		.filter((block) => !sections.some((section) => SECTION_PARTS[section.name]?.id === block.id))
+		.map((block) => block.id) : [];
+	const lines = measureTools(prompt, tools, items, spans, droppedIds, blocks);
+	const preambleEnd = sections[0]?.start ?? prompt.length;
+	appendPromptPart(parts, PREAMBLE_BLOCK, prompt.slice(0, preambleEnd).trimEnd());
+	for (const block of BASE_PROMPT_BLOCKS) {
+		if (droppedIds.includes(block.id)) {
+			parts.push({ ...block, kind: "base-prompt", text: "", dropped: true,
+				injectedReferences: lines.dropped.get(block.id) });
+		}
+	}
+	for (const section of sections) {
+		const body = prompt.slice(section.body.start + 1, section.body.end);
+		if (measureGeneratedSection(section.name, body, options, items)) continue;
+		parts.push(measureSectionPart(prompt, section, spans, lines.carved,
+			blocks.find((candidate) => candidate.start === section.body.start)?.moved));
+	}
+	// Only unwrapped gaps are additions. Sections after cwd still belong to the
+	// prompt, even when an earlier handler never saw them or cwd was removed.
+	const references = measurePromptAdditions(prompt, preambleEnd, sections, items);
+	if (references.length > 0) {
+		parts.push({ ...EXTENSION_ADDITIONS_BLOCK, kind: "prompt-addition", text: "", injectedReferences: references });
+	}
+	items.unshift(createSystemPromptItem(parts));
+	return items;
+}
+
+/** Carve one XML section while preserving exact preview-reference offsets within its body. */
+function measureSectionPart(
+	prompt: string,
+	section: PromptSection,
+	spans: readonly Span[],
+	injected: readonly InjectedSpan[],
+	moved: boolean | undefined,
+): PromptPart {
+	const block = SECTION_PARTS[section.name] ?? { id: `base-prompt:section:${section.name}`, label: section.name };
+	const start = section.name === "tools" || section.name === "rules" ? section.body.start : section.body.start + 1;
+	const localSpans = spans.filter((span) => span.start >= start && span.end <= section.body.end)
+		.map((span) => ({ start: span.start - start, end: span.end - start }));
+	const text = carve(prompt.slice(start, section.body.end), localSpans);
+	const references = injected.filter((span) => span.partId === block.id && span.start >= start
+		&& span.end <= section.body.end).sort((a, b) => a.start - b.start).map((span) => ({
+			offset: carve(prompt.slice(start, span.start), localSpans).length,
+			text: prompt.slice(span.start, span.end), itemId: span.itemId, source: span.source, tool: span.tool,
+		}));
+	return {
+		id: block.id, label: block.label, text,
+		kind: section.name === "addendum" ? "append-prompt" : "base-prompt", moved,
+		injectedReferences: references.length > 0 ? references : undefined,
+	};
+}
+
+/** Split generated records only when present; overridden or unknown content stays visible. */
+function measureGeneratedSection(
+	name: string,
+	body: string,
+	options: PromptOptionsSlice,
+	items: InjectionItem[],
+): boolean {
+	if (options.sections?.[name]) return false;
+	if (name === "project_context" && body.includes("<project_instructions path=")) {
+		const paths = [...body.matchAll(/<project_instructions path="([^"]+)">/g)].map((match) => match[1]);
+		const section = `<project_context>\n${body}\n</project_context>`;
+		measureContextFiles(section, { ...options, contextFilePaths: paths }, items, []);
+		return true;
+	}
+	if (name === "skills" && body.includes("<available_skills>")) {
+		// Read the captured records, not today's loader metadata after resume or a patch.
+		const record =
+			/<skill>\s*<name>(.*?)<\/name>\s*<description>([\s\S]*?)<\/description>\s*<location>(.*?)<\/location>/g;
+		const skills = [...body.matchAll(record)].map((match) => ({
+			name: decodeXml(match[1]), description: decodeXml(match[2]), filePath: decodeXml(match[3]),
+		}));
+		if (skills.length === 0) return false;
+		const children = skills.map((skill) => createItem(`skill:${skill.name}`, "skills", PI_SOURCE, skill.name,
+			[skill.name, skill.description, skill.filePath].join("\n"))).sort((a, b) => b.tokens - a.tokens);
+		items.push(createAggregateItem("skills", "skills", PI_SOURCE, `${SKILLS_LABEL} (${children.length})`, children));
+		return true;
+	}
+	return false;
+}
+
+/** Decode the five XML entities Pi escapes when rendering skill metadata. */
+function decodeXml(text: string): string {
+	const entities: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+	return text.replace(/&(amp|lt|gt|quot|apos);/g, (_match, name: string) => entities[name]);
+}
+
+/**
+ * Count the text outside every section, after the preamble, as one
+ * unattributed addition, and return it as a preview-only reference on the
+ * System Prompt part it was taken from. Pi reports no per-extension provenance
+ * for this text, so it is never attributed to an extension.
+ */
+function measurePromptAdditions(
+	prompt: string,
+	start: number,
+	excluded: readonly Span[],
+	items: InjectionItem[],
+): InjectedReference[] {
+	let text = "";
+	let cursor = start;
+	for (const span of excluded) {
+		if (span.start > cursor) text += prompt.slice(cursor, span.start);
+		cursor = Math.max(cursor, span.end);
+	}
+	text += prompt.slice(cursor);
+	if (text.trim().length === 0) return [];
+	const itemId = "prompt-addition:unattributed";
+	items.push(createItem(itemId, "prompt-addition", AGGREGATE_SOURCE, PROMPT_ADDITIONS_LABEL, text));
+	return [{ offset: 0, text, itemId, source: AGGREGATE_SOURCE }];
+}
+
+/** Same chars/4 heuristic pi's estimateTokens uses for text content. */
+export function textTokens(text: string): number {
+	return charTokens(text.length);
+}
+
+/** Token estimate for an already known character count. */
+function charTokens(chars: number): number {
+	return Math.ceil(chars / 4);
+}
+
+/** Where each tool's prompt lines ended up: carved out of pi's blocks, or dropped with them. */
+interface ToolPromptLines {
+	/** Carved lines, restored as references on the System Prompt part each came from. */
+	readonly carved: InjectedSpan[];
+	/** Extension lines a replacement suppressed, keyed by the part that would have carried them. */
+	readonly dropped: Map<string, InjectedReference[]>;
+}
+
+/**
+ * Measure active tool contributions: per-tool definition payloads plus the
+ * prompt snippet/guideline lines carved out of the base prompt. Built-in
+ * tools collapse into one aggregate pi-native item. Lines a `--system-prompt`
+ * replacement suppressed belong to the parts named by `droppedPartIds`; each
+ * tool keeps those as dropped, uncounted sections instead.
+ */
+function measureTools(
+	base: string,
+	tools: ToolSlice[],
+	items: InjectionItem[],
+	carvedSpans: Span[],
+	droppedPartIds: readonly string[],
+	blocks: readonly LocatedPromptBlock[],
+): ToolPromptLines {
+	const carver = createPromptCarver(base, carvedSpans, blocks);
+	const claimedGuidelines = new Set(piOwnedGuidelines(tools));
+	const dropped = new Map<string, InjectedReference[]>();
+	const builtinChildren: InjectionItem[] = [];
+	for (const tool of tools) {
+		// Built-in tools claim their bullets without carving them, so a later
+		// extension tool repeating one cannot take a line pi already renders for
+		// pi itself or for a built-in tool.
+		const ownedGuidelines = claimGuidelines(tool, claimedGuidelines);
+		const definition = createDefinitionSection(tool);
+		const droppedLines = droppedPromptLines(tool, ownedGuidelines)
+			.filter((line) => droppedPartIds.includes(line.partId));
+		if (tool.source === "builtin") {
+			// Pi renders built-in lines on its own behalf, so they become visible here only once dropped.
+			const sections = [...droppedSections(droppedLines), definition];
+			builtinChildren.push(createToolItem(`tool:builtin:${tool.name}`, PI_SOURCE, tool.name, sections));
+			continue;
+		}
+		const owner: InjectedOwner = {
+			itemId: `tool:${tool.source}:${tool.name}`,
+			source: extensionSource(tool.source),
+			tool: tool.name,
+		};
+		collectDroppedReferences(dropped, droppedLines, owner);
+		const promptSections = [
+			...droppedSections(droppedLines),
+			...carveToolPromptSections(carver, tool, ownedGuidelines, owner),
+		];
+		items.push(createToolItem(owner.itemId, owner.source, tool.name, [...promptSections, definition]));
+	}
+	if (builtinChildren.length > 0) {
+		builtinChildren.sort((a, b) => b.tokens - a.tokens);
+		const label = `${BUILT_IN_TOOLS_LABEL} (${builtinChildren.length})`;
+		items.push(createAggregateItem("tool:builtin", "tool", PI_SOURCE, label, builtinChildren));
+	}
+	return { carved: carver.injectedSpans, dropped };
+}
+
+/** One prompt line a replacement suppressed, and the System Prompt part pi would have rendered it into. */
+interface DroppedLine {
+	readonly partId: string;
+	/** Section name the line belongs to, shared by the part and the owning tool. */
+	readonly label: string;
+	/** Line exactly as pi would have rendered it, including its leading line break. */
+	readonly text: string;
+}
+
+/** Prompt lines pi would have rendered for one tool: its snippet bullet, then the guidelines it owns. */
+function droppedPromptLines(tool: ToolSlice, ownedGuidelines: string[]): DroppedLine[] {
+	const lines: DroppedLine[] = [];
+	if (tool.snippet !== undefined) {
+		lines.push({
+			partId: AVAILABLE_TOOLS_BLOCK.id,
+			label: AVAILABLE_TOOLS_LABEL,
+			text: `\n- ${tool.name}: ${tool.snippet}`,
+		});
+	}
+	for (const guideline of ownedGuidelines) {
+		lines.push({ partId: GUIDELINES_BLOCK.id, label: GUIDELINES_LABEL, text: `\n- ${guideline}` });
+	}
+	return lines;
+}
+
+/**
+ * Group one tool's dropped lines into a preview-only section per part, so its
+ * preview shows what the replacement gave up without claiming tokens pi never
+ * sent.
+ */
+function droppedSections(lines: readonly DroppedLine[]): SectionDraft[] {
+	const sections: SectionDraft[] = [];
+	for (const line of lines) {
+		const last = sections.length - 1;
+		const current = sections[last];
+		if (current !== undefined && current.label === line.label) {
+			sections[last] = { ...current, text: current.text + line.text };
+			continue;
+		}
+		sections.push({ label: line.label, text: line.text, dropped: true });
+	}
+	return sections;
+}
+
+/** Restore one extension tool's dropped lines as references on the parts pi would have rendered them into. */
+function collectDroppedReferences(
+	dropped: Map<string, InjectedReference[]>,
+	lines: readonly DroppedLine[],
+	owner: InjectedOwner,
+): void {
+	for (const line of lines) {
+		// One insertion point: a dropped part holds no counted text of its own.
+		const reference: InjectedReference = { offset: 0, text: line.text, ...owner };
+		const references = dropped.get(line.partId);
+		if (references === undefined) dropped.set(line.partId, [reference]);
+		else references.push(reference);
+	}
+}
+
+/** One labeled part of a tool item's text, before it receives its token share. */
+interface SectionDraft {
+	readonly label: string;
+	readonly text: string;
+	/** True for text a `--system-prompt` replacement dropped: shown for reference, never counted. */
+	readonly dropped?: boolean;
+	/** True for a block an extension moved out of the region pi rendered it into. */
+	readonly moved?: boolean;
+	/** Serialized JSON inside `text`; marked here rather than detected in the preview. */
+	readonly jsonSpan?: JsonSpan;
+	/** Prompt-line insertions that affect only the preview, never this section's estimate. */
+	readonly injectedReferences?: readonly InjectedReference[];
+}
+
+/** The payload one tool sends with every request: its name, description, and parameter schema. */
+function createDefinitionSection(tool: ToolSlice): SectionDraft {
+	const heading = `${tool.name}: ${tool.description}\n`;
+	return {
+		label: "Definition",
+		text: `${heading}${tool.parametersJson}`,
+		jsonSpan: { start: heading.length, end: heading.length + tool.parametersJson.length },
+	};
+}
+
+/**
+ * Carve this tool's Available tools snippet and the Guidelines bullets it owns
+ * out of the base prompt, so its prompt lines are attributed to the tool that
+ * produced them.
+ */
+function carveToolPromptSections(
+	carver: PromptCarver,
+	tool: ToolSlice,
+	ownedGuidelines: string[],
+	owner: InjectedOwner,
+): SectionDraft[] {
+	const sections: SectionDraft[] = [];
+	const snippet = tool.snippet === undefined
+		? undefined
+		: carveInjectedLine(carver, carver.toolsBlock, `\n- ${tool.name}: ${tool.snippet}`, owner);
+	if (snippet !== undefined) {
+		sections.push({ label: AVAILABLE_TOOLS_LABEL, text: carver.base.slice(snippet.start, snippet.end) });
+	}
+	let bullets = "";
+	for (const guideline of ownedGuidelines) {
+		const span = carveInjectedLine(carver, carver.guidelinesBlock, `\n- ${guideline}`, owner);
+		if (span === undefined) continue;
+		bullets += carver.base.slice(span.start, span.end);
+	}
+	if (bullets.length > 0) sections.push({ label: GUIDELINES_LABEL, text: bullets });
+	return sections;
+}
+
+/** Base-prompt regions where pi renders tool prompt lines, plus the carve log to append to. */
+interface PromptCarver {
+	readonly base: string;
+	/** Bullet lines pi renders under "Available tools:". */
+	readonly toolsBlock: CarvedBlock;
+	/** Bullet lines pi renders under "Guidelines:". */
+	readonly guidelinesBlock: CarvedBlock;
+	readonly carvedSpans: Span[];
+	readonly injectedSpans: InjectedSpan[];
+}
+
+/** One System Prompt part and the region of it pi renders tool prompt lines into. */
+interface CarvedBlock {
+	/** Id of the System Prompt part that keeps these lines as preview references. */
+	readonly partId: string;
+	readonly span: Span | undefined;
+}
+
+/** The tool item that counts a carved prompt line. */
+interface InjectedOwner {
+	readonly itemId: string;
+	readonly source: InjectionSource;
+	/** Tool of `source` that produced the line, rendered as a label qualifier. */
+	readonly tool?: string;
+}
+
+/** Original prompt location, owner, and System Prompt part of a carved prompt line. */
+interface InjectedSpan extends Span, InjectedOwner {
+	readonly partId: string;
+}
+
+/** Locate the two bullet blocks pi renders tool prompt lines into. */
+function createPromptCarver(
+	base: string,
+	carvedSpans: Span[],
+	blocks: readonly LocatedPromptBlock[],
+): PromptCarver {
+	return {
+		base,
+		toolsBlock: {
+			partId: AVAILABLE_TOOLS_BLOCK.id,
+			span: blocks.find((block) => block.id === AVAILABLE_TOOLS_BLOCK.id)?.bullets,
+		},
+		guidelinesBlock: {
+			partId: GUIDELINES_BLOCK.id,
+			span: blocks.find((block) => block.id === GUIDELINES_BLOCK.id)?.bullets,
+		},
+		carvedSpans,
+		injectedSpans: [],
+	};
+}
+
+/**
+ * Carve one rendered prompt line out of its block and remember where pi put it,
+ * so the part it left keeps it as a preview reference owned by its tool.
+ */
+function carveInjectedLine(
+	carver: PromptCarver,
+	block: CarvedBlock,
+	line: string,
+	owner: InjectedOwner,
+): Span | undefined {
+	const span = carveBlockLine(carver, block.span, line);
+	if (span !== undefined) carver.injectedSpans.push({ ...span, ...owner, partId: block.partId });
+	return span;
+}
+
+/** Record one complete prompt bullet inside its block, never a prefix of another bullet. */
+function carveBlockLine(carver: PromptCarver, block: Span | undefined, line: string): Span | undefined {
+	if (block === undefined) return undefined;
+	let start = carver.base.indexOf(line, block.start);
+	while (start !== -1 && start + line.length <= block.end) {
+		const end = start + line.length;
+		if (end === block.end || carver.base[end] === "\n") {
+			const span = { start, end };
+			carver.carvedSpans.push(span);
+			return span;
+		}
+		start = carver.base.indexOf(line, end);
+	}
+	return undefined;
+}
+
+/**
+ * Bullets pi's Guidelines section carries on its own behalf, reserved before
+ * any tool can claim one. Pi adds this file-exploration bullet ahead of tool
+ * guidelines, so an identical tool bullet is deduplicated away. Pi's two
+ * trailing bullets ("Be concise in your responses", "Show file paths clearly
+ * when working with files") need no reservation: pi appends them after tool
+ * guidelines, where a tool declaring one already owns the rendered line.
+ */
+function piOwnedGuidelines(tools: ToolSlice[]): string[] {
+	const names = new Set(tools.map((tool) => tool.name));
+	const shellOnly = (names.has("bash") || names.has("powershell")) &&
+		!names.has("grep") && !names.has("find") && !names.has("ls");
+	if (!shellOnly) return [];
+	if (names.has("bash") && names.has("powershell")) {
+		return ["Use bash or PowerShell for file operations like listing, searching, and finding files"];
+	}
+	if (names.has("powershell")) {
+		return ["Use PowerShell for file operations like listing, searching, and finding files"];
+	}
+	return ["Use bash for file operations like ls, rg, find"];
+}
+
+/**
+ * Guideline texts this tool is the first to declare, in pi's active-tool
+ * order. Pi renders each distinct bullet once, so a later tool repeating one
+ * contributes no prompt line and must not count its tokens again.
+ */
+function claimGuidelines(tool: ToolSlice, claimed: Set<string>): string[] {
+	const owned: string[] = [];
+	for (const guideline of tool.guidelines) {
+		const text = guideline.trim();
+		if (text.length === 0 || claimed.has(text)) continue;
+		claimed.add(text);
+		owned.push(text);
+	}
+	return owned;
+}
+
+/**
+ * Carve pi's project-context section and expose each context file as a child of
+ * one Instruction Files aggregate, without counting the XML transport scaffolding.
+ */
+function measureContextFiles(
+	base: string,
+	options: PromptOptionsSlice,
+	items: InjectionItem[],
+	carvedSpans: Span[],
+): void {
+	const sectionSpan = findContextSectionSpan(base);
+	if (sectionSpan === undefined) return;
+	const children: InjectionItem[] = [];
+	for (const filePath of options.contextFilePaths ?? []) {
+		const content = findContextFileContent(base, filePath);
+		if (content === undefined) continue;
+		children.push(createItem(
+			`context-file:${filePath}`,
+			"context-file",
+			PI_SOURCE,
+			abbreviateHome(filePath, options.homeDir),
+			content,
+		));
+	}
+	children.sort((a, b) => b.tokens - a.tokens);
+	carvedSpans.push(expandLineBreaks(base, sectionSpan));
+	if (children.length === 0) return;
+
+	const label = `${INSTRUCTION_FILES_LABEL} (${children.length})`;
+	items.push(createAggregateItem("context-files", "context-file", PI_SOURCE, label, children));
+}
+
+/** One labeled part of the System Prompt item, before it receives its token share. */
+interface PromptPart {
+	readonly id: string;
+	readonly kind: InjectionKind;
+	readonly label: string;
+	readonly text: string;
+	/** True for a block a `--system-prompt` replacement dropped: no pi text, no tokens. */
+	readonly dropped?: boolean;
+	/** True for a block an extension moved out of the region pi rendered it into. */
+	readonly moved?: boolean;
+	readonly injectedReferences?: readonly InjectedReference[];
+}
+
+/** Record one pi-authored part, skipping a block pi rendered no text into. */
+function appendPromptPart(
+	parts: PromptPart[],
+	block: Pick<PromptPart, "id" | "label" | "moved">,
+	text: string,
+): void {
+	if (text.length === 0) return;
+	parts.push({ id: block.id, kind: "base-prompt", label: block.label, text, moved: block.moved });
+}
+
+/**
+ * Build the System Prompt item from its labeled parts. Parts concatenate back to
+ * the item text and take cumulative shares of its estimate, so children break the
+ * item down without adding tokens. A prompt with one part stays undivided.
+ */
+function createSystemPromptItem(parts: readonly PromptPart[]): InjectionItem {
+	const text = countedText(parts);
+	const item = createItem("base-prompt", "base-prompt", PI_SOURCE, SYSTEM_PROMPT_LABEL, text);
+	if (parts.length === 0 || (parts.length === 1 && parts[0].id === PREAMBLE_BLOCK.id)) return item;
+	const sections = allocateSectionTokens(parts.map((part) => ({
+		label: part.label,
+		text: part.text,
+		dropped: part.dropped,
+		moved: part.moved,
+		injectedReferences: part.injectedReferences,
+	})));
+	return {
+		...item,
+		sections,
+		children: parts.map((part, index) => ({
+			...createItem(part.id, part.kind, PI_SOURCE, part.label, part.text),
+			tokens: sections[index]?.tokens ?? 0,
+			dropped: part.dropped,
+			moved: part.moved,
+			injectedReferences: part.injectedReferences,
+		})),
+	};
+}
+
+/** Build an initial-phase InjectionItem with derived char/token sizes. */
+function createItem(
+	id: string,
+	kind: InjectionKind,
+	source: InjectionSource,
+	label: string,
+	text: string,
+): InjectionItem {
+	return {
+		id,
+		phase: "initial",
+		kind,
+		source,
+		label,
+		chars: text.length,
+		tokens: textTokens(text),
+		text,
+	};
+}
+
+/** Build a tool item whose raw text is exactly the concatenation of its sections. */
+function createToolItem(
+	id: string,
+	source: InjectionSource,
+	label: string,
+	sections: SectionDraft[],
+): InjectionItem {
+	const text = countedText(sections);
+	return { ...createItem(id, "tool", source, label, text), sections: allocateSectionTokens(sections) };
+}
+
+/** Text an item actually sends: everything but the parts a prompt replacement dropped. */
+function countedText(parts: readonly { readonly text: string; readonly dropped?: boolean }[]): string {
+	return parts.filter((part) => part.dropped !== true).map((part) => part.text).join("");
+}
+
+/**
+ * Give each section its share of the item estimate. Shares are cumulative
+ * differences rather than independently rounded counts, so they always sum to
+ * the item total. A dropped section reads 0 tokens and leaves the shares of
+ * the sections pi did send unchanged.
+ */
+function allocateSectionTokens(sections: SectionDraft[]): InjectionSection[] {
+	let chars = 0;
+	let allocated = 0;
+	return sections.map((section) => {
+		if (section.dropped === true) return { ...section, tokens: 0 };
+		chars += section.text.length;
+		const cumulative = charTokens(chars);
+		const tokens = cumulative - allocated;
+		allocated = cumulative;
+		return { ...section, tokens };
+	});
+}
+
+/** Line break joining consecutive child texts inside an aggregate's raw text. */
+const CHILD_SEPARATOR = "\n";
+
+/**
+ * Build an aggregate whose totals exactly reconcile with its child items and
+ * whose preview presents every child as its own labeled part, so each child
+ * keeps its subheader, token share, and marked JSON run.
+ */
+function createAggregateItem(
+	id: string,
+	kind: InjectionKind,
+	source: InjectionSource,
+	label: string,
+	children: InjectionItem[],
+): InjectionItem {
+	return {
+		...createItem(id, kind, source, label, children.map((child) => child.text).join(CHILD_SEPARATOR)),
+		chars: children.reduce((sum, child) => sum + child.chars, 0),
+		tokens: children.reduce((sum, child) => sum + child.tokens, 0),
+		sections: children.map((child, index) =>
+			childSection(child, index === 0 ? "" : CHILD_SEPARATOR)
+		),
+		children,
+	};
+}
+
+/**
+ * One child as a labeled part of its aggregate, opening with the separator the
+ * aggregate text joins on; the preview drops that separator again.
+ */
+function childSection(child: InjectionItem, separator: string): InjectionSection {
+	const span = childJsonSpan(child);
+	return {
+		label: child.label,
+		text: `${separator}${child.text}`,
+		tokens: child.tokens,
+		jsonSpan: span === undefined
+			? undefined
+			: { start: span.start + separator.length, end: span.end + separator.length },
+	};
+}
+
+/**
+ * The JSON run marked inside a child's whole text: its own span, or the span of
+ * its single part. A child split into several parts marks each part separately,
+ * so no one run covers its text and the aggregate part expands nothing.
+ */
+function childJsonSpan(child: InjectionItem): JsonSpan | undefined {
+	const sections = child.sections;
+	if (sections === undefined) return child.jsonSpan;
+	return sections.length === 1 ? sections[0]?.jsonSpan : undefined;
+}
+
+/** Replace a leading home-directory prefix with `~` for compact path labels. */
+function abbreviateHome(path: string, homeDir: string | undefined): string {
+	if (homeDir === undefined || homeDir.length === 0) return path;
+	if (path === homeDir) return "~";
+	if (path.startsWith(`${homeDir}/`)) return `~${path.slice(homeDir.length)}`;
+	return path;
+}
+
+/** Remove the given spans from text, tolerating overlaps, and return the remainder. */
+function carve(text: string, spans: Span[]): string {
+	spans.sort((a, b) => a.start - b.start);
+	let remainder = "";
+	let cursor = 0;
+	for (const span of spans) {
+		if (span.start > cursor) remainder += text.slice(cursor, span.start);
+		cursor = Math.max(cursor, span.end);
+	}
+	return remainder + text.slice(cursor);
+}
+
+/** Half-open [start, end) character range within the base prompt. */
+interface Span {
+	start: number;
+	end: number;
+}
+
+/** Span of pi's complete project-context transport section. */
+function findContextSectionSpan(systemPrompt: string): Span | undefined {
+	return findDelimitedSpan(systemPrompt, "<project_context>", "</project_context>");
+}
+
+/** Extract one context file's final content without its project-instructions wrapper. */
+function findContextFileContent(systemPrompt: string, filePath: string): string | undefined {
+	const open = `<project_instructions path="${filePath}">`;
+	const close = "</project_instructions>";
+	const wrapper = findDelimitedSpan(systemPrompt, open, close);
+	if (wrapper === undefined) return undefined;
+	let start = wrapper.start + open.length;
+	let end = wrapper.end - close.length;
+	if (systemPrompt.startsWith("\r\n", start)) start += 2;
+	else if (systemPrompt[start] === "\n") start++;
+	if (systemPrompt.slice(Math.max(start, end - 2), end) === "\r\n") end -= 2;
+	else if (systemPrompt[end - 1] === "\n") end--;
+	return systemPrompt.slice(start, end);
+}
+
+/** Locate a complete delimited transport wrapper. */
+function findDelimitedSpan(text: string, open: string, close: string): Span | undefined {
+	const start = text.indexOf(open);
+	if (start === -1) return undefined;
+	const closeStart = text.indexOf(close, start + open.length);
+	return closeStart === -1 ? undefined : { start, end: closeStart + close.length };
+}
+
+/** Include surrounding transport-only line breaks when carving a generated section. */
+function expandLineBreaks(text: string, span: Span): Span {
+	let start = span.start;
+	let end = span.end;
+	while (start > 0 && (text[start - 1] === "\n" || text[start - 1] === "\r")) start--;
+	while (end < text.length && (text[end] === "\n" || text[end] === "\r")) end++;
+	return { start, end };
+}

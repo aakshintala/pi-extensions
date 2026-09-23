@@ -1,0 +1,8 @@
+@tmustier/pi-usage-extension (https://github.com/tmustier/pi-extensions/tree/main/usage-extension)
+version 0.9.5, npm tarball https://registry.npmjs.org/@tmustier/pi-usage-extension/-/pi-usage-extension-0.9.5.tgz
+integrity sha512-mCTAJID22B4ZEfaRW43FKtD7acHlRuQhYr0iHOZQticoBR68FKE2D82CXBWMGqqaGVlVqQeLQHMOQC0FCTbLeA==
+License: MIT (LICENSE)
+
+Kept for reference:
+- upstream/pi-usage-extension/src/: the package's source, ported to extensions/usage/
+  (screenshots in the tarball are not kept)

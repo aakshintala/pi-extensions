@@ -22,3 +22,7 @@ pi install /path/to/pi-rig
 | [stamp](extensions/stamp/README.md) | Timestamps, response timing, metadata and tool durations in the transcript | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
 | [ask-user](extensions/ask-user/README.md) | `ask_user`: questions in a bottom panel with inline free text | [#34](https://github.com/aakshintala/pi-rig/issues/34) |
 | [queue](extensions/queue/README.md) | Messages queued while the agent works, shown above the editor and editable in it | [#39](https://github.com/aakshintala/pi-rig/issues/39) |
+| [usage](extensions/usage/README.md) | `/usage`: cost and token usage across sessions, as a graph or a table per period | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
+| [context](extensions/context/README.md) | `/context`: context usage map and injections inspector | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
+| [clear](extensions/clear/README.md) | `/clear`: starts a new session, as `/new` does | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
+| [theme](extensions/theme/README.md) | `/theme`: Pi's own theme picker with live preview | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
