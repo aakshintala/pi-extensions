@@ -21,3 +21,4 @@ pi install /path/to/pi-rig
 | [search](extensions/search/README.md) | `grep` and `find` served by the FFF native index, falling back to Pi's built-ins | [#35](https://github.com/aakshintala/pi-rig/issues/35) |
 | [stamp](extensions/stamp/README.md) | Timestamps, response timing, metadata and tool durations in the transcript | [#36](https://github.com/aakshintala/pi-rig/issues/36) |
 | [ask-user](extensions/ask-user/README.md) | `ask_user`: questions in a bottom panel with inline free text | [#34](https://github.com/aakshintala/pi-rig/issues/34) |
+| [queue](extensions/queue/README.md) | Messages queued while the agent works, shown above the editor and editable in it | [#39](https://github.com/aakshintala/pi-rig/issues/39) |
