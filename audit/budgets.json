@@ -13,6 +13,8 @@
     "ask_user": 300,
     "subagent_spawn": 400,
     "subagent_message": 130,
-    "subagent_stop": 70
+    "subagent_stop": 70,
+    "bash": 130,
+    "jobs": 115
   }
 }
