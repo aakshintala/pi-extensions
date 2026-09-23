@@ -3,13 +3,22 @@
   "private": true,
   "version": "0.0.0",
   "description": "Locally rebuilt Pi extension package. Upstream source is never loaded by Pi.",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "scripts": {
     "test": "node --test $(find tests extensions shared -name '*.test.mjs' | sort)",
     "audit": "node audit/index.mjs",
     "provenance": "node tests/provenance.mjs"
   },
   "pi": {
-    "extensions": ["./extensions/*/index.ts", "./extensions/*.ts"]
+    "extensions": [
+      "./extensions/*/index.ts",
+      "./extensions/*.ts"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1"
   }
 }

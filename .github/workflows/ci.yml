@@ -15,6 +15,9 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
+          cache: npm
+      - run: command -v tmux || (sudo apt-get update && sudo apt-get install -y tmux)
+      - run: npm ci
       - run: npm test
       - run: npm run audit
       - run: npm run provenance
