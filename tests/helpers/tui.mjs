@@ -33,7 +33,9 @@ const TIMEOUT_MS = 20_000;
 // Events file lines; a last line without its newline is still being written, so skip it.
 export const parseEvents = (text) => text.split("\n").slice(0, -1).map((l) => JSON.parse(l).event);
 
-export async function startTui(t, { replies = [], extensions = [], args = [], cols = 80, rows = 24 } = {}) {
+// `keybindings` is written to keybindings.json; the default frees Ctrl+B for the fleet
+// extension (#47), as the rig's README asks users to. `null` writes none: Pi's defaults.
+export async function startTui(t, { replies = [], extensions = [], args = [], cols = 80, rows = 24, keybindings = { "tui.editor.cursorLeft": ["left"] } } = {}) {
   const box = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-tui-")));
   const socket = `pi-rig-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   const tmux = (...a) => {
@@ -62,6 +64,7 @@ export async function startTui(t, { replies = [], extensions = [], args = [], co
     chmodSync(join(agentDir, "bin", bin), 0o755);
   }
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ quietStartup: true }));
+  if (keybindings) writeFileSync(join(agentDir, "keybindings.json"), JSON.stringify(keybindings));
   writeFileSync(join(box, "replies.json"), JSON.stringify(replies));
   writeFileSync(events, "");
   writeFileSync(join(box, "tmux.conf"), "set -g extended-keys on\nset -g remain-on-exit on\nset -gq extended-keys-format csi-u\n");
