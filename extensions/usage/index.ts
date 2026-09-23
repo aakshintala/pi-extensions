@@ -538,7 +538,10 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const agentDir = getAgentDir();
-			const sessionsDir = resolveSessionsDir(agentDir, SettingsManager.create(ctx.cwd, agentDir).getSessionDir());
+			const sessionsDir = resolveSessionsDir(
+				agentDir,
+				SettingsManager.create(ctx.cwd, agentDir, { projectTrusted: ctx.isProjectTrusted() }).getSessionDir(),
+			);
 
 			let failure: unknown;
 			const data = await ctx.ui.custom<UsageData | null>((tui, theme, _kb, done) => {
