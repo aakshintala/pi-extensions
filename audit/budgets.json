@@ -15,6 +15,7 @@
     "subagent_message": 130,
     "subagent_stop": 90,
     "bash": 140,
-    "jobs": 125
+    "jobs": 125,
+    "monitor": 195
   }
 }
