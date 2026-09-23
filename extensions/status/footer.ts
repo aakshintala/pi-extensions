@@ -33,20 +33,26 @@ export const GIT_LIMITS = { timeoutMs: 5_000, graceMs: 2_000 };
  * Runs git; resolves once it exits. On timeout or abort git gets SIGTERM, then
  * SIGKILL after a grace period, and the promise resolves then even if git has
  * not exited (e.g. stuck on NFS), so a hung git never holds the lock. With
- * `first`, kills git at its first output.
+ * `first`, kills git at its first output. `stopped`: timed out, aborted or
+ * killed at first output.
  */
 function runGit(args: string[], cwd: string, signal: AbortSignal, first: boolean, limits: typeof GIT_LIMITS) {
-  return new Promise<{ ok: boolean; out: string }>((resolve) => {
+  return new Promise<{ ok: boolean; out: string; stopped: boolean }>((resolve) => {
     let out = "";
+    let stopped = false;
     let grace: ReturnType<typeof setTimeout> | undefined;
     const child = spawn("git", [...SAFE, ...args], { cwd, stdio: ["ignore", "pipe", "ignore"] });
     const done = (ok: boolean) => {
       clearTimeout(timer);
       clearTimeout(grace);
       signal.removeEventListener("abort", stop);
-      resolve({ ok, out });
+      // Resolved before close (grace expired): a descendant may hold the pipe, so release our end.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolve({ ok, out, stopped });
     };
     const stop = () => {
+      stopped = true;
       child.kill();
       grace ??= setTimeout(() => {
         child.kill("SIGKILL");
@@ -75,7 +81,8 @@ export const gitDirty = async (cwd: string, signal: AbortSignal, limits = GIT_LI
     .map((l) => l.split("\t"))
     .filter(([scope, key]) => key && scope !== "global" && scope !== "system")
     .flatMap(([, key]) => ["-c", `${key}=`]);
-  if (signal.aborted) return null;
+  // A timed-out config leaves filters unknown: stop here, not hang again in status.
+  if (signal.aborted || scoped.stopped) return null;
   // Submodules count by commit only: no status runs inside them.
   const status = await runGit([...blank, "status", "--porcelain", "--ignore-submodules=dirty"], cwd, signal, true, limits);
   return status.out ? true : status.ok ? false : null;

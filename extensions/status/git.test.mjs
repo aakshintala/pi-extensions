@@ -142,3 +142,36 @@ test("a hung git releases the process-wide lock for the next footer", { timeout:
   await b("session_shutdown");
   await until(() => runs().every(([git]) => !alive(git)), "both gits to die");
 });
+
+test("a timed-out git config ends the check before git status runs", { timeout: 20_000 }, async (t) => {
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-status-lane103-config-")));
+  const log = join(bin, "log");
+  // config hangs until killed; any other subcommand logs itself and succeeds.
+  writeFileSync(join(bin, "git"), `#!/bin/sh\ncase " $* " in *" config "*) echo "config $$" >> '${log}'; exec sleep 30;; esac\necho "$1" >> '${log}'\n`);
+  chmodSync(join(bin, "git"), 0o755);
+  execFileSync(join(bin, "git"), ["warm"]); // a new executable's first start can be slow (macOS scans it)
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}:${path}`;
+  const lines = () => readFileSync(log, "utf8").trim().split("\n");
+  t.after(() => {
+    process.env.PATH = path;
+    for (const l of lines()) if (l.startsWith("config ")) try { process.kill(Number(l.slice(7)), "SIGKILL"); } catch {}
+    rmSync(bin, { recursive: true, force: true });
+  });
+  assert.equal(await gitDirty(tmpdir(), new AbortController().signal, { timeoutMs: 500, graceMs: 100 }), null);
+  // Timing only decides whether config logged before its kill; status must never start.
+  assert.deepEqual(lines().filter((l) => !l.startsWith("config ")), ["warm"]);
+});
+
+test("a check resolved before git's pipe closes releases the pipe", { timeout: 20_000 }, async (t) => {
+  const pipes = () => process.getActiveResourcesInfo().filter((r) => r === "PipeWrap").length;
+  const before = pipes();
+  const runs = hungGit(t);
+  const stop = new AbortController();
+  const check = gitDirty(tmpdir(), stop.signal, LIMITS);
+  await until(() => runs().length === 1, "git to start");
+  stop.abort();
+  assert.equal(await check, null);
+  assert.ok(alive(runs()[0][1]), "the descendant still holds the pipe");
+  await until(() => pipes() === before, "the pipe to close");
+});

@@ -137,10 +137,10 @@ function fakePi() {
   };
 }
 function settings(port) {
-  const values = { quotaPort: port, quotaRefreshSeconds: 60 }, listeners = [];
+  const values = { quotaPort: port, quotaRefreshSeconds: 60 }, listeners = new Set();
   return {
     get: (k) => values[k],
-    onChange: (l) => listeners.push(l),
+    onChange: (l) => (listeners.add(l), () => listeners.delete(l)),
     set: (k, v) => ((values[k] = v), listeners.forEach((l) => l(k, v))),
   };
 }

@@ -39,28 +39,35 @@ export type QuotaClient = ReturnType<typeof createQuotaClient>;
 
 export function createQuotaClient({ port, refreshMs, fetch: fetchFn = fetch, timers = globalThis, now = Date.now }: ClientOptions) {
   type Pending = { promise: Promise<Feed | null>; controller: AbortController; timer?: ReturnType<typeof setTimeout>; deadline: number };
-  let feed: Feed | null = null;
+  let feed: Feed | null | undefined; // undefined: nothing fetched since creation or the last invalidate
   let fetchedAt = -Infinity;
+  let epoch = 0; // bumped by invalidate, so a fetch it aborted never touches the cache
   let inFlight: Pending | null = null;
   let poll: ReturnType<typeof setInterval> | undefined;
+  const listeners = new Set<(feed: Feed | null | undefined) => void>();
+  const cache = (next: Feed | null | undefined) => {
+    feed = next;
+    for (const l of listeners) l(next);
+  };
 
   async function run(p: Pending): Promise<Feed | null> {
+    const at = epoch;
     try {
       const res = await fetchFn(`http://127.0.0.1:${port()}/quotas`, { signal: p.controller.signal });
       const json = res.ok ? await res.json() : null;
       if (!Array.isArray(json?.providers)) throw new Error("bad feed");
       // An aborted fetch (stop, invalidate) must not repopulate the cache.
-      if (p.controller.signal.aborted) return feed;
-      feed = json as Feed;
+      if (p.controller.signal.aborted) return feed ?? null;
       fetchedAt = now();
+      cache(json as Feed);
     } catch {
       // A failed refresh keeps the last good feed while it is still fresh.
-      if (now() - fetchedAt >= refreshMs()) feed = null;
+      if (at === epoch) cache(now() - fetchedAt < refreshMs() ? feed : null);
     } finally {
       timers.clearTimeout(p.timer);
       if (inFlight === p) inFlight = null;
     }
-    return feed;
+    return feed ?? null;
   }
 
   // Joiners extend the shared fetch's deadline to the longest caller timeout.
@@ -99,10 +106,16 @@ export function createQuotaClient({ port, refreshMs, fetch: fetchFn = fetch, tim
     },
     /** Drops the cached feed and aborts the in-flight fetch, so the next get fetches afresh. */
     invalidate() {
+      epoch++;
       inFlight?.controller.abort();
       inFlight = null;
-      feed = null;
       fetchedAt = -Infinity;
+      cache(undefined);
+    },
+    /** Calls `listener` with the cached feed each time a fetch settles or invalidate clears it (undefined). */
+    onFeed(listener: (feed: Feed | null | undefined) => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
     },
     /** Idempotent: stops polling and aborts the in-flight fetch. */
     stop() {
@@ -194,7 +207,7 @@ export function full(feed: Feed, now = Date.now()): string {
   return lines.join("\n");
 }
 
-type Settings = { get(key: string): unknown; onChange?(listener: (key: string) => void): unknown };
+type Settings = { get(key: string): unknown; onChange?(listener: (key: string) => void): () => void };
 
 /** Registers get_quotas and /quota on one client and ties polling to the session. Returns the client for the footer. */
 export function registerQuota(pi: ExtensionAPI, settings: Settings, deps: Partial<ClientOptions> = {}): QuotaClient {
@@ -204,12 +217,16 @@ export function registerQuota(pi: ExtensionAPI, settings: Settings, deps: Partia
   pi.on("session_start", (_event, ctx) => {
     if (ctx.mode === "tui") client.start();
   });
-  settings.onChange?.((key) => {
+  // Sections are shared across sessions (#95): unsubscribe, or every ended session leaves a listener.
+  const off = settings.onChange?.((key) => {
     if (key === "quotaRefreshSeconds") client.retime();
     if (key === "quotaPort") client.invalidate();
   });
-  // Also fires on session switch (reason new/resume/fork) and /reload.
-  pi.on("session_shutdown", () => client.stop());
+  // Also fires on session switch (reason new/resume/fork) and /reload. Idempotent.
+  pi.on("session_shutdown", () => {
+    client.stop();
+    off?.();
+  });
 
   pi.registerTool({
     name: "get_quotas",

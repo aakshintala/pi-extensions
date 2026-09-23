@@ -319,19 +319,20 @@ test("two sessions in one process keep their own timing and usage", async () => 
   assert.match(sb.lines()[0], /in 0 out 0/);
 });
 
-test("the footer mirrors the quota client: new feeds, failures, and port changes", async () => {
+test("the footer mirrors the quota client: new feeds, failures, stale drops and port changes, and ignores a fetch the port change aborted", async () => {
   let clock = 0;
   let reply = () => Response.json(FEED);
   let fetches = 0;
+  let tick;
+  const quotaTimers = { ...fakeTimers(), setInterval: (fn) => ((tick = fn), 1), clearInterval() {} };
   const pi = fakePi();
-  status(pi, { fetch: async () => (fetches++, reply()), now: () => clock, gitDirty: async () => null });
+  status(pi, { fetch: async (_url, init) => (fetches++, reply(init)), now: () => clock, quotaTimers, gitDirty: async () => null });
   const section = rigSettings(agentDir).sections().find((x) => x.name === "status");
   const s = session(pi, { trusted: false });
   const quotas = () => s.lines()[1].split("  │  ").find((p) => p.startsWith("Q"));
   const poll = async () => {
     const n = fetches;
-    await s.emit("session_shutdown");
-    await s.emit("session_start"); // each TUI session start polls once
+    tick ? tick() : await s.emit("session_start"); // a TUI session start polls, then every tick
     await settle(() => fetches === n + 1);
     await flush();
     await flush();
@@ -361,8 +362,17 @@ test("the footer mirrors the quota client: new feeds, failures, and port changes
     reply = () => Response.json(FEED);
     await poll();
     assert.equal(quotas(), shown);
+    let aborted = false;
+    reply = (init) => new Promise((_, reject) => init.signal.addEventListener("abort", () => ((aborted = true), reject(new DOMException("aborted", "AbortError")))));
+    const n = fetches;
+    tick();
+    await settle(() => fetches === n + 1, "a fetch is in flight");
     section.set("quotaPort", 9999);
     assert.equal(quotas(), undefined, "a port change clears the footer with the client's cache");
+    await settle(() => aborted, "the port change aborts the fetch");
+    await flush();
+    await flush();
+    assert.equal(quotas(), undefined, "the aborted fetch leaves the cleared cache alone");
   } finally {
     await s.emit("session_shutdown");
     section.reset("quotaPort");
