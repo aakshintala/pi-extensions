@@ -5,21 +5,31 @@ Collapses each run of tool calls into one summary line, and draws the built-in
 (`shared/tool-display/`), the way Claude Code shows them.
 
 ```
- ⏺ Read 1 file, edited 1 file +3 −2, wrote 1 file +6 · 1 failed
+ ⏺ Read 1 file, edited 2 files +3 −2, wrote 1 file +6 · 1 failed
 
  ⏺ Edit(a.txt)
    ⎿  Error: Could not find the exact text in a.txt. …
 ```
 
 - **Groups.** Consecutive calls in one assistant message share one summary
-  line, counted per verb. It updates live, with a spinner while calls run.
-  Text between calls, or a tool without a summary, starts a new group.
-- **Failed calls always shown** under their group. After Esc, calls that got
-  no result count as `cancelled` in the error colour.
+  line. Every call counts under its verb; `+a −r` comes from finished edits and
+  writes. It updates live, with a spinner while calls run. Text between calls,
+  or a tool without a summary, starts a new group.
+- **Failed calls always shown** under their group, and so are calls that
+  returned an image (Pi draws images outside the tool's renderers).
+- **Cancelled.** Calls with no result when the turn is aborted (Esc), or with
+  Pi's `Operation aborted` result, count as `cancelled` in the error colour.
+  They are counted, not shown.
 - **Ctrl+O** (`app.tools.expand`) shows every call on its own. In fullscreen
-  mode, a click on a group opens or closes that group only.
+  mode, a click on a group opens or closes that group only (Pi sends mouse
+  clicks only in fullscreen mode).
 - **Resumed sessions group the same way**: groups come from the saved
-  assistant messages.
+  assistant messages, and cancels and failures are told apart from saved data.
+- **Per session.** Each session has its own groups, so an in-process subagent
+  session never touches its parent's.
+- **Text order (limit).** Pi draws all of an assistant message's text before its
+  tool calls, so text written between two runs shows above both groups, not
+  between them. Fixing that would need a Pi patch.
 
 Expanded, each call looks like this:
 

@@ -74,19 +74,22 @@ one assistant message collapse into one live line, e.g. "Read 3 files, edited
 2 files +442 −12 · 1 failed":
 
 ```ts
-summary: { tool: "edit", verb: "edited", one: "file", lines: (args) => ({ added, removed }) } // "edited N files +a −r"
-summary: { tool: "todo_write", verb: "updated", many: "todos" }                              // no `one`: "updated todos"
+summary: { verb: "edited", one: "file", lines: (args) => ({ added, removed }) } // "edited N files +a −r"
+summary: { verb: "updated", many: "todos" }                                     // no `one`: "updated todos"
 ```
 
-- The first call draws the summary; the others draw nothing. Failed calls always
-  show. Ctrl+O (`context.expanded`) or a click on the group shows every call.
+- The first call draws the summary; the others draw nothing. Failed calls and
+  calls with images always show. Ctrl+O (`context.expanded`) or a click on the
+  group shows every call.
 - A tool without `summary` (such as `ask_user`) is never grouped and splits a run,
-  as does text between calls.
-- `extensions/tool-display` feeds the groups from Pi's events. To group a
-  transcript built from saved messages, call `trackMessage(assistantMessage)`,
-  `settle(toolCallId, "done" | "error" | "cancelled")` for each result, then
-  `endRun()` (calls with no result become `cancelled`). `resetGroups()` forgets
-  them and stops the one spinner timer.
+  as does text between calls. Grouping is decided as calls render, in message
+  order, so descriptors are not registered anywhere.
+- Groups belong to a `ToolGroups`, one per session. `extensions/tool-display`
+  creates it, feeds it from Pi's events and owns its spinner timer. To group a
+  transcript built from saved messages, call `track(assistantMessage)` and
+  `settle(toolCallId, isError, result)` for each result in order, then `endRun()`;
+  `reset()` forgets the session's calls. `outcomeOf(isError, result)` classifies a
+  result: Pi's `Operation aborted` is `cancelled`, any other error `error`.
 - `summaryText(theme, calls, thought)` builds the text; `thought` starts it with
   "thought ·" (#57).
 
