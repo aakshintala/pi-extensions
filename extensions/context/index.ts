@@ -1,24 +1,22 @@
 /**
- * pi-context-view - inspect what occupies the model context.
+ * /context: inspect what occupies the model context, as a usage map or the
+ * injections inspector. Ported from pi-context-view 0.6.0 (MIT, see README).
  *
  * Passively captures the first real turn, or runs one on-demand silent probe
  * when a context view is opened before any real turn.
  */
 import { buildSessionContext, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { ConfigStore, createDefaultConfigFile } from "./config.ts";
 import {
 	CONTEXT_COMMAND_DESCRIPTION,
 	getContextArgumentCompletions,
 	parseContextCommand,
 	reportCommandMessage,
-	reportConfigCreation,
 	reportTuiOnly,
 	resolveInitialCapture,
 } from "./command.ts";
 import {
 	buildUsageSnapshot,
-	collectPromptSources,
 	CompactionState,
 	InitialCaptureState,
 	parsePersistedIdentities,
@@ -35,7 +33,6 @@ export default function (pi: ExtensionAPI) {
 	const capture = new InitialCaptureState();
 	const probe = new SilentProbeState();
 	const compaction = new CompactionState();
-	const configStore = new ConfigStore();
 	let persistedIdentityCount = 0;
 
 	/** Persist identities (role and timestamp only, never content) not yet written this runtime. */
@@ -81,13 +78,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", (event) => {
 		probe.beginRun(readProbeToken());
-		// The chained prompt here already carries additions from extensions loaded
-		// earlier; anything the context event adds came from extensions after us.
-		capture.prepare(event.systemPromptOptions, event.systemPrompt);
+		capture.prepare(event.systemPromptOptions);
 	});
 
 	pi.on("turn_start", (_event, ctx) => {
-		if (probe.isCurrentRun) ctx.abort();
+		// Only a turn carrying the probe token is the probe's; a user turn is never aborted.
+		if (probe.shouldAbortTurn(readProbeToken())) ctx.abort();
 	});
 
 	pi.on("message_start", (event) => {
@@ -99,22 +95,28 @@ export default function (pi: ExtensionAPI) {
 		return message === undefined ? undefined : { message };
 	});
 
-	pi.on("context", (event, ctx) => {
+	// Keep probe messages out of every model request.
+	pi.on("context", (event) => {
 		const messages = probe.filterMessages(event.messages);
+		return messages === event.messages ? undefined : { messages };
+	});
+
+	// Pi 0.87 sends system messages (the prompt and its patches) only to this event,
+	// so the snapshot is frozen here to include system-prompt additions.
+	pi.on("context_with_system", (event, ctx) => {
 		// Lazy: this event fires once per LLM request, but only the freezing call
 		// reads these inputs, and the baseline rebuild alone is O(session).
 		capture.finalize(() => ({
 			systemPrompt: ctx.getSystemPrompt(),
-			messages,
+			messages: probe.filterMessages(event.messages),
 			baselineMessages: probe.filterMessages(
 				buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages,
 			),
 			allTools: pi.getAllTools(),
 			activeToolNames: pi.getActiveTools(),
-			promptSources: collectPromptSources(pi.getAllTools(), pi.getCommands()),
 			origin: probe.isCurrentRun ? "synthetic-probe" : "real-turn",
 		}));
-		return messages === event.messages ? undefined : { messages };
+		return undefined;
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
@@ -141,11 +143,6 @@ export default function (pi: ExtensionAPI) {
 				reportCommandMessage(ctx, command.message, "error");
 				return;
 			}
-			// Creating the file needs no UI, so it stays available in every run mode.
-			if (command.type === "config") {
-				reportConfigCreation(ctx, createDefaultConfigFile());
-				return;
-			}
 			if (ctx.mode !== "tui") {
 				reportTuiOnly(ctx, command.view);
 				return;
@@ -158,8 +155,6 @@ export default function (pi: ExtensionAPI) {
 				});
 				return;
 			}
-			// Loaded only for the Usage view, the sole consumer of configured colors.
-			const loadedConfig = configStore.load();
 			// ReadonlySessionManager lacks buildSessionContext(); use pi's exported builder.
 			const messages = probe.filterMessages(
 				buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages,
@@ -171,7 +166,6 @@ export default function (pi: ExtensionAPI) {
 				options: ctx.getSystemPromptOptions(),
 				allTools: pi.getAllTools(),
 				activeToolNames: pi.getActiveTools(),
-				promptSources: collectPromptSources(pi.getAllTools(), pi.getCommands()),
 			});
 			await showUsageView(ctx, {
 				usage: computeUsage({
@@ -182,10 +176,6 @@ export default function (pi: ExtensionAPI) {
 					autoCompactReserveTokens: readAutoCompactReserveTokens(ctx),
 				}),
 				degradedReason: initial.degradedReason,
-				// Reported inside the view: a notification would stay hidden behind the fullscreen overlay.
-				notices: loadedConfig.warnings,
-				categoryColors: loadedConfig.config.categoryColors,
-				mapSize: loadedConfig.config.mapSize,
 			});
 		},
 	});

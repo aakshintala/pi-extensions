@@ -3,7 +3,7 @@
  * Runtime label stays hidden until the runtime-inspection roadmap step.
  */
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Key, matchesKey, type TuiMouseEvent, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 import type { InitialSnapshot, InjectionItem } from "../model.ts";
 import { normalizeInlineText, normalizePreviewText } from "../text.ts";
@@ -34,7 +34,6 @@ import {
 } from "./layout.ts";
 import { type ContextMarker, droppedMarker, markerLegendLines, movedMarker } from "./markers.ts";
 import { previewBodyLines, previewLegendLines } from "./section-preview.ts";
-import { DEFAULT_WHEEL_SCROLL_LINES, parseWheelDirection, readWheelScrollLines } from "./wheel.ts";
 
 /**
  * List frame rows excluding the collapsible description: both borders and their
@@ -67,13 +66,19 @@ export async function showInjectionsView(
 ): Promise<void> {
 	await context.ui.custom<void>(
 		(tui, theme, _keybindings, done) => {
-			const view = new InjectionsView(theme, input, done, () => tui.terminal.rows, readWheelScrollLines(tui));
+			const view = new InjectionsView(theme, input, done, () => tui.terminal.rows);
 			return {
 				render: (width: number) => view.render(width),
 				invalidate: () => view.invalidate(),
 				handleInput: (data: string) => {
 					view.handleInput(data);
 					tui.requestRender();
+				},
+				// Pi reports the wheel only in fullscreen mode.
+				handleMouse: (event: TuiMouseEvent) => {
+					if (event.type !== "wheel" || !event.wheelDelta) return undefined;
+					view.handleWheel(event.wheelDelta);
+					return { handled: true };
 				},
 			};
 		},
@@ -90,7 +95,6 @@ export class InjectionsView {
 	private readonly input: InjectionsViewInput;
 	private readonly done: (result: undefined) => void;
 	private readonly getTerminalRows: () => number;
-	private readonly wheelScrollLines: number;
 	private readonly rows: InjectionRow[];
 	private readonly navigator: ListNavigator;
 	private readonly itemsById: Map<string, InjectionItem>;
@@ -107,13 +111,11 @@ export class InjectionsView {
 		input: InjectionsViewInput,
 		done: (result: undefined) => void,
 		getTerminalRows: () => number = () => process.stdout.rows ?? DEFAULT_TERMINAL_ROWS,
-		wheelScrollLines: number = DEFAULT_WHEEL_SCROLL_LINES,
 	) {
 		this.theme = theme;
 		this.input = input;
 		this.done = done;
 		this.getTerminalRows = getTerminalRows;
-		this.wheelScrollLines = wheelScrollLines;
 		this.rows = buildInjectionRows(input.snapshot);
 		this.navigator = new ListNavigator(this.rows.length, 1, this.rows.length - 2);
 		this.itemsById = collectItemsById(input.snapshot);
@@ -126,12 +128,6 @@ export class InjectionsView {
 		}
 		if (matchesKey(data, Key.escape) || data === "q") {
 			this.done(undefined);
-			return;
-		}
-		// One notch moves the selection one row, like a single step key.
-		const wheel = parseWheelDirection(data);
-		if (wheel !== undefined) {
-			if (this.navigator.moveBy(wheel)) this.clearCache();
 			return;
 		}
 		if (matchesKey(data, Key.enter)) {
@@ -149,6 +145,14 @@ export class InjectionsView {
 		} else if (matchesKey(data, Key.end)) {
 			if (this.navigator.moveTo(this.rows.length - 1)) this.clearCache();
 		}
+	}
+
+	/** Mouse wheel, `delta` lines (negative is up): one notch moves the selection one row, or scrolls a preview. */
+	public handleWheel(delta: number): void {
+		const moved = this.previewItem === undefined
+			? this.navigator.moveBy(Math.sign(delta))
+			: this.previewScroller.scrollBy(delta);
+		if (moved) this.clearCache();
 	}
 
 	public render(width: number): string[] {
@@ -216,11 +220,6 @@ export class InjectionsView {
 	private handlePreviewInput(data: string): void {
 		if (matchesKey(data, Key.escape) || data === "q") {
 			this.closePreview();
-			return;
-		}
-		const wheel = parseWheelDirection(data);
-		if (wheel !== undefined) {
-			if (this.previewScroller.scrollBy(wheel * this.wheelScrollLines)) this.clearCache();
 			return;
 		}
 		if (isStepBackKey(data)) {

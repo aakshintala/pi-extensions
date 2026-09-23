@@ -93,12 +93,6 @@ export interface InjectedReference {
 	 * the item that counts the text.
 	 */
 	readonly tool?: string;
-	/**
-	 * Present when the source was inferred from the text itself. Pi reports no
-	 * per-extension provenance for chained prompt edits, so such an attribution
-	 * is a guess and must be rendered as one.
-	 */
-	readonly attribution?: "guess";
 }
 
 /** One labeled part of an item's raw text, used only to shape its preview. */

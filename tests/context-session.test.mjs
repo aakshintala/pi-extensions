@@ -1,0 +1,85 @@
+// /context with scripted models (#61): it never aborts a real turn, its silent
+// probe leaves nothing in the transcript or the model's context, and the
+// injections view counts system messages extensions add on Pi 0.87.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
+import { fauxAssistantMessage, scriptedSession } from "./helpers/session.mjs";
+
+const root = (p) => fileURLToPath(new URL(`../${p}`, import.meta.url));
+const CONTEXT = root("extensions/context/index.ts");
+const plain = new Proxy({}, { get: (_t, key) => (key === "fg" || key === "bg" ? (_k, text) => text : (text) => text) });
+
+// A TUI stand-in: views render once at 80x40 and close at once.
+function attachUi(session) {
+  const screens = [];
+  session.extensionRunner.setUIContext(
+    {
+      notify() {},
+      setWorkingVisible() {},
+      async custom(factory) {
+        const view = factory({ terminal: { rows: 40 }, requestRender() {} }, plain, {}, () => {});
+        screens.push(view.render(80).join("\n"));
+      },
+    },
+    "tui",
+  );
+  return screens;
+}
+
+const text = (message) => message.content.map((b) => b.text ?? "").join("");
+const transcript = (session) =>
+  session.sessionManager
+    .getEntries()
+    .filter((e) => e.type === "message" && ["user", "assistant"].includes(e.message.role))
+    .map((e) => e.message)
+    .filter((m) => m.content.length > 0) // Pi renders no row for an empty message
+    .map((m) => `${m.role}: ${text(m)}${m.stopReason && m.stopReason !== "stop" ? ` [${m.stopReason}]` : ""}`);
+
+test("/context during an active turn never aborts it", async (t) => {
+  let release, requested;
+  const gate = new Promise((r) => (release = r));
+  const started = new Promise((r) => (requested = r));
+  const { session } = await scriptedSession(t, {
+    extensions: [CONTEXT],
+    replies: [async () => (requested(), await gate, fauxAssistantMessage("done"))],
+  });
+  const screens = attachUi(session);
+
+  const turn = session.prompt("hello");
+  await started; // the model request is in flight
+  await session.prompt("/context");
+  release();
+  await turn;
+
+  assert.match(screens[0], /Context Usage/);
+  assert.deepEqual(transcript(session), ["user: hello", "assistant: done"]);
+});
+
+test("the silent probe leaves no rows in the transcript and never reaches the model", async (t) => {
+  const seen = [];
+  const { session, faux } = await scriptedSession(t, {
+    extensions: [CONTEXT],
+    replies: [(context) => (seen.push(context.messages.filter((m) => m.role !== "system").map(text)), fauxAssistantMessage("hi"))],
+  });
+  const screens = attachUi(session);
+
+  await session.prompt("/context injections"); // before any turn: the probe runs
+  assert.match(screens[0], /Context Injections/);
+  assert.equal(faux.state.callCount, 0);
+
+  await session.prompt("hello");
+  assert.deepEqual(seen, [["hello"]]);
+  assert.deepEqual(transcript(session), ["user: hello", "assistant: hi"]);
+});
+
+test("injections include a system message another extension adds to the request", async (t) => {
+  const { session } = await scriptedSession(t, {
+    extensions: [root("tests/fixtures/context/inject.ts"), CONTEXT],
+    replies: [fauxAssistantMessage("hi")],
+  });
+  const screens = attachUi(session);
+  await session.prompt("hello");
+  await session.prompt("/context injections");
+  assert.match(screens[0], /unattributed \.+ 5\n {2}└─ system message \.+ 5\n/);
+});

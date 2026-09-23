@@ -14,7 +14,6 @@ import { BODY_INDENT, calculateViewport, descriptionBlockRows } from "./layout.t
 import {
 	type ContextMarker,
 	droppedMarker,
-	guessMarker,
 	markerLegendLines,
 	movedMarker,
 } from "./markers.ts";
@@ -100,8 +99,7 @@ export function previewBodyLines(
 }
 
 /**
- * Markers one preview renders: restored lines and their inferred owners come
- * from reference metadata, while state markers follow the subheaders and
+ * Markers one preview renders: restored lines come from reference metadata, while state markers follow the subheaders and
  * metadata rows that show them, whether or not that part carries references.
  */
 function previewMarkers(contents: readonly SectionedContent[]): ContextMarker[] {
@@ -109,7 +107,6 @@ function previewMarkers(contents: readonly SectionedContent[]): ContextMarker[] 
 	const marked = contents.flatMap((content) => [content, ...(content.sections ?? [])]);
 	const markers: ContextMarker[] = [];
 	if (referenced.length > 0) markers.push("highlighted");
-	if (referenced.some(hasGuessedReferences)) markers.push("guess");
 	if (marked.some((part) => part.dropped === true)) markers.push("dropped");
 	if (marked.some((part) => part.moved === true)) markers.push("moved");
 	return markers;
@@ -118,11 +115,6 @@ function previewMarkers(contents: readonly SectionedContent[]): ContextMarker[] 
 /** Only metadata on rendered body parts triggers the footer, never a text or label match. */
 function hasInjectedReferences(part: SectionedContent): boolean {
 	return (part.injectedReferences?.length ?? 0) > 0;
-}
-
-/** Whether a rendered reference names an inferred owner needing the extra caveat. */
-function hasGuessedReferences(part: SectionedContent): boolean {
-	return part.injectedReferences?.some((reference) => reference.attribution === "guess") === true;
 }
 
 /** Body parts carrying reference metadata: the item's sections, or the item itself. */
@@ -152,7 +144,6 @@ function contentBodyLines(
 		if (reference.tool !== undefined) {
 			text += theme.fg("mdLinkUrl", `:${normalizeInlineText(reference.tool)}`);
 		}
-		if (reference.attribution === "guess") text += guessMarker(theme);
 		offset = reference.offset;
 	}
 	text += normalizePreviewText(content.text.slice(offset));

@@ -1,16 +1,11 @@
 /**
  * Pure proportional-cell model for the Usage view's context map. Geometry is
- * an input: the caller clamps the configured cell counts to what the viewport
- * can render. The map uses estimated category totals against the selected
- * Window/Fit scale. Pi's separately reported occupied tokens may differ
+ * an input: the caller clamps the default cell counts to what the viewport
+ * can render. The map uses estimated category totals against the context
+ * window. Pi's separately reported occupied tokens may differ
  * because of tokenizer, serialization, caching, and last-response timing.
  */
 import type { ContextUsageSnapshot } from "../model.ts";
-
-const FIT_SCALE_PERCENT = 115;
-const PERCENT_DENOMINATOR = 100;
-const MINIMUM_FIT_SCALE_TOKENS = 10_000;
-const FIT_SCALE_SIGNIFICANT_DIGITS = 2;
 
 /** One visual map cell assigned to a category, the auto-compact buffer, or remaining free space. */
 export interface UsageMapCell {
@@ -22,7 +17,7 @@ export interface UsageMapCell {
 export interface UsageMap {
 	readonly columns: number;
 	readonly rows: number;
-	/** Tokens one cell represents at the active scale; shrinks when Fit narrows the denominator. */
+	/** Tokens one cell represents. */
 	readonly blockTokens: number;
 	readonly cells: readonly UsageMapCell[];
 }
@@ -34,29 +29,13 @@ interface MapSegment {
 }
 
 /**
- * Calculate a Fit denominator from estimated occupancy: 15% headroom,
- * rounded upward to two significant digits, with the documented floor/cap.
- */
-export function calculateFitMapScale(usage: ContextUsageSnapshot): number | undefined {
-	const contextWindow = usage.reported?.contextWindow;
-	if (contextWindow === undefined || !Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
-
-	const estimatedTotal = usage.categories.reduce((sum, category) => sum + category.tokens, 0);
-	const withHeadroom = Math.max(0, estimatedTotal) * FIT_SCALE_PERCENT / PERCENT_DENOMINATOR;
-	const rounded = roundUpToSignificantDigits(withHeadroom, FIT_SCALE_SIGNIFICANT_DIGITS);
-	return Math.min(contextWindow, Math.max(MINIMUM_FIT_SCALE_TOKENS, rounded));
-}
-
-/**
- * Build a proportional map from estimated categories. `scaleTokens` changes
- * only the mapped denominator; buffer placement remains anchored to the true
- * context window. Returns undefined without a usable denominator.
+ * Build a proportional map from estimated categories against the context
+ * window. Returns undefined without a usable context window.
  */
 export function buildUsageMap(
 	usage: ContextUsageSnapshot,
 	columns: number,
 	rows: number,
-	scaleTokens?: number,
 ): UsageMap | undefined {
 	const contextWindow = usage.reported?.contextWindow;
 	if (
@@ -67,19 +46,12 @@ export function buildUsageMap(
 		rows <= 0
 	) return undefined;
 
-	const requestedScale = scaleTokens ?? contextWindow;
-	if (!Number.isFinite(requestedScale) || requestedScale <= 0) return undefined;
-	const mapScale = Math.min(contextWindow, requestedScale);
 	const cellCount = Math.floor(columns) * Math.floor(rows);
 	const estimatedTotal = usage.categories.reduce((sum, category) => sum + category.tokens, 0);
-	const occupiedTokens = clamp(estimatedTotal, 0, mapScale);
-	const occupiedCells = occupiedTokens / mapScale * cellCount;
-	// Fit reserves its headroom as visible free space; the true-window buffer remains outside the mapped range.
-	const windowOccupancy = clamp(estimatedTotal, 0, contextWindow);
-	const bufferTokens = mapScale < contextWindow
-		? 0
-		: clamp(usage.autoCompactReserveTokens ?? 0, 0, contextWindow - windowOccupancy);
-	const bufferStart = (contextWindow - bufferTokens) / mapScale * cellCount;
+	const occupiedTokens = clamp(estimatedTotal, 0, contextWindow);
+	const occupiedCells = occupiedTokens / contextWindow * cellCount;
+	const bufferTokens = clamp(usage.autoCompactReserveTokens ?? 0, 0, contextWindow - occupiedTokens);
+	const bufferStart = (contextWindow - bufferTokens) / contextWindow * cellCount;
 	const segments = createSegments(usage, estimatedTotal, occupiedCells);
 	const cells = Array.from(
 		{ length: cellCount },
@@ -88,7 +60,7 @@ export function buildUsageMap(
 	return {
 		columns: Math.floor(columns),
 		rows: Math.floor(rows),
-		blockTokens: mapScale / cellCount,
+		blockTokens: contextWindow / cellCount,
 		cells,
 	};
 }
@@ -141,13 +113,6 @@ function createCell(
 /** Length shared by two half-open numeric ranges. */
 function overlap(aStart: number, aEnd: number, bStart: number, bEnd: number): number {
 	return Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart));
-}
-
-/** Round a positive value upward at the requested significant-digit boundary. */
-function roundUpToSignificantDigits(value: number, significantDigits: number): number {
-	if (!Number.isFinite(value) || value <= 0) return 0;
-	const boundary = 10 ** (Math.floor(Math.log10(value)) - significantDigits + 1);
-	return Math.ceil(value / boundary) * boundary;
 }
 
 /** Restrict a finite value to an inclusive range. */

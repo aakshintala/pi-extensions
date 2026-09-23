@@ -10,8 +10,6 @@ import {
 	estimateTokens,
 	formatSize,
 	type InputSource,
-	type SlashCommandInfo,
-	type SourceInfo,
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
 
@@ -27,13 +25,11 @@ import {
 	type JsonSpan,
 } from "./model.ts";
 import { createProbeToken, type ProbeToken } from "./probe-token.ts";
-import type { PromptSourceSlice } from "./prompt-additions.ts";
 
 /** Session custom-entry type persisting probe message identities across extension runtimes. */
 export const PROBE_IDENTITIES_CUSTOM_TYPE = "pi-context-view:probe-identities";
 
 const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
-const SETUP_ABORT_ERROR_MESSAGE = "This operation was aborted";
 
 /** Everything available when the first context event finalizes a snapshot. */
 export interface CaptureFinalization {
@@ -42,8 +38,6 @@ export interface CaptureFinalization {
 	baselineMessages: ContextEvent["messages"];
 	allTools: readonly ToolInfo[];
 	activeToolNames: readonly string[];
-	/** Loaded extension provenance, used only to guess who appended prompt text. */
-	promptSources?: readonly PromptSourceSlice[];
 	origin: CaptureOrigin;
 	capturedAt?: Date;
 }
@@ -54,8 +48,6 @@ export interface NativeSnapshotInput {
 	options: BuildSystemPromptOptions;
 	allTools: readonly ToolInfo[];
 	activeToolNames: readonly string[];
-	/** Loaded extension provenance, used only to guess who appended prompt text. */
-	promptSources?: readonly PromptSourceSlice[];
 	capturedAt?: Date;
 }
 
@@ -82,14 +74,12 @@ export interface SyntheticMessageIdentity {
 interface CapturePreparation {
 	readonly promptOptions: PromptOptionsSlice;
 	readonly toolSnippets?: Readonly<Record<string, string>>;
-	/** Prompt as of this extension's own handler, bounding later extensions' additions. */
-	readonly promptAtHandler?: string;
 }
 
 /**
- * Lifecycle of the single probe attempt. Ownership outlives the attempt's own
- * completion, so a probe run arriving after a timeout or after an unattributed
- * run is still claimed, aborted, and sanitized.
+ * Lifecycle of the single probe attempt. A timeout settles it at once, so no
+ * later run is treated as the probe's unless it carries the probe token: a
+ * probe run arriving late is still claimed, aborted, and sanitized.
  */
 type ProbePhase = "idle" | "waiting" | "running" | "settled";
 
@@ -107,23 +97,17 @@ export class InitialCaptureState {
 		return this.initialSnapshot;
 	}
 
-	/**
-	 * Own the structured prompt inputs from `before_agent_start`; no-op once
-	 * frozen. `promptAtHandler` is the chained prompt as this extension observed
-	 * it, which separates additions made before this extension loaded from those
-	 * made after it.
-	 */
-	public prepare(options: BuildSystemPromptOptions, promptAtHandler?: string): void {
+	/** Own the structured prompt inputs from `before_agent_start`; no-op once frozen. */
+	public prepare(options: BuildSystemPromptOptions): void {
 		if (this.initialSnapshot !== undefined) return;
 		this.pendingPreparation = {
 			promptOptions: copyPromptOptions(options),
 			toolSnippets: options.toolSnippets === undefined ? undefined : { ...options.toolSnippets },
-			promptAtHandler,
 		};
 	}
 
 	/**
-	 * Freeze the Initial snapshot from the first context event. Returns the
+	 * Freeze the Initial snapshot from the first `context_with_system` event. Returns the
 	 * existing snapshot on repeat calls, or undefined when `prepare()` never ran.
 	 * `buildInput` runs only on the call that freezes, so callers may collect
 	 * expensive inputs there without paying for them once per later event.
@@ -138,10 +122,7 @@ export class InitialCaptureState {
 			toolSnippets: preparation.toolSnippets,
 		});
 		const items = [
-			...analyzeSystemPrompt(input.systemPrompt, preparation.promptOptions, tools, {
-				sources: input.promptSources,
-				promptAtHandler: preparation.promptAtHandler,
-			}),
+			...analyzeSystemPrompt(input.systemPrompt, preparation.promptOptions, tools),
 			...measureInjectedMessages(input.messages, input.baselineMessages),
 		];
 		this.initialSnapshot = buildSnapshot(items, input.origin, input.capturedAt ?? new Date());
@@ -190,9 +171,17 @@ export class SilentProbeState {
 	private outcome: ProbeOutcome | undefined;
 	private timeout: NodeJS.Timeout | undefined;
 
-	/** True while the probe owns the in-flight agent run (including after a timeout). */
+	/** True while the probe owns the in-flight agent run. */
 	public get isCurrentRun(): boolean {
 		return this.phase === "running";
+	}
+
+	/**
+	 * Whether the turn starting under `token` is the probe's own run and must be
+	 * aborted. A turn without the probe token is never ours, whatever the phase.
+	 */
+	public shouldAbortTurn(token: ProbeToken | undefined): boolean {
+		return this.isCurrentRun && this.ownsToken(token);
 	}
 
 	/** Defensive copies of the recorded probe message identities. */
@@ -226,6 +215,8 @@ export class SilentProbeState {
 			this.resolveCompletion = resolve;
 		});
 		this.timeout = setTimeout(() => {
+			// Leave the waiting or running state at once, so no later turn is aborted.
+			this.phase = "settled";
 			this.resolve({ status: "failed", reason: "Silent probe timed out." });
 		}, timeoutMs);
 		this.attempt = { started: true, token: createProbeToken(), completion };
@@ -238,24 +229,22 @@ export class SilentProbeState {
 	 * context of this extension's own `sendUserMessage()` call.
 	 */
 	public isProbeInput(source: InputSource, token: ProbeToken | undefined): boolean {
-		return this.phase === "waiting" && source === "extension" && this.ownsToken(token);
+		return source === "extension" && this.ownsToken(token);
 	}
 
 	/**
-	 * Claim the run this probe started, identified by the token it carries. A run
-	 * without the token is not provably ours, so it fails the attempt instead of
-	 * activating the abort guard: it may belong to the user or to another
-	 * extension and must run untouched. Ownership stays open afterwards so a
-	 * delayed probe run is still claimed.
+	 * Claim the run this probe started, identified by the token it carries, even
+	 * when it arrives after a timeout. A run without the token is not provably
+	 * ours, so it fails a waiting attempt instead of activating the abort guard:
+	 * it may belong to the user or to another extension and must run untouched.
 	 */
 	public beginRun(token: ProbeToken | undefined): boolean {
-		if (this.phase !== "waiting") return false;
-		if (!this.ownsToken(token)) {
-			this.fail("Another agent run started before the silent probe was recognized.");
-			return false;
+		if (this.ownsToken(token)) {
+			this.phase = "running";
+			return true;
 		}
-		this.phase = "running";
-		return true;
+		if (this.phase === "waiting") this.fail("Another agent run started before the silent probe was recognized.");
+		return false;
 	}
 
 	/** Record probe user/assistant identities as their message events arrive. */
@@ -322,15 +311,16 @@ export class SilentProbeState {
 
 	/**
 	 * Replace a recorded probe abort with an empty successful message so pi does
-	 * not render an abort transcript row. Pi 0.84 reports an abort during stream
-	 * setup as an error instead of the legacy aborted stop reason.
+	 * not render an abort transcript row. Only this extension ends a probe run,
+	 * by aborting it, so any failed stop reason on a probe-owned message is that
+	 * abort: Pi 0.87 reports `aborted` mid-stream and `error` when the abort
+	 * lands during request setup. No error text is inspected.
 	 */
 	private blankProbeAbort(
 		message: Extract<ContextEvent["messages"][number], { role: "assistant" }>,
 	): ContextEvent["messages"][number] | undefined {
-		const isProbeAbort = message.stopReason === "aborted"
-			|| (message.stopReason === "error" && message.errorMessage === SETUP_ABORT_ERROR_MESSAGE);
-		if (!isProbeAbort || !this.ownsMessage(message)) return undefined;
+		const failed = message.stopReason === "aborted" || message.stopReason === "error";
+		if (!failed || !this.ownsMessage(message)) return undefined;
 		return { ...message, content: [], stopReason: "stop", errorMessage: undefined };
 	}
 
@@ -379,7 +369,7 @@ export function parsePersistedIdentities(data: unknown): SyntheticMessageIdentit
 export function buildNativeSnapshot(input: NativeSnapshotInput): InitialSnapshot {
 	const options = copyPromptOptions(input.options);
 	const tools = captureActiveTools(input.allTools, input.activeToolNames, input.options);
-	const items = analyzeSystemPrompt(input.systemPrompt, options, tools, { sources: input.promptSources });
+	const items = analyzeSystemPrompt(input.systemPrompt, options, tools);
 	return buildSnapshot(items, "synthetic-probe", input.capturedAt ?? new Date());
 }
 
@@ -419,7 +409,7 @@ export function buildUsageSnapshot(input: UsageSnapshotInput): InitialSnapshot {
 		...options,
 		// Current loader overrides are not evidence of what this branch recorded.
 		customPrompt: undefined, appendSystemPrompt: undefined, sections: undefined,
-	}, tools, { sources: input.promptSources });
+	}, tools);
 	const snapshot = buildSnapshot(items, "synthetic-probe", input.capturedAt ?? new Date());
 	return mergeRequestOnlyMessages(snapshot, input.initial);
 }
@@ -457,52 +447,6 @@ export function copyPromptOptions(options: BuildSystemPromptOptions): PromptOpti
 				filePath: skill.filePath,
 			})),
 	};
-}
-
-/**
- * Collect the provenance of every loaded extension that registered a tool or a
- * command, together with the names it registered. It is the only extension
- * roster pi exposes, and it feeds attribution guesses alone: extensions
- * registering neither are invisible here.
- */
-export function collectPromptSources(
-	allTools: readonly ToolInfo[],
-	commands: readonly SlashCommandInfo[],
-): PromptSourceSlice[] {
-	const sources = new Map<string, CollectedPromptSource>();
-	for (const tool of allTools) addPromptSource(sources, tool.sourceInfo, tool.name);
-	// Prompt text refers to a command the way a user types it, so keep its slash.
-	for (const command of commands) {
-		addPromptSource(sources, command.sourceInfo, command.name.startsWith("/") ? command.name : `/${command.name}`);
-	}
-	return [...sources.values()];
-}
-
-/** Slice under construction: its names arrive one tool or command at a time. */
-interface CollectedPromptSource extends Omit<PromptSourceSlice, "names"> {
-	readonly names: string[];
-}
-
-/** Record one registered name under its extension's provenance, skipping pi's own sources. */
-function addPromptSource(
-	sources: Map<string, CollectedPromptSource>,
-	sourceInfo: SourceInfo,
-	name: string,
-): void {
-	if (sourceInfo.source === "builtin" || sourceInfo.source === "sdk") return;
-	const key = `${sourceInfo.source}\n${sourceInfo.path}`;
-	let collected = sources.get(key);
-	if (collected === undefined) {
-		collected = {
-			source: sourceInfo.source,
-			path: sourceInfo.path,
-			// A top-level extension's baseDir is a shared directory, not its own root.
-			baseDir: sourceInfo.origin === "package" ? sourceInfo.baseDir : undefined,
-			names: [],
-		};
-		sources.set(key, collected);
-	}
-	if (!collected.names.includes(name)) collected.names.push(name);
 }
 
 /**
@@ -568,11 +512,23 @@ export function measureInjectedMessages(
 	return items;
 }
 
+/**
+ * Key-order-independent JSON of one message. Pi 0.87 can hand the same system
+ * message to `context_with_system` with its keys in another order than the
+ * session stores it, which a plain JSON comparison reads as an injection.
+ */
+function messageSignature(message: ContextEvent["messages"][number]): string {
+	return JSON.stringify(message, (_key, value: unknown) =>
+		value !== null && typeof value === "object" && !Array.isArray(value)
+			? Object.fromEntries(Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+			: value);
+}
+
 /** Count structurally identical baseline messages for order-independent diffing. */
 function messageSignatureCounts(messages: ContextEvent["messages"]): Map<string, number> {
 	const counts = new Map<string, number>();
 	for (const message of messages) {
-		const signature = JSON.stringify(message);
+		const signature = messageSignature(message);
 		counts.set(signature, (counts.get(signature) ?? 0) + 1);
 	}
 	return counts;
@@ -583,7 +539,7 @@ function consumeMessageSignature(
 	counts: Map<string, number>,
 	message: ContextEvent["messages"][number],
 ): boolean {
-	const signature = JSON.stringify(message);
+	const signature = messageSignature(message);
 	const count = counts.get(signature) ?? 0;
 	if (count === 0) return false;
 	if (count === 1) counts.delete(signature);

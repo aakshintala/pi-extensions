@@ -13,7 +13,7 @@ import { BODY_INDENT, fitLine } from "./layout.ts";
 const MARKER_SEPARATOR = " · ";
 
 /** Markers a frame can show, in the fixed order their legend bullets render. */
-const MARKER_ORDER = ["highlighted", "guess", "dropped", "moved"] as const;
+const MARKER_ORDER = ["highlighted", "dropped", "moved"] as const;
 
 /** One marked state a description bullet explains. */
 export type ContextMarker = (typeof MARKER_ORDER)[number];
@@ -38,11 +38,6 @@ const MARKER_LEGENDS: Record<ContextMarker, MarkerLegend> = {
 		explanation: " parts are injected by extensions into pi’s system prompt. They are excluded from the" +
 			" System Prompt token count and included in the injecting extension’s count.",
 	},
-	guess: {
-		keyword: "(guess)",
-		color: "dim",
-		explanation: " sources are inferred from the injected text itself.",
-	},
 	dropped: {
 		keyword: "Dropped",
 		color: "toolDiffRemoved",
@@ -64,12 +59,6 @@ export function droppedMarker(theme: Theme): string {
 /** Themed marker naming content pi sends from elsewhere in the prompt than it wrote it. */
 export function movedMarker(theme: Theme): string {
 	return stateMarker(theme, MARKER_LEGENDS.moved);
-}
-
-/** Themed suffix naming an owner this extension inferred rather than one pi reported. */
-export function guessMarker(theme: Theme): string {
-	const { color, keyword } = MARKER_LEGENDS.guess;
-	return theme.fg(color, ` ${keyword}`);
 }
 
 /**

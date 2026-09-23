@@ -2,24 +2,10 @@
  * Pure measurement logic: split a captured system prompt into semantic items
  * and estimate token sizes. No pi API access — unit-testable.
  *
- * Pi 0.86 uses independently replaceable XML sections. Their wrappers locate
- * content; custom sections remain System Prompt parts rather than additions.
- * The legacy parser below also recognizes pi 0.80–0.85 structural markers:
- *
- * - context files: <project_instructions path="...">...</project_instructions>
- * - skills block: "The following skills provide..." through </available_skills>
- * - tool prompt lines: the bullet blocks under "Available tools:" and
- *   "Guidelines:", where pi renders each distinct bullet exactly once, in
- *   active-tool order (verified against pi 0.84.3)
- * - base prompt blocks: the "Available tools:", "Guidelines:", and
- *   "Pi documentation" headers pi emits, which split its own prompt into the
- *   parts System Prompt presents as sub-items. A `before_agent_start` handler
- *   may relocate the two tool-surface blocks past pi's footer, so blocks are
- *   located independently and ordered by where they ended up
- * - the "Current working directory" footer (pi 0.81), optionally preceded by a
- *   "Current date" line (pi 0.80), closes pi's own prompt: pi sends it with
- *   every request, so it is measured as the Current Dir part. Text after it
- *   is an extension addition unless it is a structurally recovered tool block.
+ * Pi 0.86+ renders the prompt as independently replaceable XML sections. Their
+ * wrappers locate content; custom sections (such as the ones rig extensions
+ * add) remain System Prompt parts. Text outside every section, after the
+ * preamble, counts as unattributed extension additions.
  */
 import {
 	AGGREGATE_SOURCE,
@@ -36,12 +22,10 @@ import {
 	SKILLS_LABEL,
 	SYSTEM_PROMPT_LABEL,
 } from "./model.ts";
-import { type PromptAdditionOptions, splitPromptAdditions } from "./prompt-additions.ts";
 import {
 	AVAILABLE_TOOLS_BLOCK,
 	BASE_PROMPT_BLOCKS,
 	DOCUMENTATION_BLOCK,
-	findPromptBlocks,
 	findPromptSections,
 	findSectionToolBlocks,
 	GUIDELINES_BLOCK,
@@ -111,13 +95,12 @@ export interface ToolSlice {
 /**
  * Split a captured system prompt into semantic items: pi base prompt,
  * appended prompt, context files, skills, active tool contributions, and the
- * additions extensions appended after pi's footer.
+ * text extensions added outside pi's sections.
  */
 export function analyzeSystemPrompt(
 	systemPrompt: string,
 	options: PromptOptionsSlice,
 	tools: ToolSlice[] = [],
-	additions: PromptAdditionOptions = {},
 ): InjectionItem[] {
 	const names = new Set<string>();
 	const sections = findPromptSections(systemPrompt).filter((section) => {
@@ -125,67 +108,7 @@ export function analyzeSystemPrompt(
 		names.add(section.name);
 		return true;
 	});
-	if (sections.some((section) => !["project_context", "available_skills"].includes(section.name))) {
-		return analyzePromptSections(systemPrompt, sections, options, tools, additions);
-	}
-	const items: InjectionItem[] = [];
-	const carvedSpans: Span[] = [];
-
-	const footer = findBasePromptFooter(systemPrompt, options.cwd);
-	const base = footer === undefined ? systemPrompt : systemPrompt.slice(0, footer.start);
-
-	const usesCustomPrompt = options.customPrompt !== undefined && options.customPrompt.length > 0;
-	// Exclude separately attributed content before looking for headers inside it
-	measureContextFiles(base, options, items, carvedSpans);
-	measureSkills(base, options, items, carvedSpans);
-	const appended = carveAppendedPrompt(base, options, carvedSpans);
-	const appendedStart = appended === undefined ? undefined : carvedSpans[carvedSpans.length - 1]?.start;
-	// A custom prompt drops pi's blocks; a tool list added to it is not a relocation
-	const droppedIds = usesCustomPrompt ? BASE_PROMPT_BLOCKS.map((block) => block.id) : [];
-	const located = usesCustomPrompt ? [] : findPromptBlocks(systemPrompt, base.length, tools, carvedSpans);
-	const tailBlocks = located.filter((block) => block.start >= base.length);
-	const body = base + tailBlocks.map((block) => systemPrompt.slice(block.start, block.end)).join("");
-	const bodyBlocks = positionBodyBlocks(located, base.length);
-	const toolItems: InjectionItem[] = [];
-	const promptLines = measureTools(body, tools, toolItems, carvedSpans, droppedIds, bodyBlocks);
-	items.unshift(...toolItems);
-
-	const remaining = carve(body, carvedSpans);
-	const blocks = usesCustomPrompt
-		? droppedBasePromptParts(remaining, promptLines.dropped)
-		: addInjectedReferences(
-			splitBasePromptParts(remaining, bodyBlocks.map((block) => ({
-				...block, start: carve(body.slice(0, block.start), carvedSpans).length,
-			}))),
-			body,
-			carvedSpans,
-			promptLines.carved,
-		);
-	const references = footer === undefined
-		? []
-		: measurePromptAdditions(systemPrompt, footer.end, { ...additions, excluded: tailBlocks }, items);
-
-	const parts = blocks;
-	if (appended !== undefined) {
-		parts.push({ id: "base-prompt:appended", kind: "append-prompt", label: "Appended Prompt", text: appended });
-	}
-	if (footer !== undefined) {
-		const text = systemPrompt.slice(footer.start, footer.end);
-		parts.push({ id: "base-prompt:current-dir", kind: "base-prompt", label: "Current Dir", text });
-	}
-	if (references.length > 0) {
-		parts.push({
-			id: EXTENSION_ADDITIONS_BLOCK.id,
-			kind: "prompt-addition",
-			label: EXTENSION_ADDITIONS_BLOCK.label,
-			text: "",
-			injectedReferences: references,
-		});
-	}
-	if (!usesCustomPrompt) orderPromptParts(parts, located, footer, appendedStart);
-	items.unshift(createSystemPromptItem(parts));
-
-	return items;
+	return analyzePromptSections(systemPrompt, sections, options, tools);
 }
 
 /** Measure XML section bodies once, keeping arbitrary sections out of extension attribution. */
@@ -194,7 +117,6 @@ function analyzePromptSections(
 	sections: readonly PromptSection[],
 	options: PromptOptionsSlice,
 	tools: ToolSlice[],
-	additions: PromptAdditionOptions,
 ): InjectionItem[] {
 	const items: InjectionItem[] = [];
 	const spans: Span[] = [];
@@ -221,7 +143,7 @@ function analyzePromptSections(
 	}
 	// Only unwrapped gaps are additions. Sections after cwd still belong to the
 	// prompt, even when an earlier handler never saw them or cwd was removed.
-	const references = measurePromptAdditions(prompt, preambleEnd, { ...additions, excluded: sections }, items);
+	const references = measurePromptAdditions(prompt, preambleEnd, sections, items);
 	if (references.length > 0) {
 		parts.push({ ...EXTENSION_ADDITIONS_BLOCK, kind: "prompt-addition", text: "", injectedReferences: references });
 	}
@@ -291,46 +213,28 @@ function decodeXml(text: string): string {
 }
 
 /**
- * Attribute the text extensions appended after pi's footer, and return it as
- * preview-only references on the System Prompt part it was taken from. Every
- * run is counted by the extension it was guessed to belong to, or by the
- * unattributed aggregate, never by pi's own prompt.
+ * Count the text outside every section, after the preamble, as one
+ * unattributed addition, and return it as a preview-only reference on the
+ * System Prompt part it was taken from. Pi reports no per-extension provenance
+ * for this text, so it is never attributed to an extension.
  */
 function measurePromptAdditions(
-	systemPrompt: string,
+	prompt: string,
 	start: number,
-	options: PromptAdditionOptions,
+	excluded: readonly Span[],
 	items: InjectionItem[],
 ): InjectedReference[] {
-	if (systemPrompt.slice(start).trim().length === 0) return [];
-	const references: InjectedReference[] = [];
-	const owners = new Map<string, { source: InjectionSource; text: string }>();
-	for (const run of splitPromptAdditions(systemPrompt, start, options)) {
-		const itemId = additionItemId(run.source);
-		// One insertion point: the part itself holds no counted text of its own.
-		references.push({
-			offset: 0,
-			text: run.text,
-			itemId,
-			source: run.source,
-			tool: run.tool,
-			attribution: run.attribution,
-		});
-		const owner = owners.get(itemId);
-		if (owner === undefined) owners.set(itemId, { source: run.source, text: run.text });
-		else owner.text += run.text;
+	let text = "";
+	let cursor = start;
+	for (const span of excluded) {
+		if (span.start > cursor) text += prompt.slice(cursor, span.start);
+		cursor = Math.max(cursor, span.end);
 	}
-	for (const [itemId, owner] of owners) {
-		items.push(createItem(itemId, "prompt-addition", owner.source, PROMPT_ADDITIONS_LABEL, owner.text));
-	}
-	return references;
-}
-
-/** Stable id of the item counting one source's prompt additions. */
-function additionItemId(source: InjectionSource): string {
-	return source.id === AGGREGATE_SOURCE.id
-		? "prompt-addition:unattributed"
-		: `prompt-addition:${source.label}`;
+	text += prompt.slice(cursor);
+	if (text.trim().length === 0) return [];
+	const itemId = "prompt-addition:unattributed";
+	items.push(createItem(itemId, "prompt-addition", AGGREGATE_SOURCE, PROMPT_ADDITIONS_LABEL, text));
+	return [{ offset: 0, text, itemId, source: AGGREGATE_SOURCE }];
 }
 
 /** Same chars/4 heuristic pi's estimateTokens uses for text content. */
@@ -636,39 +540,6 @@ function claimGuidelines(tool: ToolSlice, claimed: Set<string>): string[] {
 	return owned;
 }
 
-/** Retain actual block order, including movements past appended instructions or the CWD footer. */
-function orderPromptParts(
-	parts: PromptPart[],
-	blocks: readonly LocatedPromptBlock[],
-	footer: Span | undefined,
-	appendedStart: number | undefined,
-): void {
-	const positions = new Map(blocks.map((block) => [block.id, block.start]));
-	positions.set(PREAMBLE_BLOCK.id, -1);
-	if (footer !== undefined) positions.set("base-prompt:current-dir", footer.start);
-	if (appendedStart !== undefined) positions.set("base-prompt:appended", appendedStart);
-	// Extension Additions consolidates all owners and always closes the preview
-	parts.sort((a, b) => (positions.get(a.id) ?? Infinity) - (positions.get(b.id) ?? Infinity));
-}
-
-/** Translate recovered tail coordinates into the local body used for carving and references. */
-function positionBodyBlocks(blocks: readonly LocatedPromptBlock[], baseLength: number): LocatedPromptBlock[] {
-	let tailOffset = baseLength;
-	return blocks.map((block) => {
-		if (block.start < baseLength) return block;
-		const shift = tailOffset - block.start;
-		tailOffset += block.end - block.start;
-		return {
-			...block,
-			start: block.start + shift,
-			end: block.end + shift,
-			bullets: block.bullets === undefined ? undefined : {
-				start: block.bullets.start + shift, end: block.bullets.end + shift,
-			},
-		};
-	});
-}
-
 /**
  * Carve pi's project-context section and expose each context file as a child of
  * one Instruction Files aggregate, without counting the XML transport scaffolding.
@@ -701,52 +572,6 @@ function measureContextFiles(
 	items.push(createAggregateItem("context-files", "context-file", PI_SOURCE, label, children));
 }
 
-/** Carve the skills section and expose each semantic skill record as a child item. */
-function measureSkills(
-	base: string,
-	options: PromptOptionsSlice,
-	items: InjectionItem[],
-	carvedSpans: Span[],
-): void {
-	const sectionSpan = findSkillsSpan(base);
-	if (sectionSpan === undefined) return;
-	const children = (options.skills ?? [])
-		.map((skill) => createItem(
-			`skill:${skill.name}`,
-			"skills",
-			PI_SOURCE,
-			skill.name,
-			[skill.name, skill.description, skill.filePath].join("\n"),
-		))
-		.sort((a, b) => b.tokens - a.tokens);
-	carvedSpans.push(expandLineBreaks(base, sectionSpan));
-	if (children.length === 0) return;
-
-	items.push(createAggregateItem("skills", "skills", PI_SOURCE, `${SKILLS_LABEL} (${children.length})`, children));
-}
-
-/**
- * Carve the --append-system-prompt text out of the base prompt so it becomes a
- * labeled part of System Prompt instead of free text inside pi's own blocks.
- */
-function carveAppendedPrompt(
-	base: string,
-	options: PromptOptionsSlice,
-	carvedSpans: Span[],
-): string | undefined {
-	const append = options.appendSystemPrompt;
-	if (append === undefined || append.length === 0) return undefined;
-	const generatedStarts = [findContextSectionSpan(base)?.start, findSkillsSpan(base)?.start]
-		.filter((start): start is number => start !== undefined);
-	const generatedStart = generatedStarts.length === 0 ? base.length : Math.min(...generatedStarts);
-	const beforeGeneratedSections = Math.max(0, generatedStart - append.length);
-	const expectedStart = base.lastIndexOf(append, beforeGeneratedSections);
-	const start = expectedStart === -1 ? base.lastIndexOf(append) : expectedStart;
-	if (start === -1) return undefined;
-	carvedSpans.push({ start, end: start + append.length });
-	return append;
-}
-
 /** One labeled part of the System Prompt item, before it receives its token share. */
 interface PromptPart {
 	readonly id: string;
@@ -758,84 +583,6 @@ interface PromptPart {
 	/** True for a block an extension moved out of the region pi rendered it into. */
 	readonly moved?: boolean;
 	readonly injectedReferences?: readonly InjectedReference[];
-}
-
-/**
- * Restore carved prompt lines as preview-only references in the part each was
- * taken from. Offsets refer to the carved text, so all existing char counts,
- * rounded token shares, and section concatenation remain unchanged.
- */
-function addInjectedReferences(
-	parts: PromptPart[],
-	base: string,
-	carvedSpans: Span[],
-	injectedSpans: InjectedSpan[],
-): PromptPart[] {
-	if (injectedSpans.length === 0) return parts;
-	let offset = 0;
-	return parts.map((part) => {
-		const partStart = offset;
-		offset += part.text.length;
-		const spans = injectedSpans.filter((span) => span.partId === part.id);
-		if (spans.length === 0) return part;
-		return {
-			...part,
-			injectedReferences: spans
-				.sort((a, b) => a.start - b.start)
-				.map((span) => ({
-					offset: carve(base.slice(0, span.start), carvedSpans).length - partStart,
-					text: base.slice(span.start, span.end),
-					itemId: span.itemId,
-					source: span.source,
-					tool: span.tool,
-				})),
-		};
-	});
-}
-
-/**
- * Split pi's own prompt at the block headers it renders deterministically, so
- * the tool list, guidelines, and documentation it already carries become
- * visible parts. Headers are located independently and cut in the order they
- * occur, because a relocated block appears after the ones pi wrote later. Text
- * before the first header opens the list as the preamble.
- */
-function splitBasePromptParts(base: string, cuts: readonly LocatedPromptBlock[]): PromptPart[] {
-	const parts: PromptPart[] = [];
-	let block: Pick<PromptPart, "id" | "label" | "moved"> = PREAMBLE_BLOCK;
-	let start = 0;
-	for (const cut of cuts) {
-		appendPromptPart(parts, block, base.slice(start, cut.start));
-		block = cut;
-		start = cut.start;
-	}
-	appendPromptPart(parts, block, base.slice(start));
-	return parts;
-}
-
-/**
- * Parts of a replaced prompt: the replacement text itself, then every block pi
- * would have assembled, kept visible as dropped so the view shows what the
- * replacement gave up. A dropped block carries no pi-authored text — only the
- * extension lines pi never rendered, as preview-only references.
- */
-function droppedBasePromptParts(
-	base: string,
-	dropped: Map<string, InjectedReference[]>,
-): PromptPart[] {
-	const parts: PromptPart[] = [];
-	appendPromptPart(parts, PREAMBLE_BLOCK, base);
-	for (const block of BASE_PROMPT_BLOCKS) {
-		parts.push({
-			id: block.id,
-			kind: "base-prompt",
-			label: block.label,
-			text: "",
-			dropped: true,
-			injectedReferences: dropped.get(block.id),
-		});
-	}
-	return parts;
 }
 
 /** Record one pi-authored part, skipping a block pi rendered no text into. */
@@ -1011,31 +758,6 @@ interface Span {
 	end: number;
 }
 
-/**
- * Locate pi's dynamic CWD footer so it can be excluded from System Prompt and
- * extension additions. Pi 0.81 emits only the "Current working directory"
- * line; pi 0.80 preceded it with a "Current date" line, still recognized for
- * compatibility. The CWD line must match the exact resolved cwd on a complete
- * line (preceded by "\n", followed by "\n" or end of prompt) so ordinary
- * prompt text mentioning the cwd is not mistaken for the footer.
- */
-function findBasePromptFooter(systemPrompt: string, cwd: string): Span | undefined {
-	const promptCwd = cwd.replace(/\\/g, "/");
-	const cwdLine = `\nCurrent working directory: ${promptCwd}`;
-	let cwdStart = systemPrompt.lastIndexOf(cwdLine);
-	while (cwdStart !== -1) {
-		const end = cwdStart + cwdLine.length;
-		if (end === systemPrompt.length || systemPrompt[end] === "\n") {
-			const dateStart = systemPrompt.lastIndexOf("\nCurrent date: ", cwdStart);
-			const dateLine = dateStart === -1 ? "" : systemPrompt.slice(dateStart, cwdStart);
-			const start = /^\nCurrent date: \d{4}-\d{2}-\d{2}$/.test(dateLine) ? dateStart : cwdStart;
-			return { start, end };
-		}
-		cwdStart = systemPrompt.lastIndexOf(cwdLine, cwdStart - 1);
-	}
-	return undefined;
-}
-
 /** Span of pi's complete project-context transport section. */
 function findContextSectionSpan(systemPrompt: string): Span | undefined {
 	return findDelimitedSpan(systemPrompt, "<project_context>", "</project_context>");
@@ -1054,16 +776,6 @@ function findContextFileContent(systemPrompt: string, filePath: string): string 
 	if (systemPrompt.slice(Math.max(start, end - 2), end) === "\r\n") end -= 2;
 	else if (systemPrompt[end - 1] === "\n") end--;
 	return systemPrompt.slice(start, end);
-}
-
-/** Span of the skills intro sentence through </available_skills>. */
-function findSkillsSpan(systemPrompt: string): Span | undefined {
-	const open = "The following skills provide specialized instructions";
-	const close = "</available_skills>";
-	const start = systemPrompt.lastIndexOf(open);
-	if (start === -1) return undefined;
-	const end = systemPrompt.indexOf(close, start);
-	return end === -1 ? undefined : { start, end: end + close.length };
 }
 
 /** Locate a complete delimited transport wrapper. */

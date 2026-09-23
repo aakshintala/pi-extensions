@@ -5,20 +5,11 @@
  * block streams with opt-in full content for multi-entry categories.
  */
 import type { ExtensionCommandContext, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Key, matchesKey, type TuiMouseEvent, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
-import {
-	AUTO_COMPACT_BUFFER_CATEGORY_ID,
-	type CategoryColor,
-	type CategoryColors,
-	FREE_SPACE_CATEGORY_ID,
-	type MapSize,
-	resolveCategoryColor,
-} from "../config.ts";
 import type { ContextUsageSnapshot, UsageCategory, UsagePreviewEntry } from "../model.ts";
 import { normalizeInlineText, normalizePreviewText } from "../text.ts";
 import { collectPreviewEntries } from "../usage.ts";
-import { colorize } from "./color.ts";
 import { ListNavigator, PreviewScroller } from "./injections-model.ts";
 import { expandJsonSpan } from "./json-preview.ts";
 import {
@@ -39,11 +30,33 @@ import {
 	wrapDescriptionLines,
 } from "./layout.ts";
 import { previewBodyLines, previewLegendLines } from "./section-preview.ts";
-import { splitSkillPreview } from "./skill-preview.ts";
-import { buildUsageMap, calculateFitMapScale, type UsageMap, type UsageMapCell } from "./usage-map.ts";
+import { buildUsageMap, type UsageMap, type UsageMapCell } from "./usage-map.ts";
 import { BlockNavigator, layoutPreviewBlocks, type PreviewLayout } from "./usage-preview.ts";
-import { DEFAULT_WHEEL_SCROLL_LINES, parseWheelDirection, readWheelScrollLines } from "./wheel.ts";
 
+/** Category id of the legend and map rows tracking the auto-compaction reserve. */
+const AUTO_COMPACT_BUFFER_CATEGORY_ID = "auto-compact-buffer";
+/** Category id of the legend and map rows tracking unoccupied context. */
+const FREE_SPACE_CATEGORY_ID = "free-space";
+/** Theme color of each usage category, in legend order; any other category is `muted`. */
+const CATEGORY_COLORS: ReadonlyMap<string, ThemeColor> = new Map<string, ThemeColor>([
+	["system-prompt", "mdHeading"],
+	["context-files", "mdCodeBlock"],
+	["skills", "customMessageLabel"],
+	["built-in-tools", "mdHeading"],
+	["custom-tools", "accent"],
+	["mcp-tools", "mdLink"],
+	["user-messages", "syntaxString"],
+	["assistant-messages", "syntaxFunction"],
+	["assistant-thinking", "thinkingXhigh"],
+	["tool-calls", "syntaxKeyword"],
+	["tool-output", "toolOutput"],
+	["extensions", "syntaxType"],
+	["compacted-data", "thinkingHigh"],
+	[AUTO_COMPACT_BUFFER_CATEGORY_ID, "dim"],
+	[FREE_SPACE_CATEGORY_ID, "dim"],
+]);
+/** Requested map geometry in cells; the viewport clamps it per frame. */
+const MAP_SIZE = { columns: 16, rows: 16 };
 const USAGE_DESCRIPTION = "Estimated context for the next model request. " +
 	"Token counts are approximate and may differ from the provider's estimate.";
 const INVISIBLE_REASONING_DESCRIPTION =
@@ -63,8 +76,6 @@ const PREVIEW_BLOCK_MIN_LINES = 4;
 const TWO_BLOCK_FRAME_ROWS = 5;
 const BLOCK_GUTTER = "┃";
 const CURSOR_COLUMN_WIDTH = 2;
-/** Rows the notice block may occupy before it starts crowding out the map. */
-const MAX_NOTICE_LINES = 3;
 const MAX_LEGEND_VALUE_COLUMN = 32;
 const LEGEND_VALUE_GAP = 2;
 const LEGEND_LEADER_GAP = 4;
@@ -72,11 +83,7 @@ const MAP_SIDE_BY_SIDE_MIN_WIDTH = 52;
 const SPACED_MAP_MIN_WIDTH = 72;
 const MAP_COLUMN_GAP = 2;
 const SPACED_MAP_COLUMN_GAP = 3;
-/**
- * Columns the legend keeps beside the map, so a wide configured map never
- * squeezes its labels out. The default geometry fits beside it at every width
- * that renders a map at all.
- */
+/** Columns the legend keeps beside the map, so the map never squeezes its labels out. */
 const MIN_DETAIL_WIDTH = 32;
 const FULL_CELL = "■";
 const PARTIAL_CELL = "◧";
@@ -96,16 +103,7 @@ const MAP_KEY_COMPACT_SPARE_ROWS = 2;
 export interface UsageViewInput {
 	readonly usage: ContextUsageSnapshot;
 	readonly degradedReason?: string;
-	/** Non-fatal problems shown under the header, such as ignored configuration entries. */
-	readonly notices?: readonly string[];
-	/** Category colors resolved from user overrides, or `DEFAULT_CATEGORY_COLORS`. */
-	readonly categoryColors: CategoryColors;
-	/** Map geometry requested by configuration; the viewport clamps it per frame. */
-	readonly mapSize: MapSize;
 }
-
-/** View-local denominator selected for the context map. */
-type UsageMapScale = "window" | "fit";
 
 interface CategoryLegendRow {
 	readonly type: "category";
@@ -167,13 +165,19 @@ interface BlockBody {
 export async function showUsageView(context: ExtensionCommandContext, input: UsageViewInput): Promise<void> {
 	await context.ui.custom<void>(
 		(tui, theme, _keybindings, done) => {
-			const view = new UsageView(theme, input, done, () => tui.terminal.rows, readWheelScrollLines(tui));
+			const view = new UsageView(theme, input, done, () => tui.terminal.rows);
 			return {
 				render: (width: number) => view.render(width),
 				invalidate: () => view.invalidate(),
 				handleInput: (data: string) => {
 					view.handleInput(data);
 					tui.requestRender();
+				},
+				// Pi reports the wheel only in fullscreen mode.
+				handleMouse: (event: TuiMouseEvent) => {
+					if (event.type !== "wheel" || !event.wheelDelta) return undefined;
+					view.handleWheel(event.wheelDelta);
+					return { handled: true };
 				},
 			};
 		},
@@ -190,16 +194,11 @@ export class UsageView {
 	private readonly input: UsageViewInput;
 	private readonly done: (result: undefined) => void;
 	private readonly getTerminalRows: () => number;
-	private readonly wheelScrollLines: number;
 	private readonly usage: ContextUsageSnapshot;
-	private readonly categoryColors: CategoryColors;
 	private readonly legendRows: readonly LegendRow[];
 	private readonly navigator: ListNavigator;
 	private readonly previewScroller = new PreviewScroller();
 	private readonly blockNavigator = new BlockNavigator();
-	private readonly fitMapScale: number | undefined;
-	private mapScale: UsageMapScale = "window";
-	private currentWidth: number | undefined;
 	private previewRow: CategoryLegendRow | undefined;
 	private cachedPreviewEntries: readonly UsagePreviewEntry[] | undefined;
 	private cachedContent: PreviewContent | undefined;
@@ -216,16 +215,12 @@ export class UsageView {
 		input: UsageViewInput,
 		done: (result: undefined) => void,
 		getTerminalRows: () => number = () => process.stdout.rows ?? DEFAULT_TERMINAL_ROWS,
-		wheelScrollLines: number = DEFAULT_WHEEL_SCROLL_LINES,
 	) {
 		this.theme = theme;
 		this.input = input;
 		this.done = done;
 		this.getTerminalRows = getTerminalRows;
-		this.wheelScrollLines = wheelScrollLines;
 		this.usage = input.usage;
-		this.categoryColors = input.categoryColors;
-		this.fitMapScale = calculateFitMapScale(this.usage);
 		this.legendRows = this.buildLegendRows();
 		// The trailing buffer/free block has no preview: it scrolls with the list but is never selectable.
 		const selectableCount = this.legendRows.filter((row) => row.type === "category").length;
@@ -244,15 +239,7 @@ export class UsageView {
 			this.done(undefined);
 			return;
 		}
-		// One notch moves the selection one row, like a single step key.
-		const wheel = parseWheelDirection(data);
-		if (wheel !== undefined) {
-			if (this.navigator.moveBy(wheel)) this.clearCache();
-			return;
-		}
-		if (matchesKey(data, "z")) {
-			this.toggleMapScale();
-		} else if (matchesKey(data, Key.enter)) {
+		if (matchesKey(data, Key.enter)) {
 			this.openPreview();
 		} else if (isStepBackKey(data)) {
 			if (this.navigator.moveBy(-1)) this.clearCache();
@@ -269,9 +256,21 @@ export class UsageView {
 		}
 	}
 
+	/**
+	 * Mouse wheel, `delta` lines (negative is up): one notch moves the list
+	 * selection or the selected block one step, and scrolls full content.
+	 */
+	public handleWheel(delta: number): void {
+		const step = Math.sign(delta);
+		let moved: boolean;
+		if (this.previewRow === undefined) moved = this.navigator.moveBy(step);
+		else if (this.getFullContentEntry(this.previewRow) !== undefined) moved = this.previewScroller.scrollBy(delta);
+		else moved = step < 0 ? this.blockNavigator.stepBack() : this.blockNavigator.stepForward();
+		if (moved) this.clearCache();
+	}
+
 	/** Render a cached fullscreen frame for the current width and terminal height. */
 	public render(width: number): string[] {
-		this.currentWidth = width;
 		const terminalRows = normalizeTerminalRows(this.getTerminalRows());
 		if (
 			this.cachedLines !== undefined &&
@@ -320,7 +319,7 @@ export class UsageView {
 			...(descriptionLines.length === 0 ? [] : ["", ...descriptionLines]),
 			"",
 			this.fit(
-				hintRow(theme, this.dashboardHints(width)),
+				hintRow(theme, [[STEP_KEY_HINT, "Navigate"], ["Enter", "Preview"], ["Esc", "Close"]]),
 				width,
 			),
 			"",
@@ -329,7 +328,7 @@ export class UsageView {
 		return fitToTerminalHeight([...prefix, ...dashboard, ...tail], terminalRows, border);
 	}
 
-	/** Accent title with responsive model, zoom label, and true-window usage metadata. */
+	/** Accent title with responsive model and true-window usage metadata. */
 	private headerLines(width: number): string[] {
 		const theme = this.theme;
 		const title = theme.fg("accent", theme.bold("Context Usage"));
@@ -343,27 +342,6 @@ export class UsageView {
 		const fullMetadata = normalizedModel === ""
 			? summary
 			: `${theme.fg("muted", normalizedModel)}${separator}${summary}`;
-		const zoomLabel = this.zoomLabel(width);
-		if (zoomLabel !== undefined) {
-			const titleWithZoom = `${title}${separator}${zoomLabel}`;
-			if (visibleWidth(titleWithZoom) + 1 + visibleWidth(fullMetadata) <= width) {
-				return [spreadLine(titleWithZoom, fullMetadata, width)];
-			}
-			if (visibleWidth(titleWithZoom) + 1 + visibleWidth(summary) <= width) {
-				return [spreadLine(titleWithZoom, summary, width)];
-			}
-			if (visibleWidth(title) + 1 + visibleWidth(summary) <= width) {
-				return [spreadLine(title, summary, width), "", this.fit(zoomLabel, width)];
-			}
-			return [
-				this.fit(title, width),
-				"",
-				this.fit(zoomLabel, width),
-				"",
-				this.fit(summary, width),
-			];
-		}
-
 		if (visibleWidth(title) + 1 + visibleWidth(fullMetadata) <= width) {
 			return [spreadLine(title, fullMetadata, width)];
 		}
@@ -371,49 +349,6 @@ export class UsageView {
 			return [spreadLine(title, summary, width)];
 		}
 		return [this.fit(title, width), "", this.fit(summary, width)];
-	}
-
-	/** Toggle the view-local map denominator when the binding is currently visible. */
-	private toggleMapScale(): void {
-		if (!this.canToggleMapScale(this.currentWidth)) return;
-		this.mapScale = this.mapScale === "window" ? "fit" : "window";
-		this.clearCache();
-	}
-
-	/** Whether zoom can help and its binding is visible at this width. */
-	private canToggleMapScale(width: number | undefined): boolean {
-		const contextWindow = this.usage.reported?.contextWindow;
-		return width !== undefined &&
-			width >= MAP_SIDE_BY_SIDE_MIN_WIDTH &&
-			contextWindow !== undefined &&
-			this.fitMapScale !== undefined &&
-			this.fitMapScale < contextWindow;
-	}
-
-	/** The active Fit label, omitted together with its map and binding. */
-	private zoomLabel(width: number): string | undefined {
-		const contextWindow = this.usage.reported?.contextWindow;
-		if (
-			this.mapScale !== "fit" ||
-			!this.canToggleMapScale(width) ||
-			contextWindow === undefined ||
-			this.fitMapScale === undefined
-		) return undefined;
-		return this.theme.fg(
-			"mdHeading",
-			`Zoom ${formatTokens(contextWindow)} → ${formatTokens(this.fitMapScale)}`,
-		);
-	}
-
-	/** Dashboard hints with Zoom immediately before Close when the binding is active. */
-	private dashboardHints(width: number): Array<readonly [string, string]> {
-		const hints: Array<readonly [string, string]> = [
-			[STEP_KEY_HINT, "Navigate"],
-			["Enter", "Preview"],
-		];
-		if (this.canToggleMapScale(width)) hints.push(["Z", "Zoom"]);
-		hints.push(["Esc", "Close"]);
-		return hints;
 	}
 
 	/**
@@ -439,18 +374,16 @@ export class UsageView {
 	}
 
 	/**
-	 * Map for the active scale at the largest configured geometry this frame can
-	 * render, or undefined without a usable context window or map width. Clamping
-	 * rebuilds the proportions instead of cropping cells, so a map too large for
-	 * the viewport still maps the whole scale.
+	 * Map at the largest geometry this frame can render, or undefined without a
+	 * usable context window or map width. Clamping rebuilds the proportions
+	 * instead of cropping cells, so a map too large for the viewport still maps
+	 * the whole window.
 	 */
 	private dashboardMap(width: number, availableRows: number): UsageMap | undefined {
-		const requested = this.input.mapSize;
-		const columns = Math.min(requested.columns, maxMapColumns(width));
-		const rows = Math.min(requested.rows, availableRows);
+		const columns = Math.min(MAP_SIZE.columns, maxMapColumns(width));
+		const rows = Math.min(MAP_SIZE.rows, availableRows);
 		if (columns < 1 || rows < 1) return undefined;
-		const scaleTokens = this.mapScale === "fit" ? this.fitMapScale : undefined;
-		return buildUsageMap(this.usage, columns, rows, scaleTokens);
+		return buildUsageMap(this.usage, columns, rows);
 	}
 
 	/** Render the map and legend side by side, or only details when width/window data is insufficient. */
@@ -543,7 +476,7 @@ export class UsageView {
 	}
 
 	/** One indented `glyph - text` key row. */
-	private mapKeyEntry(glyphColor: CategoryColor, glyph: string, text: string): string {
+	private mapKeyEntry(glyphColor: ThemeColor, glyph: string, text: string): string {
 		return `${BODY_INDENT}${this.paint(glyphColor, glyph)}${this.theme.fg("dim", " - ")}${text}`;
 	}
 
@@ -566,18 +499,13 @@ export class UsageView {
 	}
 
 	/**
-	 * Tokens one map cell covers, with its share of the mapped range. While Fit
-	 * zoom shrinks the value, it shares the header zoom label's color. The share
-	 * is derived from the current map geometry rather than assumed, so it follows
-	 * any future cell count.
+	 * Tokens one map cell covers, with its share of the window. The share is
+	 * derived from the current map geometry, so it follows the clamped size.
 	 */
 	private blockSizeText(map: UsageMap, withPercent: boolean): string {
 		const percent = withPercent ? formatPercent(1 / (map.columns * map.rows)) : "";
 		const tokens = formatTokens(Math.round(map.blockTokens));
-		return this.theme.fg(
-			this.mapScale === "fit" ? "mdHeading" : "muted",
-			percent === "" ? tokens : `${tokens} (${percent})`,
-		);
+		return this.theme.fg("muted", percent === "" ? tokens : `${tokens} (${percent})`);
 	}
 
 	/** Pi-reported usage/window metadata, with a marked estimate when current usage is unknown. */
@@ -706,35 +634,22 @@ export class UsageView {
 		return this.paint(this.categoryColor(cell.categoryId), glyph);
 	}
 
-	/** Resolve one category through user overrides, with a safe fallback for unknown ids. */
-	private categoryColor(categoryId: string | undefined): CategoryColor {
-		return resolveCategoryColor(this.categoryColors, categoryId);
+	/** Theme color of one category; `muted` for ids without their own, such as tool-output children. */
+	private categoryColor(categoryId: string | undefined): ThemeColor {
+		return (categoryId === undefined ? undefined : CATEGORY_COLORS.get(categoryId)) ?? "muted";
 	}
 
-	/** Paint text with a configured color, which may name a theme color or a literal value. */
-	private paint(color: CategoryColor, text: string): string {
-		return colorize(this.theme, color, text);
+	/** Paint text with a theme color. */
+	private paint(color: ThemeColor, text: string): string {
+		return this.theme.fg(color, text);
 	}
 
-	/**
-	 * Wrapped notices placed above the dashboard: the degraded-capture reason
-	 * first, then configuration problems. Capped so a broken configuration file
-	 * cannot push the map and legend off the frame.
-	 */
+	/** The degraded-capture reason, wrapped above the dashboard. */
 	private noticeLines(width: number): string[] {
-		const degraded = this.input.degradedReason === undefined ? [] : [this.input.degradedReason];
-		const blocks = [...degraded, ...this.input.notices ?? []]
-			.map((notice) => this.wrapNotice(notice, width));
-		const lines = blocks.flat();
-		if (lines.length <= MAX_NOTICE_LINES) return lines;
-		const kept = lines.slice(0, MAX_NOTICE_LINES - 1);
-		const hidden = blocks.length - countWholeBlocks(blocks, kept.length);
-		return [...kept, ...this.wrapNotice(`… +${hidden} more`, width)];
-	}
-
-	/** One sanitized notice wrapped to the available width, indented on every line. */
-	private wrapNotice(notice: string, width: number): string[] {
-		return wrapDescriptionLines(this.theme, normalizeInlineText(notice), "warning", width);
+		const reason = this.input.degradedReason;
+		return reason === undefined
+			? []
+			: wrapDescriptionLines(this.theme, normalizeInlineText(reason), "warning", width);
 	}
 
 	// === Preview mode ===
@@ -743,13 +658,6 @@ export class UsageView {
 	private handlePreviewInput(data: string): void {
 		if (matchesKey(data, Key.escape) || data === "q") {
 			this.closePreview();
-			return;
-		}
-		// Blocks are selected rather than scrolled, so one notch steps one block.
-		const wheel = parseWheelDirection(data);
-		if (wheel !== undefined) {
-			const moved = wheel < 0 ? this.blockNavigator.stepBack() : this.blockNavigator.stepForward();
-			if (moved) this.clearCache();
 			return;
 		}
 		if (matchesKey(data, Key.enter)) {
@@ -774,11 +682,6 @@ export class UsageView {
 		if (matchesKey(data, Key.escape) || data === "q") {
 			if (this.openBlockIndex === undefined) this.closePreview();
 			else this.closeBlock();
-			return;
-		}
-		const wheel = parseWheelDirection(data);
-		if (wheel !== undefined) {
-			if (this.previewScroller.scrollBy(wheel * this.wheelScrollLines)) this.clearCache();
 			return;
 		}
 		if (isStepBackKey(data)) {
@@ -884,7 +787,7 @@ export class UsageView {
 	): string[] {
 		const theme = this.theme;
 		const border = theme.fg("border", "─".repeat(Math.max(1, width)));
-		const body = this.blockBodyLines(width, row, entry);
+		const body = this.blockBodyLines(width, entry);
 		const showEntryHeader = row.rootId !== "system-prompt" || this.openBlockIndex !== undefined;
 		const fixedLineCount = showEntryHeader ? BLOCK_FIXED_LINE_COUNT : PREVIEW_FIXED_LINE_COUNT;
 		const descriptionLines = row.rootId === "assistant-thinking" && this.openBlockIndex === undefined
@@ -1017,9 +920,7 @@ export class UsageView {
 		if (this.cachedContent !== undefined && this.cachedContent.wrapWidth === wrapWidth) {
 			return this.cachedContent.entries;
 		}
-		const compactSkills = row.rootId === "user-messages";
-		const entries = this.previewEntries(row)
-			.map((entry) => this.entryContentLines(entry, wrapWidth, compactSkills));
+		const entries = this.previewEntries(row).map((entry) => this.entryContentLines(entry, wrapWidth));
 		this.cachedContent = { wrapWidth, entries };
 		return entries;
 	}
@@ -1029,12 +930,12 @@ export class UsageView {
 	 * are already fitted, so the cache key is the terminal width: narrow widths share a clamped wrap
 	 * width while still needing their own truncation.
 	 */
-	private blockBodyLines(width: number, row: CategoryLegendRow, entry: UsagePreviewEntry): readonly string[] {
+	private blockBodyLines(width: number, entry: UsagePreviewEntry): readonly string[] {
 		if (this.cachedBlockBody !== undefined && this.cachedBlockBody.width === width) {
 			return this.cachedBlockBody.lines;
 		}
 		const wrapWidth = previewWrapWidth(width);
-		const content = this.entryContentLines(entry, wrapWidth, row.rootId === "user-messages");
+		const content = this.entryContentLines(entry, wrapWidth);
 		const lines = content.map((line) => line === "" ? "" : this.fit(`${BODY_INDENT}${line}`, width));
 		this.cachedBlockBody = { width, lines };
 		return lines;
@@ -1106,42 +1007,25 @@ export class UsageView {
 	}
 
 	/** Complete content lines under the entry header: labeled tool parts, or the whole raw entry. */
-	private entryContentLines(entry: UsagePreviewEntry, wrapWidth: number, compactSkills: boolean): string[] {
+	private entryContentLines(entry: UsagePreviewEntry, wrapWidth: number): string[] {
 		return previewBodyLines(
 			this.theme,
 			entry,
 			wrapWidth,
-			(text, jsonSpan) => this.wrappedEntryLines(expandJsonSpan(text, jsonSpan), wrapWidth, compactSkills),
+			(text, jsonSpan) => this.wrappedEntryLines(expandJsonSpan(text, jsonSpan), wrapWidth),
 			entry.breadcrumb.at(-1),
 		);
 	}
 
 	/** Sanitized, wrapped lines of one text run, indented under the entry header. */
-	private wrappedEntryLines(text: string, wrapWidth: number, compactSkills: boolean): string[] {
+	private wrappedEntryLines(text: string, wrapWidth: number): string[] {
 		const lines: string[] = [];
-		for (const paragraph of this.entryPreviewText(text, compactSkills).split("\n")) {
+		for (const paragraph of normalizePreviewText(text).split("\n")) {
 			const wrapped = wrapTextWithAnsi(paragraph, wrapWidth);
 			const paragraphLines = wrapped.length === 0 ? [""] : wrapped;
 			for (const line of paragraphLines) lines.push(line === "" ? "" : `${BODY_INDENT}${line}`);
 		}
 		return lines;
-	}
-
-	/** Sanitize raw entry text and replace complete attached skills with pi-colored badges. */
-	private entryPreviewText(text: string, compactSkills: boolean): string {
-		const sanitized = normalizePreviewText(text);
-		if (!compactSkills) return sanitized;
-		return splitSkillPreview(sanitized)
-			.map((segment) => segment.type === "text" ? segment.text : this.skillBadge(segment.name))
-			.join("");
-	}
-
-	/** Render the same collapsed skill label/name colors used by pi's transcript component. */
-	private skillBadge(name: string): string {
-		const label = this.theme.fg("customMessageLabel", this.theme.bold("[skill]"));
-		const safeName = normalizeInlineText(name);
-		if (safeName === "") return label;
-		return `${label} ${this.theme.fg("customMessageText", safeName)}`;
 	}
 
 	/** Truncate one rendered line to the supplied width. */
@@ -1209,18 +1093,6 @@ function previewBlockMaxLines(terminalRows: number, descriptionLineCount: number
 function previewHints(blockCount: number): Array<readonly [string, string]> {
 	if (blockCount === 0) return [["Esc", "Back"]];
 	return [[STEP_KEY_HINT, "Navigate"], ["PgUp/PgDn", "Page"], ["Esc", "Back"]];
-}
-
-/** Notices whose wrapped lines fit entirely into the first `keptLines` rows. */
-function countWholeBlocks(blocks: readonly (readonly string[])[], keptLines: number): number {
-	let used = 0;
-	let whole = 0;
-	for (const block of blocks) {
-		if (used + block.length > keptLines) break;
-		used += block.length;
-		whole += 1;
-	}
-	return whole;
 }
 
 /** Stream lines one block occupies, including its truncation marker row. */
