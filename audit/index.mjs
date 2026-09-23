@@ -80,13 +80,14 @@ if (live) {
     PI_CODING_AGENT_DIR: config,
     PI_OFFLINE: "1",
     PI_AUDIT_SHUTDOWN_MARKER: shutdownMarker,
+    PI_AUDIT_FAUX: "1",
     NPM_CONFIG_CACHE: join(homedir(), ".npm", "_cacache"),
   });
 }
 
 const run = await runPi(
   bin,
-  ["-p", "--no-session", "-e", join(REPO_ROOT, "audit", "probe.ts"), "--", "audit snapshot probe"],
+  ["-p", "--no-session", "-e", join(REPO_ROOT, "audit", "probe.ts"), ...(live ? [] : ["--provider", "audit", "--model", "probe"]), "--", "audit snapshot probe"],
   env,
   cwd,
 );
@@ -112,5 +113,6 @@ if (asJson) {
 
 if (live) process.exit(0);
 const failures = gate(snap, { timedOut: run.timedOut, shutdownObserved }, budgets);
+if (!snap.requestCaptured) failures.push("probe saw no model request, so rig prompt sections went unmeasured");
 for (const f of failures) console.error(`audit FAILED: ${f}`);
 process.exit(failures.length > 0 ? 1 : 0);
