@@ -47,8 +47,7 @@ function fakeClock(t) {
     },
     clearTimeout: (h) => pending.delete(h),
   };
-  t.after(() => delete globalThis[TIMERS]);
-  return {
+  const clock = {
     advance(ms) {
       const end = now + ms;
       for (let h; (h = [...pending].filter((h) => h.at <= end).sort((a, b) => a.at - b.at)[0]); ) {
@@ -59,6 +58,13 @@ function fakeClock(t) {
       now = end;
     },
   };
+  // Runs before the session's shutdown. A kill grace still pending (Linux counts a group of
+  // unreaped zombies as alive) ends now; the shutdown's own kills then use real timers.
+  t.after(() => {
+    clock.advance(800);
+    delete globalThis[TIMERS];
+  });
+  return clock;
 }
 
 /** Starts a session whose model calls monitor with `args` (command defaults to the fixture). */
@@ -258,7 +264,9 @@ test("after the command exits, what it left in its group that ignores SIGTERM is
 test("session shutdown kills the monitor without a notice", async (t) => {
   const s = await start(t);
   const pgid = await s.pgid();
-  await settles(s.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }), "the shutdown");
+  const shutdown = s.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+  s.clock.advance(800); // the kill grace, in case unreaped zombies keep the group alive (Linux)
+  await settles(shutdown, "the shutdown");
   assert.deepEqual(liveGroup(pgid), []);
   assert.deepEqual(s.notices, []);
 });
