@@ -3,8 +3,8 @@
 Background subagents: each one is a copy of the current agent, running as its
 own saved Pi session in the same process. Its result comes back as a notice.
 It replaces `@tintinweb/pi-subagents`. Spec: #26. Built so far: the core
-(#52) and nesting (#53). Worktrees and fork (#54) and the transcript viewer
-(#68) come later.
+(#52), nesting (#53) and the transcript viewer (#68). Worktrees and fork (#54)
+come later.
 
 ## Tools
 
@@ -129,6 +129,25 @@ Subagent 3fa9c1d2 (review auth) completed. STATUS: DONE
   message line. When it finishes, the row and the chat line show its `STATUS`.
 - A resume turns the finished row back into a running one, with its own
   running time, so each agent keeps one row.
+
+## Transcript
+
+Opening an agent in FleetView shows its conversation in the viewer, drawn like
+the main chat:
+
+- Pi's own user, assistant and tool components. Each call is drawn with its
+  tool's definition from the agent's session, so built-ins such as `bash` look
+  as they do in Pi. A call to a tool Pi does not know shows its raw arguments.
+- Tool calls group into one line as in the main chat, and Ctrl+O or a click
+  opens a group. Thinking is hidden when Pi's `hideThinkingBlock` is on, read
+  when the transcript is first opened.
+- A running agent is followed live: new messages, streaming replies and
+  running tool output. The viewer stays open when the agent finishes.
+- A finished agent opens from its saved session. If its parent resumes it
+  while the viewer is open, the viewer follows the new run.
+- Typing steers the agent. The steer shows as `Steering: …` until the agent
+  reads it, then as a user message. Ctrl+Q, then y, stops it.
+- Compaction summaries are not drawn.
 
 ## `rig.json` settings
 

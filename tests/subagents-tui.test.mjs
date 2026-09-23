@@ -111,7 +111,7 @@ test("the viewer shows a running agent's transcript, follows it and its steer, a
       ],
     },
     { content: "found 3 notes\nSTATUS: DONE", after: "go" },
-    { content: "none deeper\nSTATUS: DONE" },
+    { content: "none deeper\nSTATUS: DONE", after: "go2" },
   ]);
   await tui.waitForEvent("kid_reply", 2); // the child waits for its second reply
   await tui.waitForEvent("agent_end"); // the parent's turn
@@ -128,8 +128,13 @@ test("the viewer shows a running agent's transcript, follows it and its steer, a
   await tui.waitForScreen(viewing([head("0s"), "", ...TASK, ...calls, "", " Steering: look deeper", ""], " ● agent scout · 0s · bash echo hi", footer));
 
   writeFileSync(join(tui.agentDir, "go"), "");
+  await tui.waitForEvent("kid_reply", 3); // its reply came, then the steer, and it waits again
+  const replied = [...TASK, ...calls, "", " found 3 notes", " STATUS: DONE", "", "", " look deeper"];
+  await tui.waitForScreen(viewing([head("0s"), "", ...replied, "", ""], " ● agent scout · 0s · STATUS: DONE", footer));
+
+  writeFileSync(join(tui.agentDir, "go2"), "");
   await tui.waitForEvent("agent_end", 2); // the parent's turn on the child's notice
-  const done = [head("done 0s"), "", ...TASK, ...calls, "", " found 3 notes", " STATUS: DONE", "", "", " look deeper", "", "", " none deeper", " STATUS: DONE", ""];
+  const done = [head("done 0s"), "", ...replied, "", "", " none deeper", " STATUS: DONE", ""];
   await tui.waitForScreen(viewing(done, " ● agent scout · done 0s · STATUS: DONE", "↑82 ↓30 R46 W82 CH36.7% 0.1%/128k (auto)                     (harness) harness-1"));
 });
 
@@ -155,21 +160,23 @@ test("a finished agent's transcript opens from its saved session, and ctrl+o exp
   await tui.waitForScreen(viewing(expanded, " ● agent scout · done 0s · STATUS: DONE", "↑82 ↓30 R46 W83 CH36.4% 0.1%/128k (auto)                     (harness) harness-1"));
 });
 
-test("ctrl+q then y in the viewer stops the agent, which stays on screen", async (t) => {
+test("a running call's output shows as it comes, and ctrl+q then y in the viewer stops the agent", async (t) => {
+  // The call prints, then runs until the stop kills it.
+  const command = "echo started; while :; do sleep 0.05; done";
   const tui = await transcriptTui(t, [[SPAWN], "spawned", "noted"], [
-    { content: [{ type: "toolCall", id: "k1", name: "read", arguments: { path: "notes.md" } }] },
-    { content: "never sent", after: "never" },
+    { content: [{ type: "toolCall", id: "k1", name: "bash", arguments: { command } }] },
   ]);
-  await tui.waitForEvent("kid_reply", 2);
   await tui.waitForEvent("agent_end");
   tui.keys("Down", "Down", "Enter");
-  const content = ["", ...TASK, "", "", " ⏺ Read 1 file"];
+  const head = (state) => ` agent scout · ${state} · esc back · ctrl+q stop · enter steers`;
+  const running = ["", ...TASK, "", "", "", ` $ ${command}`, "", " started"];
+  const row = ` ● agent scout · 0s · bash ${command}`;
   const footer = "↑44 ↓28 R2 W44 CH2.3% 0.1%/128k (auto)                       (harness) harness-1";
-  await tui.waitForScreen(viewing([" agent scout · 0s · esc back · ctrl+q stop · enter steers", ...content], " ● agent scout · 0s · read notes.md", footer));
+  await tui.waitForScreen(viewing([head("0s"), ...running, ""], row, footer));
   tui.keys("C-q");
-  await tui.waitForScreen(viewing([" agent scout · 0s · esc back · ctrl+q stop · enter steers", ...content], [" ● agent scout · 0s · read notes.md", " Stop agent scout? y stops it, any other key cancels."], footer));
+  await tui.waitForScreen(viewing([head("0s"), ...running, ""], [row, " Stop agent scout? y stops it, any other key cancels."], footer));
   tui.keys("y");
   await tui.waitForEvent("agent_end", 2); // the parent's turn on the child's notice
-  const stopped = [" agent scout · stopped 0s · esc back · ctrl+q stop · enter steers", ...content, "", " Operation aborted"];
+  const stopped = [head("stopped 0s"), ...running, "", "", " Command aborted", "", "", " Error: This operation was aborted", ""];
   await tui.waitForScreen(viewing(stopped, " ● agent scout · stopped 0s · partial output kept", "↑78 ↓30 R46 W79 CH38.9% 0.1%/128k (auto)                     (harness) harness-1"));
 });
