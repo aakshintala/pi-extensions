@@ -21,7 +21,10 @@ const PARTIAL_MAX = 4 * LINE_CHARS;
 /** Notices a monitor may send at once; one comes back every REFILL_MS. */
 const BUDGET = 10;
 const REFILL_MS = 2000;
-/** Suppression lasting this long stops the monitor as `flooded`. */
+/**
+ * A flood window opens at a drop and stays open while drops keep coming, each within
+ * REFILL_MS of the last; one open this long stops the monitor as `flooded`.
+ */
 const FLOOD_MS = 30_000;
 const DEFAULT_S = 300;
 const MAX_S = 1800;
@@ -57,6 +60,8 @@ type Monitor = {
   partial: string;
   refill?: unknown;
   flood?: unknown;
+  /** Closes the flood window when REFILL_MS pass without a drop. */
+  gap?: unknown;
   deadline?: unknown;
   /** Resolves once stdout has closed and the end notice is sent. */
   done: Promise<void>;
@@ -119,6 +124,11 @@ export default function (pi: ExtensionAPI) {
     if (m.tokens === 0) {
       m.dropped++;
       m.flood ??= t.setTimeout(() => void stop(m, "flooded"), FLOOD_MS);
+      if (m.gap !== undefined) t.clearTimeout(m.gap as any);
+      m.gap = t.setTimeout(() => {
+        t.clearTimeout(m.flood as any);
+        m.flood = m.gap = undefined;
+      }, REFILL_MS);
       return;
     }
     m.tokens--;
@@ -126,9 +136,6 @@ export default function (pi: ExtensionAPI) {
       m.tokens++;
       m.refill = m.tokens < BUDGET ? t.setTimeout(refill, REFILL_MS) : undefined;
     }, REFILL_MS);
-    // Any delivery ends the suppression; the next drop starts a new one.
-    if (m.flood !== undefined) t.clearTimeout(m.flood as any);
-    m.flood = undefined;
     const dropped = m.dropped;
     m.dropped = 0;
     const head = `${name(m)}:${dropped ? ` (${dropped} earlier notices suppressed by the rate limit)` : ""}`;
@@ -219,11 +226,11 @@ export default function (pi: ExtensionAPI) {
   function settle(m: Monitor) {
     if (m.partial && !m.reason) deliver(m, [m.partial]); // a last line with no newline
     const t = timers();
-    for (const h of [m.refill, m.flood, m.deadline]) if (h !== undefined) t.clearTimeout(h as any);
+    for (const h of [m.refill, m.flood, m.gap, m.deadline]) if (h !== undefined) t.clearTimeout(h as any);
     closeSync(m.out);
     const logs = `Log: ${m.log}. Errors: ${m.errors}`;
     const end = {
-      flooded: ["failed", "flooded", `${name(m)} failed [flooded]: its notices were suppressed for ${FLOOD_MS / 1000}s. Tighten the command's filter so it prints fewer lines. ${logs}`],
+      flooded: ["failed", "flooded", `${name(m)} failed [flooded]: it printed faster than the rate limit for ${FLOOD_MS / 1000}s. Tighten the command's filter so it prints fewer lines. ${logs}`],
       timeout: ["failed", "timeout", `${name(m)} failed [timeout]: it reached its ${m.seconds}s deadline. ${logs}`],
       stopped: ["stopped", "stopped", `${name(m)} stopped. ${logs}`],
       shutdown: ["stopped", "stopped", null],

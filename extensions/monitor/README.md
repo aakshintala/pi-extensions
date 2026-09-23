@@ -24,9 +24,10 @@ its ID and log paths at once.
 - **Rate.** Notices draw from a budget of 10, refilled one every 2 s. A batch
   that finds it empty is dropped and counted, and the next notice says how many
   were suppressed.
-- **Flood.** 30 s of continuous suppression stops the monitor as failed with
-  code `flooded`. Suppression starts at the first drop after a notice, and any
-  delivered notice ends it.
+- **Flood.** A flood opens at a drop and lasts while drops keep coming, each
+  within 2 s of the last, even as refills let a notice through. A flood lasting
+  30 s stops the monitor as failed with code `flooded`. 2 s without a drop ends
+  it.
 - **Deadline.** At its deadline the monitor stops as failed with code `timeout`.
 
 ## Lifecycle

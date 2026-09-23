@@ -108,13 +108,15 @@ async function start(t, args = {}, { ui = false } = {}) {
   const log = /Log: (\S+)\. Errors/.exec(result)[1];
   let n = 0;
   let written = "";
-  /** Prints `text` as one batch and waits until the monitor has read it. */
+  const head = `Monitor ${id} (watch builds)`;
+  const over = () => notices.some((n) => n.startsWith(`${head} `));
+  /** Prints `text` as one batch and waits until the monitor has read it, or has ended. */
   const send = async (text) => {
     n++;
     writeFileSync(join(cwd, "tmp"), text);
     renameSync(join(cwd, "tmp"), join(cwd, `m${n}`));
     written += text;
-    await until(() => readFileSync(log, "utf8") === written, `batch ${n} in the log`);
+    await until(() => readFileSync(log, "utf8") === written || over(), `batch ${n} in the log`);
   };
   /** Makes the command exit with `code`. */
   const exit = (code) => {
@@ -126,14 +128,13 @@ async function start(t, args = {}, { ui = false } = {}) {
     await until(() => existsSync(join(cwd, "pgid")) && readFileSync(join(cwd, "pgid"), "utf8").endsWith("\n"), "the pgid");
     return Number(readFileSync(join(cwd, "pgid"), "utf8"));
   };
-  const head = `Monitor ${id} (watch builds)`;
   const logs = `Log: ${log}. Errors: ${log.replace(/\.log$/, ".err.log")}`;
   /** Waits for the monitor's end notice. */
   const ended = async () => {
     await until(() => notices.some((n) => n.startsWith(`${head} `)), "the end notice");
     return notices.find((n) => n.startsWith(`${head} `));
   };
-  return { ...s, clock, notices, result, id, item, log, send, exit, pgid, ended, head, logs };
+  return { ...s, clock, notices, result, id, item, log, send, exit, pgid, ended, over, head, logs };
 }
 
 test("each batch of lines is one notice with the description; stderr has its own log; the exit ends it", async (t) => {
@@ -183,7 +184,7 @@ test("a long description is cut so the drop count and the lines survive the noti
   assert.equal(s.notices.at(-1), `${head}: (1 earlier notices suppressed by the rate limit)\nevent 12`);
 });
 
-test("a budget of 10 notices refilled every 2 s; dropped ones are counted in the next; 30 s of suppression stops it as flooded", async (t) => {
+test("a budget of 10 notices refilled every 2 s; dropped ones are counted in the next", async (t) => {
   const s = await start(t);
   for (let i = 1; i <= 12; i++) await s.send(`event ${i}\n`);
   assert.deepEqual(s.notices, Array.from({ length: 10 }, (_, i) => `${s.head}:\nevent ${i + 1}`));
@@ -192,26 +193,48 @@ test("a budget of 10 notices refilled every 2 s; dropped ones are counted in the
   s.clock.advance(1); // one notice back
   await s.send("event 14\n");
   assert.equal(s.notices.at(-1), `${s.head}: (3 earlier notices suppressed by the rate limit)\nevent 14`);
-  await s.send("event 15\n"); // dropped: suppression starts again
+  await s.send("event 15\n");
+  s.clock.advance(4000); // two back
+  await s.send("event 16\n");
+  await s.send("event 17\n");
+  assert.deepEqual(s.notices.slice(-2), [`${s.head}: (1 earlier notices suppressed by the rate limit)\nevent 16`, `${s.head}:\nevent 17`]);
+});
+
+/** Sends a line every 100 ms for `ms`, until the monitor ends. Returns the clock time of the line it ended before, if it did. */
+async function flood(s, from, ms) {
+  for (let at = from; at < from + ms; at += 100) {
+    await s.send(`tick ${at}\n`);
+    if (s.over()) return at;
+    s.clock.advance(100);
+  }
+}
+
+test("a steady flood ends as flooded 30 s after its first drop, though a notice gets through every 2 s", async (t) => {
+  const s = await start(t);
   const pgid = await s.pgid();
-  s.clock.advance(29_999);
-  await s.send("event 16\n"); // the budget has refilled, so this ends the suppression
-  assert.equal(s.notices.at(-1), `${s.head}: (1 earlier notices suppressed by the rate limit)\nevent 16`);
-  for (let i = 17; i <= 26; i++) await s.send(`event ${i}\n`); // the other 14 refills, then drops
-  s.clock.advance(29_999);
-  assert.equal(s.notices.length, 12 + 10 - 1);
-  s.clock.advance(1);
-  assert.equal(await s.ended(), `${s.head} failed [flooded]: its notices were suppressed for 30s. Tighten the command's filter so it prints fewer lines. ${s.logs}`);
+  const at = await flood(s, 0, 40_000);
+  assert.equal(at, 31_000); // 10 notices, then the first drop at 1 s
+  assert.equal(await s.ended(), `${s.head} failed [flooded]: it printed faster than the rate limit for 30s. Tighten the command's filter so it prints fewer lines. ${s.logs}`);
+  assert.equal(s.notices.length, 10 + 15 + 1, "a refill every 2 s let 15 more through");
   await until(() => liveGroup(pgid).length === 0, "the command to be killed");
 });
 
-test("a delivered notice ends the suppression, even one that reports drops", async (t) => {
+test("a burst, then quiet, ends normally, even after a notice that reports drops", async (t) => {
   const s = await start(t);
   for (let i = 1; i <= 11; i++) await s.send(`event ${i}\n`);
   s.clock.advance(2000);
   await s.send("event 12\n");
   assert.equal(s.notices.at(-1), `${s.head}: (1 earlier notices suppressed by the rate limit)\nevent 12`);
-  s.clock.advance(60_000); // quiet
+  s.clock.advance(60_000);
+  s.exit(0);
+  assert.equal(await s.ended(), `${s.head} ended: its command exited with code 0. ${s.logs}`);
+});
+
+test("20 s of flood, a 3 s gap, then 20 s more never floods", async (t) => {
+  const s = await start(t);
+  assert.equal(await flood(s, 0, 20_000), undefined);
+  s.clock.advance(3000);
+  assert.equal(await flood(s, 23_000, 20_000), undefined);
   s.exit(0);
   assert.equal(await s.ended(), `${s.head} ended: its command exited with code 0. ${s.logs}`);
 });
