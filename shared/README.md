@@ -135,3 +135,12 @@ call once it ends or is backgrounded. The owner's detach (its session
 shutting down) drops its commands. The fleet extension binds Ctrl+B and calls
 `backgroundAll()`, which runs each `background` once and drops one that throws;
 `foregrounds()` counts them, and the hint shows while it is above 0.
+
+### `tui/`
+
+`editorFocused(tui)` says whether Pi's main editor has focus, so no picker,
+dialog or overlay owns the key. Pi has no handle to its editor, so it is found
+by structure: the only child of the root's fifth child, with Pi's submit
+handler on it (Pi 0.87.1, interactive-mode.js:661). Off Pi 0.87.x, or with
+anything else in that slot or in focus, it returns false. Used by
+`extensions/queue` and `extensions/fleet`.
