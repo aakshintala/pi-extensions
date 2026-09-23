@@ -211,6 +211,49 @@ test("a redeclare with a changed schema keeps listeners, re-validates the values
   assert.throws(() => old.set("maxConcurrent", 9), /between 1 and 8/);
 });
 
+test("a redeclare warns about an invalid value once, and again only when the value changes", () => {
+  const d = dir({ subagents: { maxConcurrent: 99 } });
+  const rig = createRigSettings(d);
+  const warnings = [];
+  const declare = () => {
+    rig.declare("subagents", DECL);
+    rig.notifyWarnings({ notify: (m) => warnings.push(m) });
+  };
+  declare();
+  declare();
+  declare();
+  assert.equal(warnings.length, 1);
+  writeFileSync(join(d, "rig.json"), JSON.stringify({ subagents: { maxConcurrent: 50 } }));
+  declare();
+  declare();
+  assert.equal(warnings.length, 2);
+  writeFileSync(join(d, "rig.json"), JSON.stringify({ subagents: { maxConcurrent: 4 } }));
+  declare();
+  writeFileSync(join(d, "rig.json"), JSON.stringify({ subagents: { maxConcurrent: 50 } }));
+  declare();
+  assert.equal(warnings.length, 3);
+  assert.ok(warnings.every((m) => /subagents\.maxConcurrent must be between 1 and 32/.test(m)));
+});
+
+test("a redeclare that cannot read the file keeps the current values and warns once", () => {
+  const d = dir();
+  const rig = createRigSettings(d);
+  const section = rig.declare("subagents", DECL);
+  section.set("maxConcurrent", 4);
+  const heard = [];
+  section.onChange((k, v) => heard.push([k, v]));
+  writeFileSync(join(d, "rig.json"), "{ broken");
+  const warnings = [];
+  for (let i = 0; i < 3; i++) {
+    rig.declare("subagents", DECL);
+    rig.notifyWarnings({ notify: (m) => warnings.push(m) });
+  }
+  assert.equal(section.get("maxConcurrent"), 4);
+  assert.deepEqual(heard, []);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /rig\.json is not valid JSON.*; keeping current values/);
+});
+
 test("sections lists declared sections with their settings for the menu", () => {
   const rig = createRigSettings(dir());
   rig.declare("subagents", DECL);

@@ -72,6 +72,7 @@ const put = (o: Record<string, unknown>, k: string, v: unknown) =>
 export function createRigSettings(agentDir: string): RigSettings {
   const path = join(agentDir, "rig.json");
   const pending = new Set<string>();
+  const warned = new Map<string, Set<string>>();
 
   // Throws on unparsable JSON; a missing or empty file is {}.
   function read(): Record<string, unknown> {
@@ -105,26 +106,33 @@ export function createRigSettings(agentDir: string): RigSettings {
       if (p) throw new Error(`rig setting ${name}.${s.key}: default ${p}`);
     }
 
+    const live = sections.get(name);
+    // Each warning with the value behind it; queued only if this section's last declare did not already warn it.
+    const found = new Map<string, string>();
+    const warn = (message: string, value?: unknown, id = message) => found.set(`${id}\0${JSON.stringify(value)}`, message);
     const values = new Map<string, Value>(settings.map((s) => [s.key, s.default]));
-    let file: Record<string, unknown> = {};
+    let raw: unknown;
     try {
-      file = read();
+      raw = own(read(), name);
     } catch (e) {
-      pending.add(`${(e as Error).message}; using defaults`);
+      // A redeclare keeps the current values rather than resetting them to defaults.
+      warn(`${(e as Error).message}; ${live ? "keeping current values" : "using defaults"}`, undefined, (e as Error).message);
+      raw = live && Object.fromEntries([...live.values].filter(([k, v]) => byKey.has(k) && !problem(byKey.get(k)!, v)));
     }
-    const raw = own(file, name);
     if (raw !== undefined && !isObject(raw)) {
-      pending.add(`${path}: section "${name}" must be an object; using defaults`);
+      warn(`${path}: section "${name}" must be an object; using defaults`, raw);
     } else if (raw) {
       for (const [key, value] of Object.entries(raw)) {
         const setting = byKey.get(key);
         const p = setting ? problem(setting, value) : "is not a known setting";
-        if (p) pending.add(`${path}: ${name}.${key} ${p}; ${setting ? `using default ${JSON.stringify(setting.default)}` : "ignored"}`);
+        if (p) warn(`${path}: ${name}.${key} ${p}; ${setting ? `using default ${JSON.stringify(setting.default)}` : "ignored"}`, value);
         else values.set(key, value as Value);
       }
     }
+    const before = warned.get(name);
+    for (const [id, message] of found) if (!before?.has(id)) pending.add(message);
+    warned.set(name, new Set(found.keys()));
 
-    const live = sections.get(name);
     if (live) {
       // Redeclared (/reload or another session): same handle, new schema and values, listeners kept.
       const old = live.values;
