@@ -16,7 +16,9 @@ Spec: #30. Built in #48, #49 (guards and crash clean-up) and #51
   - `timeout` is a hard limit in seconds that kills the command, also after it
     became a job. The job then fails as timed out.
   - Ctrl+B moves every running foreground command to the background. Each
-    call returns its job ID and log path.
+    call returns its job ID and log path. While a command can be backgrounded,
+    its call shows a dim `ctrl+b to run in background` line (#139), unless
+    Ctrl+B still moves the cursor left.
   - A steering message submitted while a command runs (through the queue)
     moves that session's foreground commands to the background too, so the
     turn ends and the message is delivered as steering, without an abort.

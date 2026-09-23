@@ -21,9 +21,10 @@ export type CallStatus = "pending" | "done" | "error";
 /** A component whose lines are computed for the width it is given. */
 export const lines = (render: (width: number) => string[]): Component => ({ render, invalidate() {} });
 
-/** `⏺ Title(arg)` on one line, the bullet coloured by status. */
-export function callLine(theme: Theme, status: CallStatus, title: string, arg: string, width: number): string {
-  const bullet = theme.fg(status === "error" ? "error" : status === "done" ? "success" : "muted", CALL);
+/** `⏺ Title(arg)` on one line, the bullet coloured by status, or a spinner frame when `frame` is given. */
+export function callLine(theme: Theme, status: CallStatus, title: string, arg: string, width: number, frame?: number): string {
+  const mark = frame === undefined ? CALL : SPINNER[frame % SPINNER.length];
+  const bullet = theme.fg(status === "error" ? "error" : status === "done" ? "success" : "muted", mark);
   const text = `${PAD}${bullet} ${theme.fg("toolTitle", theme.bold(title))}${arg ? theme.fg("muted", `(${arg})`) : ""}`;
   return truncateToWidth(text, width);
 }
@@ -129,19 +130,23 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
       ];
       const c = groups?.describe(context.toolCallId, style.summary, context.invalidate, failure);
       const g = c && groups!.group(context.toolCallId);
+      // A running call with a hint (#139) spins and shows the hint under its call line.
+      const hint = HINTS.get(context.toolCallId);
       const own = (w: number) => {
         const state = c ? c.state() : context.isError ? "error" : context.isPartial ? "pending" : "done";
         const status: CallStatus = state === "cancelled" ? "error" : state;
-        return callLine(theme, status, style.title, style.arg(args ?? ({} as Args), context.cwd), w);
+        const line = callLine(theme, status, style.title, style.arg(args ?? ({} as Args), context.cwd), w, hint ? groups?.frame : undefined);
+        return hint ? [line, ...resultLines(theme, theme.fg("dim", hint), [], false, w)] : [line];
       };
-      if (!g) return lines((w) => [own(w)]);
+      if (!g) return lines(own);
       const open = context.expanded || g.open;
       const summary = !open && g.calls[0] === c;
-      const shown = open || shownAlone(g, c!);
+      const shown = open || shownAlone(g, c!) || !!hint;
+      // A hinted call has no result yet to draw the folded failures after.
       return clickable(g, lines((w) => [
         ...(summary ? [summaryLine(theme, g, w)] : []),
-        ...(shown ? [own(w)] : []),
-        ...(summary && !shown ? foldedLines(g, w) : []),
+        ...(shown ? own(w) : []),
+        ...(summary && (!shown || hint) ? foldedLines(g, w) : []),
       ]));
     },
     renderResult(result: Result, options: { expanded: boolean; isPartial: boolean }, theme: Theme, context: ToolRenderContext): Component {
@@ -286,6 +291,24 @@ const unindex = (id: string, groups: ToolGroups) => {
   else INDEX.delete(id);
 };
 
+// Call id → the hint its running call shows (#139). Process-wide, like INDEX: the tool
+// that sets a hint and the session's groups can come from different copies of this module.
+const HINTS: Map<string, string> = ((globalThis as any)[Symbol.for("pi-rig.tool-hints")] ??= new Map());
+
+/**
+ * Shows running call `id` outside its group, with a spinner and a dim `text` line under
+ * its call line, until the returned function is called; it then folds back in.
+ */
+export function showHint(id: string, text: string): () => void {
+  HINTS.set(id, text);
+  const redraw = () => INDEX.get(id)?.forEach((g) => g.redraw(id));
+  redraw();
+  return () => {
+    HINTS.delete(id);
+    redraw();
+  };
+}
+
 /** Messages Pi draws in the chat, besides assistant messages (a custom one when `display` is set). */
 const SPLITS = new Set(["user", "bashExecution", "compactionSummary", "branchSummary"]);
 
@@ -425,6 +448,12 @@ export class ToolGroups {
         if (g && g.calls[0].id === id && g.calls.some((c) => c.state() === "pending")) g.calls[0].invalidate?.();
       }
     }
+    for (const id of HINTS.keys()) this.redraw(id);
+  }
+
+  /** Redraws one call. */
+  redraw(id: string): void {
+    this.calls.get(id)?.invalidate?.();
   }
 
   /** Called by a renderer: records the call's summary, redraw hook and failure rows. */

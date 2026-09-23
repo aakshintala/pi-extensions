@@ -90,6 +90,10 @@ summary: { verb: "updated", many: "todos" }                                     
   show, drawn by the first call right under the summary, so a group has no blank
   rows. Calls with images show themselves. Ctrl+O (`context.expanded`) or a click
   on the group shows every call.
+- `showHint(toolCallId, text)` (#139) shows a running call outside its group, with
+  a spinner and a dim `⎿ text` line, until the function it returns is called; the
+  call then folds back in. `jobs` uses it for the Ctrl+B hint. Without
+  `extensions/tool-display` the hint shows from the call's next output.
 - What splits a run:
   - a tool without `summary` (such as `ask_user`), which is never grouped;
   - assistant text: Pi draws a message's text above its calls, so any text in a
