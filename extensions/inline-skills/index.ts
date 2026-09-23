@@ -16,10 +16,13 @@ import { Container } from "@earendil-works/pi-tui";
 // Same type as upstream, so skills loaded by it before the port still count as loaded.
 export const MESSAGE_TYPE = "inline-skill";
 const MAX_ITEMS = 30;
-// A `/name` token in a submitted prompt: after a boundary, not followed by `:` or `/`.
-const TOKEN = /(^|[\s([{,])\/([a-z0-9][a-z0-9-]{0,63})(?![a-z0-9-]|[:/])/gi;
-// The `/word` being typed at the cursor; a token with a second `/` never matches.
-const TYPING = /(?:^|\s)\/([\w-]*)$/;
+// A `/name` token starts the text or follows whitespace or one of `([{,`, both when
+// a message is sent and while one is typed; a token with a second `/` never matches.
+const BOUNDARY = String.raw`(?:^|[\s([{,])`;
+// When sent: not followed by `:` or `/`.
+const TOKEN = new RegExp(String.raw`${BOUNDARY}\/([a-z0-9][a-z0-9-]{0,63})(?![a-z0-9-]|[:/])`, "gi");
+// While typed: the `/word` before the cursor.
+const TYPING = new RegExp(String.raw`${BOUNDARY}\/([a-z0-9-]*)$`, "i");
 
 export type Skill = { name: string; description?: string; path: string };
 type Item = { value: string; label: string; description?: string };
@@ -39,7 +42,7 @@ export function namedSkills(text: string, skills: () => Skill[], loaded: Set<str
   const byName = new Map(skills().map((s) => [s.name.toLowerCase(), s]));
   const out = new Map<string, Skill>();
   for (const m of text.matchAll(TOKEN)) {
-    const skill = byName.get(m[2].toLowerCase());
+    const skill = byName.get(m[1].toLowerCase());
     // A registered command wins at the start of the prompt.
     if (m.index === 0 && start && commands().includes(start)) continue;
     if (skill && !loaded.has(skill.name)) out.set(skill.name, skill);
@@ -123,7 +126,7 @@ function midLineQuery(lines: Lines, line: number, col: number): string | undefin
   const before = (lines[line] ?? "").slice(0, col);
   const m = TYPING.exec(before);
   if (!m) return undefined;
-  return line > 0 || /\S/.test(before.slice(0, m.index)) ? m[1] : undefined;
+  return line > 0 || /\S/.test(before.slice(0, before.length - m[1].length - 1)) ? m[1] : undefined;
 }
 
 export function skillProvider(skills: () => Skill[], current: any) {
@@ -185,7 +188,7 @@ export function patchEditor(tui: any, version = VERSION): boolean {
   const handleInput = e.handleInput;
   e.handleInput = function (data: string) {
     handleInput.call(this, data);
-    if (e.isShowingAutocomplete() || !/^[\w-]$/.test(data)) return;
+    if (e.isShowingAutocomplete() || !/^[a-z0-9-]$/i.test(data)) return;
     const { lines, cursorLine, cursorCol } = e.state;
     if ((midLineQuery(lines, cursorLine, cursorCol)?.length ?? 0) >= 2) e.tryTriggerAutocomplete();
   };

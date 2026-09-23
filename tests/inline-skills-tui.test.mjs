@@ -65,6 +65,12 @@ test("Tab opens the list at any point; start-of-message / and paths stay Pi's", 
   tui.keys("Tab");
   await tui.waitForScreen(idle("try /markup"));
   tui.keys("C-u");
+  tui.type("use (/g");
+  tui.keys("Tab");
+  await tui.waitForScreen(idle("use (/g", GRI));
+  tui.keys("Escape");
+  await tui.waitForScreen(idle("use (/g"));
+  tui.keys("C-u");
   tui.type("try /zzq");
   tui.keys("Tab");
   await tui.waitForScreen(idle("try /zzq"));

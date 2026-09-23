@@ -13,6 +13,7 @@ const names = (list) => list.map((s) => s.name);
 test("token detection: boundaries, case, second slash, colon, dedup and loaded", () => {
   const found = (text, loaded = [], commands = []) => names(namedSkills(text, () => SKILLS, new Set(loaded), () => commands));
   assert.deepEqual(found("use /tdd, (/grilling) and /TDD"), ["tdd", "grilling"]);
+  assert.deepEqual(found("x,/tdd [/grilling"), ["tdd", "grilling"]);
   assert.deepEqual(found("/tdd first"), ["tdd"]);
   assert.deepEqual(found("a/tdd /usr/tdd /tdd/x /tdd:x /tdd-x /nope"), []);
   assert.deepEqual(found("/tdd and /grilling", ["tdd"]), ["grilling"]);
@@ -63,6 +64,9 @@ test("provider owns a mid-message /word, prefix matches first", async () => {
   assert.deepEqual((await get(p, "x /")).items.length, 4, "a bare / lists every skill");
   assert.deepEqual((await get(p, "", ["first line", "/td"])).items.map((i) => i.label), ["tdd"], "a later line is mid-message");
   assert.equal(await get(p, "try /zzq"), null, "no match: no list, and no file completion");
+  for (const text of ["use (/td", "a,/td", "(/td", "[/td", "{/td"]) {
+    assert.deepEqual((await get(p, text)).items.map((i) => i.label), ["tdd"], `${text}: same boundaries as a sent message`);
+  }
   assert.deepEqual(calls, []);
   assert.equal(p.triggerCharacters[0], "#");
   assert.equal(p.shouldTriggerFileCompletion(["x"], 0, 1), false);
@@ -123,6 +127,8 @@ test("the editor patch opens the list on a mid-message / plus two word character
   assert.equal(type("please /g"), 0);
   assert.equal(type("r"), 1);
   assert.equal(type("i"), 1);
+  assert.equal(type(" (/td"), 1, "after (");
+  assert.equal(type(" ,/td"), 1, "after ,");
   assert.equal(type(" see /us"), 1);
   assert.equal(type("r/lo"), 1, "only /usr, before the second slash");
 });
