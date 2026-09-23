@@ -29,7 +29,7 @@ import { rigSettings } from "../../shared/settings/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
 import { toolRenderers, resultText } from "../../shared/tool-display/index.ts";
 import { rememberTools, transcript, type Source } from "./transcript.ts";
-import { createWorktree, reopenWorktree, settleWorktree, type Worktree } from "./worktree.ts";
+import { checkWorktree, createWorktree, reopenWorktree, settleWorktree, type Worktree } from "./worktree.ts";
 
 const MARKER = "rig.subagent";
 /** Tokens and cost of a finished child, saved in its parent's session: the parent's next notice and `Session total:` count them. */
@@ -153,7 +153,7 @@ const params = (properties: Record<string, unknown>, optional: string[] = []) =>
 function spawnParams(models?: string[]) {
   return params({
     description: str("3-5 word label"),
-    prompt: str("The whole task; the child has only this"),
+    prompt: str("The whole task; unless forked, the child has only this"),
     model: models?.length ? { type: "string", enum: models } : str("provider/id"),
     thinking: { type: "string", enum: THINKING },
     isolation: { type: "string", enum: ["none", "worktree"], description: "worktree: its own git worktree on a new branch, kept if it leaves changes" },
@@ -473,6 +473,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  /** Where worktrees are made, one per agent id. */
+  const worktrees = () => join(getAgentDir(), "rig-worktrees");
+
   /** Where this session's children are saved: a folder named after it, beside its own file. */
   const childDir = (c: ExtensionContext) =>
     join(c.sessionManager.getSessionDir() || join(getAgentDir(), "sessions"), c.sessionManager.getSessionId());
@@ -491,7 +494,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** A finished child of this session, to resume: still in memory, or reopened from its session file. */
-  function restore(id: string, c: ExtensionContext): Agent | undefined {
+  async function restore(id: string, c: ExtensionContext): Promise<Agent | undefined> {
     // Still in memory (its transcript may be open): the same agent. The owner check keeps it under the
     // session that spawned it; `node` is that session's node, new if the session was reopened.
     const held = remembered.get(id)?.deref();
@@ -502,9 +505,11 @@ export default function (pi: ExtensionAPI) {
     const context = buildSessionContext(found.entries.filter((e) => e.type !== "session"));
     const model = context.model && c.modelRegistry.find(context.model.provider, context.model.modelId);
     if (!model) return undefined;
+    // Checked like the model, before the file is opened: the saved entry must name the worktree the spawn made.
+    const kept = found.marker.data.worktree;
+    const worktree = kept === undefined ? undefined : await checkWorktree(kept, id, worktrees(), c.cwd);
     const manager = SessionManager.open(found.file); // the resume writes to it
     const owner = c.sessionManager.getSessionId();
-    const worktree: Worktree | undefined = found.marker.data.worktree;
     const fields = { id, owner, depth: found.marker.data.depth ?? node.depth + 1, label: manager.getSessionName() ?? id, model, thinking: context.thinkingLevel, state: "done" as const };
     return agent({ ...fields, prompt: "", cwd: worktree?.cwd ?? c.cwd, manager, worktree });
   }
@@ -518,10 +523,10 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** Only the session that spawned a child can message it. */
-  const find = (id: string, c: ExtensionContext) => {
+  const find = async (id: string, c: ExtensionContext) => {
     const owner = c.sessionManager.getSessionId();
     const a = [...node.children].find((x) => x.id === id);
-    const mine = a && a.owner === owner ? a : !a ? restore(id, c) : undefined;
+    const mine = a && a.owner === owner ? a : !a ? await restore(id, c) : undefined;
     if (!mine) throw new Error(`No subagent ${id} of yours. Use an id that your subagent_spawn returned.`);
     return mine;
   };
@@ -535,7 +540,7 @@ export default function (pi: ExtensionAPI) {
       "its full result arrives later as a notice, so end your turn to wait. " +
       "Pick the cheapest model and thinking level that can do the task.",
     parameters: spawnParams(models),
-    async execute(_id: string, p: { description: string; prompt: string; model: string; thinking: string; isolation: string; fork?: boolean }, _signal: unknown, _update: unknown, c: ExtensionContext) {
+    async execute(_id: string, p: { description: string; prompt: string; model: string; thinking: string; isolation: string; fork?: boolean }, signal: AbortSignal | undefined, _update: unknown, c: ExtensionContext) {
       // enabledModels when set, else every model Pi knows; a model without credentials fails in the child.
       const allowed = c.scopedModels.length ? c.scopedModels.map((s) => s.model) : c.modelRegistry.getAll();
       const model = allowed.find((m) => `${m.provider}/${m.id}` === p.model);
@@ -547,7 +552,7 @@ export default function (pi: ExtensionAPI) {
       admit();
       // The child's session id is its agent id, so a later process can find its file.
       const id = randomUUID().slice(0, 8);
-      const worktree = p.isolation === "worktree" ? await createWorktree(c.cwd, join(getAgentDir(), "rig-worktrees"), id) : undefined;
+      const worktree = p.isolation === "worktree" ? await createWorktree(c.cwd, worktrees(), id, signal) : undefined;
       const cwd = worktree?.cwd ?? c.cwd;
       const manager = SessionManager.create(cwd, childDir(c), { id, parentSession: c.sessionManager.getSessionFile() });
       manager.appendCustomEntry(MARKER, { agentId: id, parentSessionId: owner, depth: node.depth + 1, ...(worktree && { worktree }) });
@@ -574,7 +579,7 @@ export default function (pi: ExtensionAPI) {
       "a queued one gets it added to its prompt. Answer NEEDS_CONTEXT here.",
     parameters: params({ id: str("Subagent id"), message: str("What to tell it") }),
     async execute(_id: string, p: { id: string; message: string }, _signal: unknown, _update: unknown, c: ExtensionContext) {
-      const a = find(p.id, c);
+      const a = await find(p.id, c);
       const was = a.state;
       await message(a, p.message);
       return reply(`Subagent ${a.id} ${was === "done" ? (a.state === "queued" ? "queued to resume" : "resumed") : was === "queued" ? "prompt extended" : "steered"}.`, a.id);
@@ -640,5 +645,6 @@ export default function (pi: ExtensionAPI) {
       a.session = undefined;
     }
     for (const a of all) if (!a.abandoned) node.children.delete(a);
+    top.defs.clear();
   });
 }

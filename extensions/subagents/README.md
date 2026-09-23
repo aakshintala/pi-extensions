@@ -116,17 +116,28 @@ With `isolation: "worktree"` the child works in its own git worktree:
   parent's cwd, on the new branch `subagent/<id>`, at
   `<agent dir>/rig-worktrees/<id>`. The child's cwd is the parent's cwd mapped
   into it. Nothing is committed for the child.
+- Git runs through `shared/git`: the repository's hooks, fsmonitor and its own
+  clean, smudge and process filters never run. Each git is stopped after 2
+  minutes, and a spawn's git stops when its tool call is aborted; the spawn
+  is then refused.
 - Outside a git repository, or in one with no commit, the spawn is refused
   with an error, and nothing is created.
 - The spawn result and each notice give the path and branch. When the child
   finishes, its notice also says what happened to the worktree:
-  - removed, with nothing uncommitted and no commit missing from every remote.
-    The branch is deleted too when it never moved.
-  - kept, with uncommitted changes (untracked files count) or unpushed commits.
-    A worktree is never removed with `--force`.
+  - removed, with nothing uncommitted, no untracked or ignored file (such as
+    `.env`) and no commit missing from every remote. The branch is deleted
+    too, with `git branch -d`, when it never moved; a moved branch is kept.
+  - kept, with uncommitted changes, untracked or ignored files, or unpushed
+    commits, or when git fails. A worktree is never removed with `--force`.
 - A resume runs in the same worktree, recreated at the same path on its branch
-  if it was removed. The worktree is saved in the child's `rig.subagent` entry,
-  so this holds after a restart.
+  if it was removed (after `git worktree prune`, in case its directory was
+  deleted behind git's back). If anything else is at the path, such as a plain
+  directory, a file or a symlink, the run fails and leaves it alone.
+- The worktree is saved in the child's `rig.subagent` entry, so a resume after
+  a restart finds it. That entry is checked before the session file is opened:
+  the path must be `<agent dir>/rig-worktrees/<id>`, the branch
+  `subagent/<id>`, the repository the one holding the parent's cwd, and the
+  child's cwd inside the worktree. Anything else refuses the resume.
 - A worktree child's own children work in its worktree by default.
 - A worktree child stopped while queued has its worktree settled the same way.
   One given up on at the parent's shutdown keeps its worktree.
