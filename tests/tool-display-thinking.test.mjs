@@ -267,7 +267,7 @@ async function child(t, parent, extensions) {
   });
   await resourceLoader.reload();
   const { session } = await createAgentSession({
-    cwd: parent.cwd, agentDir: parent.agentDir, model: parent.faux.getModel(), resourceLoader, settingsManager,
+    cwd: parent.cwd, agentDir: parent.agentDir, model: parent.faux.getModel(), resourceLoader, settingsManager, modelRuntime: parent.session.modelRuntime,
     sessionManager: SessionManager.inMemory(parent.cwd),
   });
   const stop = async () => {

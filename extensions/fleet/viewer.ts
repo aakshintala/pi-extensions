@@ -213,7 +213,9 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
         body = logView(source.lines);
       } else {
         try {
-          body = item.view.transcript() as Component;
+          const transcript = item.view.transcript(t, ctx.ui) as Component & { dispose?(): void };
+          body = transcript;
+          stopWatch = () => transcript.dispose?.(); // a transcript's dispose, if it has one, runs on close
         } catch (e) {
           body = new Text(ctx.ui.theme.fg("error", ` transcript failed: ${oneLine((e as Error)?.message ?? e)}`), 0, 0);
         }
@@ -329,7 +331,7 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
         echo(new Text(ctx.ui.theme.fg("warning", ` ${oneLine(item.kind)} ${oneLine(item.label)} takes no steering. Esc returns to the main chat.`), 0, 0));
         return;
       }
-      echo(new UserMessageComponent(text, getMarkdownTheme()));
+      if (!("showsSteers" in item.view && item.view.showsSteers)) echo(new UserMessageComponent(text, getMarkdownTheme()));
       attempt("steer", () => item.steer!(text));
     },
   };

@@ -145,3 +145,17 @@ test("an overlay that fails to open leaves nothing open and no watcher", async (
   assert.equal(registry.viewing, undefined);
   assert.equal(watchers(), 0);
 });
+
+test("closing the viewer disposes the transcript it showed", (t) => {
+  const registry = fleet();
+  let disposed = 0;
+  const body = { render: () => [], invalidate() {}, dispose: () => disposed++ };
+  registry.register({ id: "u2", owner: "unit", kind: "agent", label: "scout", activity: () => "", view: { transcript: () => body }, stop() {} });
+  t.after(() => registry.finish("u2", "completed", "", null));
+  const ctx = { ui: { theme: { fg: (_c, s) => s }, custom: () => new Promise(() => {}) } };
+  const viewer = createViewer(ctx, () => ({ children: [], requestRender() {} }));
+  viewer.open(registry.get("u2"));
+  assert.equal(disposed, 0);
+  viewer.close();
+  assert.equal(disposed, 1);
+});

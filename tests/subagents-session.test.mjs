@@ -20,6 +20,7 @@ const PRICE = Symbol.for("pi-rig.test.kidPrice");
 const JOB_STARTED = Symbol.for("pi-rig.test.jobStarted");
 const SUBAGENT_TOOLS = ["subagent_spawn", "subagent_message", "subagent_stop"];
 const JOB_STOPPED = Symbol.for("pi-rig.test.jobStopped");
+const RUNTIME = Symbol.for("pi-rig.subagents.modelRuntime");
 
 const textOf = (m) => (typeof m.content === "string" ? m.content : m.content.map((c) => c.text ?? `call ${c.name}`).join(""));
 const lastText = (context) => textOf(context.messages.at(-1));
@@ -48,6 +49,7 @@ async function start(t, replies, kid, { tools, before } = {}) {
   let ctx;
   const capture = (pi) => pi.on("session_start", (_event, c) => (ctx = c));
   const s = await scriptedSession(t, { replies, extensions: [...EXTENSIONS, capture], tools });
+  globalThis[RUNTIME] = s.session.modelRuntime; // children share it, so none writes auth.json (#120)
   // Children discover their extensions from the agent dir, like a real install.
   writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ extensions: EXTENSIONS }));
   await before?.(s.session);
@@ -60,6 +62,7 @@ async function start(t, replies, kid, { tools, before } = {}) {
     for (const item of registry.items()) registry.finish(item.id, "stopped", "test over", null);
     registry.prune();
     delete globalThis[KID];
+    delete globalThis[RUNTIME];
     delete globalThis[JOB_STOPPED];
     delete globalThis[JOB_STARTED];
     delete globalThis[PRICE];
@@ -932,4 +935,38 @@ test("a grandchild resumed after its parent finished counts in the parent's next
   assert.equal(usage.length, 2); // G's first run, then its resumed one
   assert.equal(tokens(run), own + usage[1]);
   assert.equal(cost(run), money(tokens(run) * 1e-6));
+});
+
+test("a transcript opened on a finished agent follows the resume its parent sends", { timeout: 20_000 }, async (t) => {
+  const { initTheme } = await import("@earendil-works/pi-coding-agent");
+  const THEME = Symbol.for("@earendil-works/pi-coding-agent:theme");
+  const previous = globalThis[THEME];
+  t.after(() => (globalThis[THEME] = previous));
+  initTheme("dark", false);
+  const theme = globalThis[THEME];
+  const plain = (lines) => lines.map((l) => l.replace(/\x1b\][^\x07]*\x07/g, "").replace(/\x1b\[[0-9;]*m/g, "").trimEnd()).filter(Boolean);
+  let id;
+  let view;
+  const { session } = await start(
+    t,
+    [
+      calls(spawn("scout")),
+      (context) => {
+        id = /^Subagent (\w+) started\.$/.exec(lastText(context))[1];
+        return says("waiting")();
+      },
+      // The child's notice: it is finished and dropped from memory. Open it, then resume it.
+      () => {
+        view = fleet().get(id).view.transcript({ requestRender() {} }, { getToolsExpanded: () => false, theme });
+        return calls(["subagent_message", { id, message: "and the dates" }])();
+      },
+      says("waiting"),
+      says("thanks"),
+    ],
+    (context) => fauxAssistantMessage(fauxText(context.messages.filter((m) => m.role === "user").length > 1 ? "no dates\nSTATUS: DONE" : "found notes\nSTATUS: DONE")),
+  );
+  await session.prompt("go");
+  const task = "End your final message with one line: STATUS: DONE, STATUS: DONE_WITH_CONCERNS, STATUS: BLOCKED, STATUS: NEEDS_CONTEXT.";
+  assert.deepEqual(plain(view.render(200)), [" scout", ` ${task}`, " found notes", " STATUS: DONE", " and the dates", ` ${task}`, " no dates", " STATUS: DONE"]);
+  view.dispose();
 });
