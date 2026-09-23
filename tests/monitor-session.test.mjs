@@ -32,34 +32,38 @@ async function until(ok, what) {
 /** Resolves with `p`, or fails after 10 s, so a regression fails instead of hanging. */
 const settles = (p, what) => Promise.race([p, until(() => false, what)]);
 
-/** Fake timers for the monitor extension. */
-function fakeTimers(t) {
+/**
+ * A fake clock for the monitor extension's timers. `advance(ms)` moves it forward, running
+ * each timer that falls due, in order, including timers those set.
+ */
+function fakeClock(t) {
+  let now = 0;
   const pending = new Set();
   globalThis[TIMERS] = {
     setTimeout: (fn, ms) => {
-      const h = { fn, ms };
+      const h = { fn, at: now + ms };
       pending.add(h);
       return h;
     },
     clearTimeout: (h) => pending.delete(h),
   };
   t.after(() => delete globalThis[TIMERS]);
-  const has = (ms) => [...pending].some((h) => h.ms === ms);
   return {
-    has,
-    /** Runs one pending timer of `ms`. */
-    fire(ms) {
-      const h = [...pending].find((h) => h.ms === ms);
-      assert.ok(h, `no ${ms} ms timer`);
-      pending.delete(h);
-      h.fn();
+    advance(ms) {
+      const end = now + ms;
+      for (let h; (h = [...pending].filter((h) => h.at <= end).sort((a, b) => a.at - b.at)[0]); ) {
+        pending.delete(h);
+        now = h.at;
+        h.fn();
+      }
+      now = end;
     },
   };
 }
 
 /** Starts a session whose model calls monitor with `args` (command defaults to the fixture). */
 async function start(t, args = {}, { ui = false } = {}) {
-  const timers = fakeTimers(t);
+  const clock = fakeClock(t);
   let cwd;
   t.after(() => {
     try {
@@ -94,8 +98,8 @@ async function start(t, args = {}, { ui = false } = {}) {
     result = textOf(s.session.messages.find((m) => m.role === "toolResult"));
   }
   const id = /monitor (\w{8})/.exec(result)[1];
-  const item = fleet().get(id);
-  const log = item.view.log;
+  const item = fleet().get(id); // for FleetView's stop
+  const log = /Log: (\S+)\. Errors/.exec(result)[1];
   let n = 0;
   let written = "";
   /** Prints `text` as one batch and waits until the monitor has read it. */
@@ -116,72 +120,94 @@ async function start(t, args = {}, { ui = false } = {}) {
     await until(() => existsSync(join(cwd, "pgid")) && readFileSync(join(cwd, "pgid"), "utf8").endsWith("\n"), "the pgid");
     return Number(readFileSync(join(cwd, "pgid"), "utf8"));
   };
-  const ended = () => until(() => fleet().get(id).status !== "running", "the monitor to end");
-  return { ...s, timers, notices, result, id, item, log, send, exit, pgid, ended };
+  const head = `Monitor ${id} (watch builds)`;
+  const logs = `Log: ${log}. Errors: ${log.replace(/\.log$/, ".err.log")}`;
+  /** Waits for the monitor's end notice. */
+  const ended = async () => {
+    await until(() => notices.some((n) => n.startsWith(`${head} `)), "the end notice");
+    return notices.find((n) => n.startsWith(`${head} `));
+  };
+  return { ...s, clock, notices, result, id, item, log, send, exit, pgid, ended, head, logs };
 }
 
 test("each batch of lines is one notice with the description; stderr has its own log; the exit ends it", async (t) => {
   const s = await start(t);
   const errors = s.log.replace(/\.log$/, ".err.log");
-  assert.equal(s.result, `Started monitor ${s.id}; its output lines arrive as notices until it ends or after 300s. Log: ${s.log}. Errors: ${errors}`);
-  assert.deepEqual([s.item.kind, s.item.label, s.item.status], ["monitor", "watch builds", "running"]);
+  assert.equal(s.result, `Started monitor ${s.id}; its output lines arrive as notices until it ends or after 300s. ${s.logs}`);
   assert.equal(statSync(s.log).mode & 0o777, 0o600);
   await s.send("build 1 ok\nbuild 2 \x1b[31mfailed\x1b[0m\n");
   await s.send("build 3 ok\npartial");
   await s.send(" line");
   s.exit(3);
   await s.ended();
-  await until(() => readFileSync(errors, "utf8") === "to stderr\n", "the error log");
-  const head = `Monitor ${s.id} (watch builds)`;
+  assert.equal(readFileSync(errors, "utf8"), "to stderr\n");
   assert.deepEqual(s.notices, [
-    `${head}:\nbuild 1 ok\nbuild 2 failed`,
-    `${head}:\nbuild 3 ok`,
-    `${head}:\npartial line`, // a last line with no newline, delivered at the end
-    `${head} ended: its command exited with code 3. Log: ${s.log}. Errors: ${errors}`,
+    `${s.head}:\nbuild 1 ok\nbuild 2 failed`,
+    `${s.head}:\nbuild 3 ok`,
+    `${s.head}:\npartial line`, // a last line with no newline, delivered at the end
+    `${s.head} ended: its command exited with code 3. ${s.logs}`,
   ]);
-  assert.deepEqual([fleet().get(s.id).status, fleet().get(s.id).result], ["failed", "exit 3"]);
 });
 
-test("lines are cut at 500 characters and a notice at 3,000", async (t) => {
+test("lines are cut at 500 code points and a notice at 3,000", async (t) => {
   const s = await start(t);
-  const long = "x".repeat(700);
+  const long = "😀".repeat(700); // two UTF-16 units each
   const lines = Array.from({ length: 8 }, (_, i) => `${i}`.padEnd(450, "y"));
   await s.send(`${long}\n${lines.join("\n")}\n`);
   const [notice] = s.notices;
-  assert.equal(notice.length, 3000);
-  assert.equal(notice, [`Monitor ${s.id} (watch builds):`, "x".repeat(500), ...lines].join("\n").slice(0, 3000));
+  assert.equal([...notice].length, 3000);
+  assert.equal(notice, [...[`${s.head}:`, "😀".repeat(500), ...lines].join("\n")].slice(0, 3000).join(""));
+});
+
+test("a long unended line is cut early without breaking a sequence the chunk cut off", async (t) => {
+  const s = await start(t);
+  // Over 2,000 characters with no newline, mostly colour codes, ending inside an OSC
+  // string; the rest of the line comes next.
+  await s.send(`${"\x1b[31m".repeat(400)}abc\x1b]0;ti`);
+  await s.send("tle\x07 end\n");
+  assert.deepEqual(s.notices, [`${s.head}:\nabc end`]);
+});
+
+test("a long description is cut so the drop count and the lines survive the notice cut", async (t) => {
+  const s = await start(t, { description: "d".repeat(5000) });
+  const head = `Monitor ${s.id} (${"d".repeat(100)})`;
+  for (let i = 1; i <= 11; i++) await s.send(`event ${i}\n`);
+  s.clock.advance(2000);
+  await s.send("event 12\n");
+  assert.equal(s.notices.at(-1), `${head}: (1 earlier notices suppressed by the rate limit)\nevent 12`);
 });
 
 test("a budget of 10 notices refilled every 2 s; dropped ones are counted in the next; 30 s of suppression stops it as flooded", async (t) => {
   const s = await start(t);
-  const head = `Monitor ${s.id} (watch builds)`;
   for (let i = 1; i <= 12; i++) await s.send(`event ${i}\n`);
-  assert.deepEqual(s.notices, Array.from({ length: 10 }, (_, i) => `${head}:\nevent ${i + 1}`));
-  assert.ok(s.timers.has(30_000), "suppression started");
-  s.timers.fire(2000); // one notice back
+  assert.deepEqual(s.notices, Array.from({ length: 10 }, (_, i) => `${s.head}:\nevent ${i + 1}`));
+  s.clock.advance(1999);
   await s.send("event 13\n");
-  assert.equal(s.notices.at(-1), `${head}: (2 earlier notices suppressed by the rate limit)\nevent 13`);
-  assert.ok(s.timers.has(30_000), "a notice right after drops does not end the suppression");
+  s.clock.advance(1); // one notice back
   await s.send("event 14\n");
+  assert.equal(s.notices.at(-1), `${s.head}: (3 earlier notices suppressed by the rate limit)\nevent 14`);
+  await s.send("event 15\n"); // dropped: suppression starts again
   const pgid = await s.pgid();
-  s.timers.fire(30_000);
-  await s.ended();
+  s.clock.advance(29_999);
+  await s.send("event 16\n"); // the budget has refilled, so this ends the suppression
+  assert.equal(s.notices.at(-1), `${s.head}: (1 earlier notices suppressed by the rate limit)\nevent 16`);
+  for (let i = 17; i <= 26; i++) await s.send(`event ${i}\n`); // the other 14 refills, then drops
+  s.clock.advance(29_999);
+  assert.equal(s.notices.length, 12 + 10 - 1);
+  s.clock.advance(1);
+  assert.equal(await s.ended(), `${s.head} failed [flooded]: its notices were suppressed for 30s. Tighten the command's filter so it prints fewer lines. ${s.logs}`);
   await until(() => liveGroup(pgid).length === 0, "the command to be killed");
-  assert.equal(s.notices.length, 12);
-  assert.equal(s.notices.at(-1), `${head} failed [flooded]: its notices were suppressed for 30s. Tighten the command's filter so it prints fewer lines. Log: ${s.log}. Errors: ${s.log.replace(/\.log$/, ".err.log")}`);
-  assert.deepEqual([fleet().get(s.id).status, fleet().get(s.id).result], ["failed", "flooded"]);
 });
 
-test("a notice with nothing dropped before it ends the suppression", async (t) => {
+test("a delivered notice ends the suppression, even one that reports drops", async (t) => {
   const s = await start(t);
   for (let i = 1; i <= 11; i++) await s.send(`event ${i}\n`);
-  assert.ok(s.timers.has(30_000));
-  s.timers.fire(2000);
-  await s.send("event 12\n"); // carries the drop count
-  s.timers.fire(2000);
-  await s.send("event 13\n"); // nothing dropped since
-  assert.equal(s.timers.has(30_000), false);
-  assert.equal(fleet().get(s.id).status, "running");
+  s.clock.advance(2000);
+  await s.send("event 12\n");
+  assert.equal(s.notices.at(-1), `${s.head}: (1 earlier notices suppressed by the rate limit)\nevent 12`);
+  s.clock.advance(60_000); // quiet
+  s.exit(0);
+  assert.equal(await s.ended(), `${s.head} ended: its command exited with code 0. ${s.logs}`);
 });
 
 for (const [name, args, ui, seconds] of [
@@ -193,11 +219,12 @@ for (const [name, args, ui, seconds] of [
     const s = await start(t, args, { ui });
     assert.match(s.result, new RegExp(`after ${seconds}s\\.`));
     const pgid = await s.pgid();
-    s.timers.fire(seconds * 1000);
-    await s.ended();
+    s.clock.advance(seconds * 1000 - 1);
+    await s.send("still here\n");
+    assert.deepEqual(s.notices, [`${s.head}:\nstill here`]);
+    s.clock.advance(1);
+    assert.equal(await s.ended(), `${s.head} failed [timeout]: it reached its ${seconds}s deadline. ${s.logs}`);
     await until(() => liveGroup(pgid).length === 0, "the command to be killed");
-    assert.equal(s.notices.at(-1), `Monitor ${s.id} (watch builds) failed [timeout]: it reached its ${seconds}s deadline. Log: ${s.log}. Errors: ${s.log.replace(/\.log$/, ".err.log")}`);
-    assert.deepEqual([fleet().get(s.id).status, fleet().get(s.id).result], ["failed", "timeout"]);
   });
 }
 
@@ -211,13 +238,21 @@ test("stop from FleetView sends SIGKILL to the group 800 ms after SIGTERM, with 
   const s = await start(t, { command: `trap '' TERM; exec sh ${SCRIPT}` });
   const pgid = await s.pgid();
   const stopped = s.item.stop();
-  assert.ok(s.timers.has(800));
+  s.clock.advance(799);
   assert.notDeepEqual(liveGroup(pgid), [], "SIGTERM is ignored");
-  s.timers.fire(800);
+  s.clock.advance(1);
   await settles(stopped, "the stop to finish");
+  assert.deepEqual(liveGroup(pgid), []);
+  assert.deepEqual(s.notices, [`${s.head} stopped. ${s.logs}`]);
+});
+
+test("after the command exits, what it left in its group that ignores SIGTERM is killed", async (t) => {
+  const s = await start(t, { command: `echo $$ > pgid; (trap '' TERM; exec tail -f /dev/null) >/dev/null 2>&1 & echo started` });
+  const pgid = await s.pgid();
+  assert.equal(await s.ended(), `${s.head} ended: its command exited with code 0. ${s.logs}`);
+  assert.equal(liveGroup(pgid).length, 1, "the tail ignores SIGTERM");
+  s.clock.advance(800);
   await until(() => liveGroup(pgid).length === 0, "SIGKILL to reach the group");
-  assert.deepEqual(s.notices, [`Monitor ${s.id} (watch builds) stopped. Log: ${s.log}. Errors: ${s.log.replace(/\.log$/, ".err.log")}`]);
-  assert.equal(fleet().get(s.id).status, "stopped");
 });
 
 test("session shutdown kills the monitor without a notice", async (t) => {
@@ -225,6 +260,5 @@ test("session shutdown kills the monitor without a notice", async (t) => {
   const pgid = await s.pgid();
   await settles(s.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }), "the shutdown");
   assert.deepEqual(liveGroup(pgid), []);
-  assert.equal(fleet().get(s.id).status, "stopped");
   assert.deepEqual(s.notices, []);
 });

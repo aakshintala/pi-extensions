@@ -4,16 +4,20 @@
 // FleetView row shows, stderr to a separate log. Every timer runs on the seam below.
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdtempSync, openSync, readFileSync, rmdirSync, writeSync } from "node:fs";
+import { closeSync, fstatSync, mkdtempSync, openSync, readSync, rmdirSync, writeSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { getShellConfig, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { fleet } from "../../shared/fleet/index.ts";
-import { oneLine } from "../../shared/text/index.ts";
+import { oneLine, unfinished } from "../../shared/text/index.ts";
 import { resultText, toolRenderers } from "../../shared/tool-display/index.ts";
 
 const LINE_CHARS = 500;
 const NOTICE_CHARS = 3000;
+/** A notice shows at most this much of the description, so the drop count and the lines survive the notice cut. */
+const NAME_CHARS = 100;
+/** An unended line longer than this is sanitised and cut early, so it cannot grow without bound. */
+const PARTIAL_MAX = 4 * LINE_CHARS;
 /** Notices a monitor may send at once; one comes back every REFILL_MS. */
 const BUDGET = 10;
 const REFILL_MS = 2000;
@@ -24,11 +28,15 @@ const MAX_S = 1800;
 const MAX_HEADLESS_S = 600;
 /** Grace between SIGTERM and SIGKILL to the monitor's process group. */
 const KILL_MS = 800;
-const MAX_TIMER_MS = 2 ** 31 - 1;
 
 type Timers = Pick<typeof globalThis, "setTimeout" | "clearTimeout">;
 /** Refill, flood, deadline and kill timers. Tests replace them through this symbol. */
 const timers = (): Timers => (globalThis as any)[Symbol.for("pi-rig.monitor.timers")] ?? globalThis;
+// Referenced: a headless Pi must not exit before a pending SIGKILL fires.
+const delay = (ms: number) => new Promise<void>((r) => timers().setTimeout(r, ms));
+
+/** The first `n` code points of `s`. */
+const cut = (s: string, n: number) => (s.length <= n ? s : Array.from(s).slice(0, n).join(""));
 
 type Reason = "flooded" | "timeout" | "stopped" | "shutdown";
 type Monitor = {
@@ -42,23 +50,33 @@ type Monitor = {
   out: number;
   code?: number;
   reason?: Reason;
-  killing?: boolean;
+  /** Set once the group is being ended; resolves when it is empty and the monitor has settled. */
+  killed?: Promise<void>;
   tokens: number;
   dropped: number;
   partial: string;
   refill?: unknown;
   flood?: unknown;
   deadline?: unknown;
+  /** Resolves once stdout has closed and the end notice is sent. */
   done: Promise<void>;
 };
 
+const alive = (pgid: number) => {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 const signalGroup = (pgid: number | undefined, signal: NodeJS.Signals) => {
   try {
     if (pgid) process.kill(-pgid, signal);
   } catch {}
 };
 
-// ponytail: same exit-handler idea as extensions/jobs, kept local because jobs exports nothing.
+// ponytail: copies of jobs' group helpers; switch to its exports once #49 adds signalGroup and the groups set.
 const GROUPS = Symbol.for("pi-rig.monitor.groups");
 /** Monitor groups of this process: a crash skips `session_shutdown`, so one `exit` handler SIGKILLs them. */
 function groups(): Set<number> {
@@ -72,19 +90,28 @@ function groups(): Set<number> {
   return g[GROUPS];
 }
 
-const lastLine = (file: string) => {
+/** The last line in the last 4 KiB of a log; empty if it cannot be read. */
+function lastLine(file: string) {
+  let fd: number | undefined;
   try {
-    return readFileSync(file, "utf8").trimEnd().split("\n").at(-1) ?? "";
+    fd = openSync(file, "r");
+    const size = fstatSync(fd).size;
+    const n = Math.min(4096, size);
+    const buf = Buffer.alloc(n);
+    readSync(fd, buf, 0, n, size - n);
+    return buf.toString("utf8").trimEnd().split("\n").at(-1) ?? "";
   } catch {
     return "";
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
-};
+}
 
 export default function (pi: ExtensionAPI) {
   const monitors = new Map<string, Monitor>();
   let dir: string | undefined; // this session's log directory, left for the OS to clean
 
-  const name = (m: Monitor) => `Monitor ${m.id} (${oneLine(m.description)})`;
+  const name = (m: Monitor) => `Monitor ${m.id} (${cut(oneLine(m.description), NAME_CHARS)})`;
 
   /** One notice for lines that arrived together, if the budget has one. */
   function deliver(m: Monitor, lines: string[]) {
@@ -99,15 +126,14 @@ export default function (pi: ExtensionAPI) {
       m.tokens++;
       m.refill = m.tokens < BUDGET ? t.setTimeout(refill, REFILL_MS) : undefined;
     }, REFILL_MS);
+    // Any delivery ends the suppression; the next drop starts a new one.
+    if (m.flood !== undefined) t.clearTimeout(m.flood as any);
+    m.flood = undefined;
     const dropped = m.dropped;
     m.dropped = 0;
-    if (!dropped && m.flood !== undefined) {
-      t.clearTimeout(m.flood as any);
-      m.flood = undefined;
-    }
     const head = `${name(m)}:${dropped ? ` (${dropped} earlier notices suppressed by the rate limit)` : ""}`;
-    const text = [head, ...lines.map((l) => oneLine(l).slice(0, LINE_CHARS))].join("\n");
-    fleet().notify(m.id, text.slice(0, NOTICE_CHARS));
+    const text = [head, ...lines.map((l) => cut(oneLine(l), LINE_CHARS))].join("\n");
+    fleet().notify(m.id, cut(text, NOTICE_CHARS));
   }
 
   function start(p: { command: string; description: string }, seconds: number, c: ExtensionContext): Monitor {
@@ -135,11 +161,16 @@ export default function (pi: ExtensionAPI) {
     const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
     const m: Monitor = { id, owner: c.sessionManager.getSessionId(), description: p.description, log, errors, seconds, child, out, tokens: BUDGET, dropped: 0, partial: "", done: closed.then(() => settle(m)) };
     if (child.pid) groups().add(child.pid);
-    child.stdout!.setEncoding("utf8");
-    child.stdout!.on("data", (chunk: string) => {
+    child.stdout?.setEncoding("utf8"); // whole code points, even across chunks
+    child.stdout?.on("data", (chunk: string) => {
       writeSync(m.out, chunk);
       const lines = (m.partial + chunk).split("\n");
-      m.partial = lines.pop()!.slice(0, LINE_CHARS); // a line past the cut keeps only its start
+      m.partial = lines.pop()!;
+      if (m.partial.length > PARTIAL_MAX) {
+        // Keep the line's start, clean and cut, and hold back a sequence the chunk cut off.
+        const i = unfinished(m.partial);
+        m.partial = cut(oneLine(m.partial.slice(0, i)), LINE_CHARS) + m.partial.slice(i, i + PARTIAL_MAX);
+      }
       if (lines.length && !m.reason) deliver(m, lines);
     });
     child.once("exit", (code, signal) => {
@@ -147,24 +178,37 @@ export default function (pi: ExtensionAPI) {
       void kill(m); // ends what the shell left in its group, and a pipe held open past it
     });
     child.once("error", () => ((m.code = 127), void kill(m)));
-    m.deadline = timers().setTimeout(() => void stop(m, "timeout"), Math.min(seconds * 1000, MAX_TIMER_MS));
+    m.deadline = timers().setTimeout(() => void stop(m, "timeout"), seconds * 1000);
     monitors.set(id, m);
     fleet().register({ id, owner: m.owner, kind: "monitor", label: oneLine(p.description), activity: () => lastLine(log), view: { log }, stop: () => stop(m, "stopped") });
     return m;
   }
 
-  /** SIGTERM to the group; SIGKILL and the pipe closed after KILL_MS unless it closed first. */
+  /**
+   * SIGTERM to the group; if any of it is alive after KILL_MS, SIGKILL until it is empty and
+   * the pipe closed. The group stays in `groups()` until then, for the exit handler.
+   */
   function kill(m: Monitor) {
-    if (m.killing) return m.done;
-    m.killing = true;
-    signalGroup(m.child.pid, "SIGTERM");
-    const t = timers();
-    const timer = t.setTimeout(() => {
-      signalGroup(m.child.pid, "SIGKILL");
-      m.child.stdout?.destroy();
-    }, KILL_MS);
-    void m.done.then(() => t.clearTimeout(timer));
-    return m.done;
+    return (m.killed ??= (async () => {
+      const pgid = m.child.pid;
+      if (pgid) {
+        signalGroup(pgid, "SIGTERM");
+        const grace = delay(KILL_MS);
+        await Promise.race([m.done, grace]);
+        if (alive(pgid)) {
+          await grace;
+          // Killed processes linger briefly as zombies until init reaps them.
+          for (let i = 0; i < 100 && alive(pgid); i++) {
+            signalGroup(pgid, "SIGKILL");
+            await new Promise((r) => setTimeout(r, 10));
+          }
+        }
+        m.child.stdout?.destroy(); // a process outside the group may still hold it
+        if (!alive(pgid)) groups().delete(pgid);
+      }
+      await m.done;
+      monitors.delete(m.id);
+    })());
   }
 
   function stop(m: Monitor, reason: Reason) {
@@ -177,8 +221,6 @@ export default function (pi: ExtensionAPI) {
     const t = timers();
     for (const h of [m.refill, m.flood, m.deadline]) if (h !== undefined) t.clearTimeout(h as any);
     closeSync(m.out);
-    if (m.child.pid) groups().delete(m.child.pid);
-    monitors.delete(m.id);
     const logs = `Log: ${m.log}. Errors: ${m.errors}`;
     const end = {
       flooded: ["failed", "flooded", `${name(m)} failed [flooded]: its notices were suppressed for ${FLOOD_MS / 1000}s. Tighten the command's filter so it prints fewer lines. ${logs}`],
@@ -206,7 +248,7 @@ export default function (pi: ExtensionAPI) {
       properties: {
         command: { type: "string", description: "Watch command; each stdout line is an event" },
         description: { type: "string", description: "Short name shown on its notices" },
-        timeout: { type: "number", description: `Seconds, default ${DEFAULT_S}, max ${MAX_S}` },
+        timeout: { type: "number", description: `Seconds, default ${DEFAULT_S}, max ${MAX_S} (${MAX_HEADLESS_S} without UI)` },
       },
     },
     async execute(_id: string, p: { command: string; description: string; timeout?: number }, _s: unknown, _u: unknown, c: ExtensionContext) {

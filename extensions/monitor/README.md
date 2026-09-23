@@ -11,7 +11,9 @@ its ID and log paths at once.
 - Each batch of standard output lines that arrive together is one notice,
   headed with the monitor's ID and `description`. Terminal sequences and
   control characters are removed.
-- Each line is cut at 500 characters, and each notice at 3,000.
+- Each line is cut at 500 characters, and each notice at 3,000, counting code
+  points. A notice shows at most the first 100 characters of the description,
+  so the drop count and the lines always fit.
 - Standard error goes to a separate log (`<id>.err.log`) and never becomes a
   notice.
 - `timeout` is the deadline in seconds: 300 by default, at most 1,800, or 600
@@ -23,14 +25,16 @@ its ID and log paths at once.
   that finds it empty is dropped and counted, and the next notice says how many
   were suppressed.
 - **Flood.** 30 s of continuous suppression stops the monitor as failed with
-  code `flooded`. Suppression ends at a notice with nothing dropped before it.
+  code `flooded`. Suppression starts at the first drop after a notice, and any
+  delivered notice ends it.
 - **Deadline.** At its deadline the monitor stops as failed with code `timeout`.
 
 ## Lifecycle
 
 - A monitor ends when its command exits (one notice with the exit code), at
   its deadline, on a flood, or when stopped. Ending sends SIGTERM to its
-  process group and SIGKILL 800 ms later if any of it is still alive.
+  process group. If any of the group is still alive 800 ms later, it gets
+  SIGKILL until the group is empty.
 - Each monitor is a `monitor` row in FleetView. Opening it shows the live
   standard output log, and Ctrl+Q stops it with one notice.
 - A monitor belongs to its session: shutdown, `/reload` and a session switch
