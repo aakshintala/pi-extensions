@@ -1,0 +1,44 @@
+// Test-only producer for FleetView tests, loaded separately from extensions/fleet.
+// `/fx <json array of ops>` applies each op, then reports event "fx":
+//   {"add": id, "kind", "label", "parent"?, "activity"?, "status"?}
+//   {"act": id, "text"}                       new activity line
+//   {"finish": id, "status", "result"}
+//   {"clock": seconds}                        the registry's clock (starts at 0)
+import { appendFileSync } from "node:fs";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { fleet } from "../../../shared/fleet/index.ts";
+
+export default function (pi: ExtensionAPI) {
+  const activity = new Map<string, string>();
+  let now = 0;
+
+  pi.registerCommand("fx", {
+    description: "Test producer",
+    handler: async (args) => {
+      const registry = fleet();
+      registry.now = () => now * 1000;
+      for (const op of JSON.parse(args)) {
+        if ("add" in op) {
+          activity.set(op.add, op.activity ?? "");
+          registry.register({
+            id: op.add,
+            kind: op.kind,
+            label: op.label,
+            parentId: op.parent,
+            status: op.status,
+            activity: () => activity.get(op.add) ?? "",
+            stop() {},
+          });
+        } else if ("act" in op) {
+          activity.set(op.act, op.text);
+          registry.update(op.act);
+        } else if ("finish" in op) registry.finish(op.finish, op.status, op.result);
+        else if ("clock" in op) {
+          now = op.clock;
+          for (const item of registry.items()) registry.update(item.id);
+        }
+      }
+      appendFileSync(process.env.PI_HARNESS_EVENTS!, JSON.stringify({ event: "fx" }) + "\n");
+    },
+  });
+}
