@@ -21,12 +21,13 @@ model thinking  │  in 12k out 3.4k cache 81% $0.412  │  ctx [███░░
   below 50% left and red below 20% in its lowest bucket.
 - `*` marks uncommitted changes. `git status` runs in the background at
   session start and 300 ms after the last tool call, one git at a time per
-  process, only in trusted projects, and is stopped on shutdown. It never runs
+  process, only in trusted projects, and is stopped on shutdown. A git still
+  running after 5 s gets SIGTERM, then SIGKILL 2 s later. It never runs
   the repo's own code: fsmonitor, hooks and repo-configured clean filters are
   disabled, and submodules are compared by commit only.
 - Quotas show what the shared client holds: after a failed refresh the last
   feed stays until it is older than `quotaRefreshSeconds`, then the footer
-  shows `Q unavailable`.
+  shows `Q unavailable`. A fetch that times out counts as failed.
 - TTFT and TPS are for the last reply.
 
 ## Tool

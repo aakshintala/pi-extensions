@@ -9,7 +9,6 @@ import { oneLine } from "../../shared/text/index.ts"; // cwd, branch, model and 
 import type { Feed } from "./quota.ts";
 
 export const GIT_DEBOUNCE_MS = 300;
-const GIT_TIMEOUT_MS = 5_000;
 const CTX_WARN = 70, CTX_DANGER = 90;
 const QUOTA_WARN = 50, QUOTA_DANGER = 20;
 const THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -28,25 +27,49 @@ export interface FooterDeps {
 // write (so no post-index-change hook).
 const SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "--no-optional-locks"];
 
-/** Runs git; resolves after it exits. With `first`, kills git at its first output. */
-function runGit(args: string[], cwd: string, signal: AbortSignal, first = false) {
+export const GIT_LIMITS = { timeoutMs: 5_000, graceMs: 2_000 };
+
+/**
+ * Runs git; resolves once it exits. On timeout or abort git gets SIGTERM, then
+ * SIGKILL after a grace period, and the promise resolves then even if git has
+ * not exited (e.g. stuck on NFS), so a hung git never holds the lock. With
+ * `first`, kills git at its first output.
+ */
+function runGit(args: string[], cwd: string, signal: AbortSignal, first: boolean, limits: typeof GIT_LIMITS) {
   return new Promise<{ ok: boolean; out: string }>((resolve) => {
     let out = "";
-    const child = spawn("git", [...SAFE, ...args], { cwd, signal, timeout: GIT_TIMEOUT_MS, stdio: ["ignore", "pipe", "ignore"] });
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    const child = spawn("git", [...SAFE, ...args], { cwd, stdio: ["ignore", "pipe", "ignore"] });
+    const done = (ok: boolean) => {
+      clearTimeout(timer);
+      clearTimeout(grace);
+      signal.removeEventListener("abort", stop);
+      resolve({ ok, out });
+    };
+    const stop = () => {
+      child.kill();
+      grace ??= setTimeout(() => {
+        child.kill("SIGKILL");
+        done(false);
+      }, limits.graceMs);
+    };
+    const timer = setTimeout(stop, limits.timeoutMs);
+    if (signal.aborted) stop();
+    else signal.addEventListener("abort", stop);
     child.stdout.on("data", (d) => {
       out += d;
-      if (first) child.kill();
+      if (first) stop();
     });
-    child.on("error", () => child.pid === undefined && resolve({ ok: false, out })); // never spawned: no close
-    child.on("close", (code) => resolve({ ok: code === 0, out }));
+    child.on("error", () => child.pid === undefined && done(false)); // never spawned: no close
+    child.on("close", (code) => done(code === 0));
   });
 }
 
-export const gitDirty: GitDirty = async (cwd, signal) => {
+export const gitDirty = async (cwd: string, signal: AbortSignal, limits = GIT_LIMITS): Promise<boolean | null> => {
   // Clean filters run while status hashes changed files. Blank every filter the
   // repo configures itself (local or worktree scope, includes too); the user's
   // global and system filters stay.
-  const scoped = await runGit(["config", "--includes", "--show-scope", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|process)$"], cwd, signal);
+  const scoped = await runGit(["config", "--includes", "--show-scope", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|process)$"], cwd, signal, false, limits);
   const blank = scoped.out
     .split("\n")
     .map((l) => l.split("\t"))
@@ -54,7 +77,7 @@ export const gitDirty: GitDirty = async (cwd, signal) => {
     .flatMap(([, key]) => ["-c", `${key}=`]);
   if (signal.aborted) return null;
   // Submodules count by commit only: no status runs inside them.
-  const status = await runGit([...blank, "status", "--porcelain", "--ignore-submodules=dirty"], cwd, signal, true);
+  const status = await runGit([...blank, "status", "--porcelain", "--ignore-submodules=dirty"], cwd, signal, true, limits);
   return status.out ? true : status.ok ? false : null;
 };
 
