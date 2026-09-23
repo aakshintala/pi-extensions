@@ -80,6 +80,12 @@ function fakeTimers(t) {
   };
 }
 
+/** SIGKILLs a detached child's group and resolves once node has reaped it, so its group is gone. */
+const killed = (child) =>
+  child.exitCode !== null || child.signalCode !== null
+    ? Promise.resolve()
+    : settles(new Promise((exited) => (child.once("exit", exited), process.kill(-child.pid, "SIGKILL"))), `child ${child.pid} to exit`);
+
 /** Resolves with `p`, or fails after 10 s, so a regression fails instead of hanging. */
 const settles = (p, what) => Promise.race([p, until(() => false, what)]);
 
@@ -583,7 +589,7 @@ test("at most 16 jobs and monitors run at once; more starts are refused, foregro
   for (let i = 0; i < 15; i++) {
     const child = spawn("tail", ["-f", "/dev/null"], { detached: true, stdio: "ignore" });
     // Waits for the exit: until it is reaped, the group still counts toward the cap.
-    t.after(() => new Promise((exited) => (child.once("exit", exited), process.kill(-child.pid, "SIGKILL"))));
+    t.after(() => killed(child));
     track({ child, pgid: child.pid, record: join(s.cwd, `other${i}.pid`), counted: true });
   }
   await s.session.prompt("go");
@@ -656,15 +662,15 @@ test("a hanging ps delays a spawn by at most its 1 s timeout, and no record is w
   t.after(() => {
     process.env.PATH = path;
     rmSync(bin, { recursive: true, force: true });
-    return new Promise((exited) => (child.once("exit", exited), process.kill(-child.pid, "SIGKILL")));
+    return killed(child);
   });
-  writeFileSync(join(bin, "ps"), "#!/bin/sh\nexec sleep 10\n", { mode: 0o755 });
+  writeFileSync(join(bin, "ps"), "#!/bin/sh\nexec sleep 5\n", { mode: 0o755 });
   process.env.PATH = `${bin}:${path}`;
   const began = Date.now();
   assert.equal(startTimeSync(child.pid), undefined);
   track({ child, pgid: child.pid, record: join(bin, "x.pid") });
   const took = Date.now() - began;
-  assert.ok(took < 6000, `up to three ps runs (this one, Pi's and the leader's) took ${took} ms`); // 30 s without the timeout
+  assert.ok(took < 4500, `up to three ps runs (this one, Pi's and the leader's) took ${took} ms`); // 10-15 s without the timeout
   assert.equal(existsSync(join(bin, "x.pid")), false, "an unknown start time writes no record");
 });
 
