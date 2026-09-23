@@ -12,6 +12,7 @@
 // own children are rebuilt.
 import { AssistantMessageComponent, VERSION } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
+import { thinkingShown } from "../../shared/tool-display/index.ts";
 
 // Process-wide: installed once however many sessions (or reloaded copies of this
 // module) use it, and restored when the last one releases it.
@@ -50,6 +51,21 @@ function expected(m: any): Slot[] {
 const kindOf = (x: unknown) =>
   x instanceof Spacer ? "S" : x instanceof Markdown ? "M" : x instanceof MouseRegion ? "R" : x instanceof Text ? "T" : "?";
 
+/** Tells the message's tool groups whether Pi draws any of its thinking: drawn thinking splits a group (#133). */
+function report(self: any, message: any) {
+  const c: any[] = message.content;
+  let run = 0;
+  let shown = false;
+  for (let i = 0; i < c.length; i++) {
+    if (c[i]?.type !== "thinking") continue;
+    let any = false;
+    for (; i < c.length && c[i]?.type === "thinking"; i++) any ||= !!c[i].thinking?.trim();
+    i--;
+    if (any && !(self.thinkingVisibilityOverrides?.get(run++) ?? self.hideThinkingBlock === true)) shown = true;
+  }
+  thinkingShown(message, shown, self.hideThinkingBlock === true);
+}
+
 /**
  * Each thinking run is hidden (dropped with its spacer), shown (labelled), or clicked
  * open or closed by the user (left as Pi drew it), as Pi decides per run. Children are
@@ -58,6 +74,7 @@ const kindOf = (x: unknown) =>
 function restyle(self: any, message: any) {
   const box = self.contentContainer;
   if (!box || !Array.isArray(message?.content)) return;
+  report(self, message);
   const want = expected(message);
   const kids: any[] = box.children;
   if (kids.length !== want.length || !want.some((s) => s.kind === "R")) return;

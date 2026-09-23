@@ -6,7 +6,6 @@ Collapses each run of tool calls into one summary line, and draws the built-in
 
 ```
  ⏺ Read 1 file, edited 2 files +3 −2, wrote 1 file +6 · 1 failed
-
  ⏺ Edit(a.txt)
    ⎿  Error: Could not find the exact text in a.txt. …
 ```
@@ -16,11 +15,13 @@ Collapses each run of tool calls into one summary line, and draws the built-in
   line. Every call counts under its verb; `+a −r` comes from finished edits and
   writes. It updates live, with a spinner while calls run. Inside a group, the
   calls after the first and the tool-only responses between them draw no rows.
-- **What splits a group:** assistant text, your prompt, a steer or follow-up,
-  a custom message or notice drawn in the chat, a tool without a summary (such
-  as `ask_user`), and the end of the agent run. Hidden thinking does not.
-- **Failed calls always shown** under their group, and so are calls that
-  returned an image (Pi draws images outside the tool's renderers).
+- **What splits a group:** assistant text, thinking that is shown (Ctrl+T, or a
+  click on the block), your prompt, a steer or follow-up, a custom message or
+  notice drawn in the chat, a tool without a summary (such as `ask_user`), and
+  the end of the agent run. Hidden thinking does not.
+- **Failed calls always shown** right under their group's summary, with no
+  blank rows. Calls that returned an image also show, each with a blank row above
+  it (Pi draws images outside the tool's renderers).
 - **Cancelled.** When a turn is aborted (Esc), calls with no result and calls
   whose error ends in Pi's `Operation aborted` or `Command aborted` count as
   `cancelled` in the error colour. They are counted, not shown. Any other
@@ -70,21 +71,22 @@ Expanded, each call looks like this:
 - **Hidden thinking renders nothing.** With thinking hidden (Ctrl+T), Pi's
   "Thinking..." label and its blank line are gone, in messages with and
   without text. A group starts with `thought ·` when any of its responses
-  had thinking:
+  had thinking, or a response with only thinking came inside it:
 
   ```
    ⏺ thought · read 5 files, ran 7 shell commands
   ```
 
-- **Shown thinking** starts with a `✻ Thinking` label line. It does not split
-  a group, so a later response's thinking shows below the group's summary.
+- **Shown thinking** starts with a `✻ Thinking` label line, and splits a tool
+  group like text does. Ctrl+T regroups the calls on screen.
 - **Screen only.** Saved sessions and the model's context are unchanged.
 - **Guarded Pi patch** (one of the rig's three, #1). It wraps
   `AssistantMessageComponent.prototype.updateContent` on Pi 0.87.x only, and
   only when the message's children are exactly what Pi 0.87 builds; anything
   else, or an error while restyling, keeps Pi's own render. A thinking block
   you clicked open or closed keeps Pi's render; the message's other blocks are
-  still restyled.
+  still restyled. The same wrapper tells the tool groups whether the message's
+  thinking is shown. It is no new patch.
 - **One patch per process.** It is installed once while any session, including
   in-process subagent sessions, uses the extension, and removed with the last
   one. `/new`, `/resume` and a `/reload` without the extension get Pi's stock

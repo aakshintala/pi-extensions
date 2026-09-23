@@ -1,7 +1,8 @@
 // Tool groups span assistant messages (#133) in a real pi: a run of tool-only
 // responses is one summary line with no blank rows, hidden thinking in any of them
-// leads it with "thought ·", a failed call shows under it and Ctrl+O opens every call
-// in order. Text, a steer delivered at the turn's end, and ask_user each split it.
+// leads it with "thought ·", a failed call shows right under it and Ctrl+O opens every
+// call in order. Text, shown thinking, a steer delivered at the turn's end, and
+// ask_user each split it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, writeFileSync } from "node:fs";
@@ -56,7 +57,6 @@ test("four tool-only responses are one summary line: thought, combined counts, t
   await tui.waitForScreen(rows(
     ...top,
     " ⏺ thought · read 2 files, edited 2 files +1 −1, wrote 1 file +1 · 1 failed",
-    "",
     " ⏺ Edit(a.txt)",
     "   ⎿  Error: Could not find the exact text in a.txt. The old text must match",
     "      exactly including all whitespace and newlines.",
@@ -117,4 +117,17 @@ test("ask_user splits the run", async (t) => {
   await tui.waitForEvent("agent_end");
   await tui.waitForScreen(rows("", " go", "", "", " ⏺ Read 1 file", "", "", " ask_user", " pick: Alpha", "", "", " ⏺ Read 1 file", "", " Done.",
     ...footer("↑75 ↓42 R79 W76 CH62.4% 0.1%/128k (auto)                               harness-1")));
+});
+
+test("thinking shown with Ctrl+T splits the run, and hiding it again joins it", async (t) => {
+  const tui = await start(t, [[read("c1", "a.txt")], [think("Next."), read("c2", "b.txt")], "Done."], { hide: true });
+  await tui.waitForEvent("agent_end");
+  const usage = "↑38 ↓15 R21 W38 CH33.3% 0.0%/128k (auto)                               harness-1";
+  const top = ["", " Thinking blocks: hidden", "", "", " go", "", ""];
+  await tui.waitForScreen(rows(...top, " ⏺ thought · read 2 files", "", " Done.", ...footer(usage)));
+  tui.keys("C-t");
+  await tui.waitForScreen(rows(...top, " ⏺ Read 1 file", "", " ✻ Thinking", " Next.", "", " ⏺ thought · read 1 file", "", " Done.", "",
+    " Thinking blocks: visible", ...footer(usage)));
+  tui.keys("C-t");
+  await tui.waitForScreen(rows(...top, " ⏺ thought · read 2 files", "", " Done.", "", " Thinking blocks: hidden", ...footer(usage)));
 });

@@ -86,21 +86,32 @@ summary: { verb: "edited", one: "file", lines: (args) => ({ added, removed }) } 
 summary: { verb: "updated", many: "todos" }                                     // no `one`: "updated todos"
 ```
 
-- The first call draws the summary; the others draw nothing. Failed calls and
-  calls with images always show. Ctrl+O (`context.expanded`) or a click on the
-  group shows every call.
-- A tool without `summary` (such as `ask_user`) is never grouped and splits a run.
-  So does assistant text (Pi draws a message's text above its calls, so any text
-  in a message starts a new run), a message drawn in the chat (user, custom with
-  `display`, bash, compaction or branch summary), an aborted or failed message,
-  and `endRun()`. Grouping is decided as calls render, in message order, so
-  descriptors are not registered anywhere.
+- The first call draws the summary; the others draw nothing. Failed calls always
+  show, drawn by the first call right under the summary, so a group has no blank
+  rows. Calls with images show themselves. Ctrl+O (`context.expanded`) or a click
+  on the group shows every call.
+- What splits a run:
+  - a tool without `summary` (such as `ask_user`), which is never grouped;
+  - assistant text: Pi draws a message's text above its calls, so any text in a
+    message starts a new run;
+  - thinking Pi draws (Ctrl+T, or a click on the block). Hidden thinking does not;
+  - a message drawn in the chat: user, custom with `display`, bash, compaction or
+    branch summary;
+  - the end of an aborted or failed message, which ends its agent run. Its own
+    calls still join the run before it;
+  - `endRun()`.
+- Each renderer registers its call as it draws (`describe`), in message order, so
+  a group is worked out from the calls already drawn. There is no registry of
+  tools.
 - Groups belong to a `ToolGroups`, one per session. `extensions/tool-display`
-  creates it, feeds it from Pi's events and owns its spinner timer. To group a
-  transcript built from saved messages, call `track(message)` for every message
-  and `settle(toolCallId, isError, result)` for each result, in order, then
-  `endRun()` when the agent run ends. `track` knows a message by its first call
-  id, so each streaming update may be a new object;
+  creates it, feeds it from Pi's events and owns its spinner timer. Feed it every
+  message in order with `track(message)`, and each result with
+  `settle(toolCallId, isError, result)`, then call `endRun()` when the agent run
+  ends. While a message streams, pass `track(message, true)` for each update and
+  track it once more without the flag when it ends. Each update may be a new
+  object, and its calls may change. `showThinking` says whether thinking is drawn
+  until a message's renderer reports it with `thinkingShown(message, shown)`
+  (`extensions/tool-display` does this from its thinking patch).
   `reset()` forgets the session's calls. `outcomeOf(isError, result)` classifies a
   result: an error ending in Pi's `Operation aborted` or `Command aborted` is
   `cancelled`, any other error `error`. Calls with no result in an aborted turn
@@ -108,7 +119,8 @@ summary: { verb: "updated", many: "todos" }                                     
 - Call ids can repeat across sessions; each session indexes and removes only its
   own, and a renderer picks the session holding the call's arguments.
 - `summaryText(theme, calls, thought)` builds the text; `thought` starts it with
-  "thought ·". Groups set it when any of their messages has thinking (#57).
+  "thought ·". Groups set it when any of their messages has thinking, or a
+  message with only thinking sits in the run (#57).
 
 ### `text/`
 

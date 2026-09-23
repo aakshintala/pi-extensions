@@ -104,7 +104,7 @@ export default function (pi: ExtensionAPI, piVersion: string = VERSION) {
     load(ctx.sessionManager.getBranch());
   });
   pi.on("session_tree", (_e, ctx) => load(ctx.sessionManager.getBranch()));
-  pi.on("message_update", (e) => groups.track(e.message));
+  pi.on("message_update", (e) => groups.track(e.message, true));
   pi.on("message_end", (e) => groups.track(e.message));
   pi.on("tool_execution_end", (e) => groups.settle(e.toolCallId, e.isError, e.result));
   pi.on("agent_start", () => {

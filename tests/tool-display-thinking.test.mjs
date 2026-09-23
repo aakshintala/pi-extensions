@@ -291,7 +291,8 @@ test("/reload with a child session up runs the reloaded code", async (t) => {
   const dir = mkdtempSync(join(fileURLToPath(new URL("./fixtures/tool-display/", import.meta.url)), "reload-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const source = readFileSync(new URL("../extensions/tool-display/thinking.ts", import.meta.url), "utf8");
-  const write = (label) => writeFileSync(join(dir, "thinking.ts"), source.replace('"✻ Thinking"', JSON.stringify(label)));
+  const write = (label) =>
+    writeFileSync(join(dir, "thinking.ts"), source.replace('"✻ Thinking"', JSON.stringify(label)).replace('"../../shared/', '"../../../../shared/'));
   writeFileSync(join(dir, "index.ts"), `import { releaseHiddenThinking, useHiddenThinking } from "./thinking.ts";
 export default function (pi: any) {
   const owner = {};

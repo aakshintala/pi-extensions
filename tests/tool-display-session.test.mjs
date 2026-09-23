@@ -71,8 +71,9 @@ test("a saved transcript groups the same way as the live session", async (t) => 
       .flatMap((c) => c.render(80).map(plain));
 
   const live = transcript();
-  assert.deepEqual(live.slice(0, 5), ["", " ⏺ Read 2 files · 1 failed", "", " ⏺ Read(missing.txt)", `   ⎿  Error: ENOENT: no such file or directory, access 'missing.txt'`]);
-  assert.deepEqual(live.slice(5, 7), ["", " ⏺ Read 1 file"]);
+  // The failed call is drawn by the group's first call, with no blank row (#133).
+  assert.deepEqual(live.slice(0, 4), ["", " ⏺ Read 2 files · 1 failed", " ⏺ Read(missing.txt)", `   ⎿  Error: ENOENT: no such file or directory, access 'missing.txt'`]);
+  assert.deepEqual(live.slice(4, 6), ["", " ⏺ Read 1 file"]);
   assert.deepEqual(live.slice(-2), ["", " ⏺ Read 1 file"]); // ls, not grouped, splits the run
   // As on /resume: groups are forgotten, then registered again from the saved branch.
   await session.extensionRunner.emit({ type: "session_shutdown", reason: "resume" });
