@@ -13,9 +13,10 @@
 // test's duration, so run one scripted session at a time per file (node:test's default).
 // In t.after, like pi on quit: session_shutdown is emitted, the session disposed, then
 // env restored and temp dirs removed, so cleanup runs on failure too.
-// Pi's model runtimes (the helper's and any child session's) keep refreshing after dispose
-// and can recreate agent/auth.json or agent/models-store.json; Pi 0.87.1 has no way to wait
-// for that, so every box is removed again when the process exits.
+// Credentials and model catalogs live in memory, so the session never writes agent/auth.json
+// or agent/models-store.json, even from refreshes that finish after cleanup. An in-process
+// child must pass createAgentSession({ modelRuntime: session.modelRuntime, ... }); without
+// it Pi builds a file-backed runtime that can recreate those files after the box is gone.
 import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,14 +31,30 @@ import {
 
 export { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 
-const boxes = new Set();
-process.once("exit", () => {
-  for (const box of boxes) rmSync(box, { recursive: true, force: true });
-});
+// pi-ai's CredentialStore in memory; modify and delete run one at a time per provider.
+function memoryCredentials() {
+  const creds = new Map();
+  const queues = new Map();
+  const serial = (id, op) => {
+    const run = (queues.get(id) ?? Promise.resolve()).then(op);
+    queues.set(id, run.catch(() => {}));
+    return run;
+  };
+  return {
+    read: async (id) => structuredClone(creds.get(id)),
+    list: async () => [...creds].map(([providerId, c]) => ({ providerId, type: c.type })),
+    modify: (id, fn) =>
+      serial(id, async () => {
+        const next = await fn(structuredClone(creds.get(id)));
+        if (next !== undefined) creds.set(id, structuredClone(next));
+        return structuredClone(creds.get(id));
+      }),
+    delete: (id) => serial(id, async () => void creds.delete(id)),
+  };
+}
 
 export async function scriptedSession(t, { replies = [], extensions = [], tools, persist = false } = {}) {
   const box = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-session-")));
-  boxes.add(box);
   const home = join(box, "home");
   const cwd = join(box, "cwd");
   const agentDir = join(box, "agent");
@@ -64,7 +81,7 @@ export async function scriptedSession(t, { replies = [], extensions = [], tools,
   const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1" }] });
   faux.setResponses(replies);
   const modelRuntime = await ModelRuntime.create({
-    authPath: join(agentDir, "auth.json"),
+    credentials: memoryCredentials(),
     modelsPath: null,
     refreshOnCreate: false,
   });
