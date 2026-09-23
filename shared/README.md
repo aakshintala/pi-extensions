@@ -7,3 +7,31 @@ speculatively — the first use stays inside its extension.
 - No pi lifecycle handling here: extensions own registration, resource
   startup, and `session_shutdown` cleanup.
 - Same dependency rule as `extensions/`: `node:` built-ins only.
+
+## Modules
+
+### `settings/`
+
+The rig's settings file, `rig.json` in Pi's agent directory (spec #32).
+One instance per process, kept on a `globalThis` symbol.
+
+```ts
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { rigSettings } from "../../shared/settings/index.ts";
+
+const settings = rigSettings(getAgentDir()).declare("jobs", [
+  { key: "maxJobs", type: "integer", min: 1, max: 64, default: 16, description: "Most jobs at once" },
+]);
+settings.get("maxJobs");
+settings.onChange((key, value) => { /* apply */ });
+// in session_start: rigSettings(getAgentDir()).notifyWarnings(ctx.ui);
+```
+
+- Types: `boolean`, `integer` (optional `min`/`max`), `enum` (`values`).
+- Loading never throws: a bad value, unknown key or invalid JSON queues one
+  warning and uses the default. `notifyWarnings(ui)` sends each once.
+- `set`/`reset` validate, re-read the file, change only that key, keep only
+  non-default keys, and write atomically (temp file, then rename).
+- Redeclaring a section (on `/reload`) re-reads the file and drops the
+  section's old listeners. There is no file watcher and no project file.
+- `sections()` lists declared sections for the `/rig` menu.
