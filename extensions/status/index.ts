@@ -1,9 +1,9 @@
 // Rig status (spec #38): one quota client behind get_quotas, /quota and the
 // two-line footer. No quota text is added to agent runs.
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { rigSettings } from "../../shared/settings/index.ts";
+import { rigSettings, type Section } from "../../shared/settings/index.ts";
 import { registerFooter, type FooterDeps } from "./footer.ts";
-import { registerQuota } from "./quota.ts";
+import { registerQuota, type Feed } from "./quota.ts";
 
 export type StatusDeps = FooterDeps & { fetch?: typeof fetch };
 
@@ -15,21 +15,47 @@ export default function (pi: ExtensionAPI, deps: StatusDeps = {}) {
   ]);
   pi.on("session_start", (_event, ctx) => rig.notifyWarnings(ctx.ui));
   const footer = registerFooter(pi, deps);
-  // The footer sees every feed the one client fetches by tapping its fetch;
-  // an aborted fetch (shutdown, port change) leaves the footer as it was.
-  // ponytail: a feed listener on the client would be cleaner; quota.ts is fenced by PR #87.
+  mirrorQuotas(pi, settings, footer, deps);
+}
+
+/**
+ * Registers the quota client with a fetch that mirrors its cache into the
+ * footer: a new feed replaces it, a failure keeps it while it is younger than
+ * the refresh interval and then shows it as unavailable, an aborted fetch
+ * changes nothing, and a port change clears it, as the client does.
+ */
+function mirrorQuotas(pi: ExtensionAPI, settings: Section, footer: { quotas(feed: Feed | null | undefined): void }, deps: StatusDeps) {
+  // ponytail: copies the client's cache rules; a feed listener on the client replaces this once PR #87 frees quota.ts.
   const fetchFn = deps.fetch ?? fetch;
-  registerQuota(pi, settings, {
-    async fetch(url, init) {
-      try {
-        const res = await fetchFn(url, init);
-        const json = res.ok ? await res.clone().json() : null;
-        footer.quotas(Array.isArray(json?.providers) ? json : null);
-        return res;
-      } catch (e) {
-        if (!init?.signal?.aborted) footer.quotas(null);
-        throw e;
-      }
+  const now = deps.now ?? Date.now;
+  let fetchedAt = -Infinity;
+  registerQuota(
+    pi,
+    settings,
+    {
+      now,
+      async fetch(url, init) {
+        const aborted = () => init?.signal?.aborted;
+        try {
+          const res = await fetchFn(url, init);
+          const json = res.ok ? await res.clone().json() : null;
+          if (!Array.isArray(json?.providers)) throw new Error("bad feed");
+          if (!aborted()) {
+            fetchedAt = now();
+            footer.quotas(json);
+          }
+          return res;
+        } catch (e) {
+          if (!aborted() && now() - fetchedAt >= (settings.get("quotaRefreshSeconds") as number) * 1000) footer.quotas(null);
+          throw e;
+        }
+      },
     },
+  );
+  // Registered after the client's own listener, so both drop the feed together.
+  settings.onChange((key) => {
+    if (key !== "quotaPort") return;
+    fetchedAt = -Infinity;
+    footer.quotas(undefined);
   });
 }
