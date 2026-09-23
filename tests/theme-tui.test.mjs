@@ -2,7 +2,7 @@
 // through Pi, cancel restores the old theme and writes nothing.
 import { test } from "node:test";
 import assert from "node:assert";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, watch, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { liveGroup, startTui } from "./helpers/tui.mjs";
@@ -21,17 +21,43 @@ ${FOOTER}` + "\n".repeat(body.split("\n").length === 1 ? 17 : 16);
 const picker = (name, cursor) =>
   screen(name, `${cursor === "dark" ? "→" : " "} dark        (current)\n${cursor === "light" ? "→" : " "} light`);
 
+// Pi saves settings on its write queue, after the redraw, so wait for the file itself.
+function saved(path, key, want) {
+  const read = () => {
+    try {
+      return JSON.parse(readFileSync(path, "utf8"))[key];
+    } catch {
+      return undefined; // caught mid-write
+    }
+  };
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (read() !== want) return;
+      watcher.close();
+      clearTimeout(timer);
+      resolve();
+    };
+    const watcher = watch(path, check); // before the first read, so no write slips between
+    const timer = setTimeout(() => {
+      watcher.close();
+      reject(new Error(`settings.json ${key} never became ${want}: ${readFileSync(path, "utf8")}`));
+    }, 20_000);
+    check();
+  });
+}
+
 async function open(t) {
   const tui = await startTui(t, { extensions });
   t.after(() => assert.deepEqual(liveGroup(tui.pid), []));
-  const settings = () => JSON.parse(readFileSync(join(dirname(tui.home), "agent", "settings.json"), "utf8"));
+  const path = join(dirname(tui.home), "agent", "settings.json");
+  const settings = () => JSON.parse(readFileSync(path, "utf8"));
   await tui.waitForScreen(screen("dark"));
   tui.type("/theme");
   tui.keys("Enter");
   await tui.waitForScreen(picker("dark", "dark"));
   tui.keys("Down");
   await tui.waitForScreen(picker("light", "light")); // preview
-  return { tui, settings };
+  return { tui, settings, path };
 }
 
 test("/theme previews on move and Esc restores the old theme without saving", async (t) => {
@@ -42,10 +68,10 @@ test("/theme previews on move and Esc restores the old theme without saving", as
 });
 
 test("/theme Enter applies the theme and Pi saves it", async (t) => {
-  const { tui, settings } = await open(t);
+  const { tui, path } = await open(t);
   tui.keys("Enter");
   await tui.waitForScreen(screen("light"));
-  assert.equal(settings().theme, "light");
+  await saved(path, "theme", "light");
 });
 
 // After /reload with an automatic light/dark setting: the reload notice sits above.
