@@ -1,9 +1,9 @@
 // Stamp module tests: labels per setting, rendering from frozen settings, the
 // formatter cache bound, and the one-time pi-stamp.json import.
 process.env.TZ = "UTC";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import "../../tests/fixtures/tool-display/pi-tui.mjs";
@@ -12,6 +12,10 @@ const { MAX_FORMATTERS } = await import("./format.ts");
 const { stampRenderer } = await import("./render.ts");
 const { frozenSettings, importPiStamp, IMPORTED, SETTINGS } = await import("./settings.ts");
 const { isLocale } = await import("./format.ts");
+
+// Every temp dir lives under one root, removed when the file finishes.
+const root = mkdtempSync(join(tmpdir(), "stamp-"));
+after(() => rmSync(root, { recursive: true, force: true }));
 
 const DEFAULTS = Object.fromEntries(SETTINGS.map((s) => [s.key, s.default]));
 const T = Date.UTC(2026, 8, 23, 14, 5, 9); // 2026-09-23 14:05:09 UTC
@@ -116,7 +120,7 @@ test("every version the fork wrote still renders, and malformed data renders not
 });
 
 test("rendering many stamps over many frames takes one settings snapshot per change", () => {
-  const rig = createRigSettings(mkdtempSync(join(tmpdir(), "stamp-")));
+  const rig = createRigSettings(mkdtempSync(join(root, "stamp-")));
   const section = rig.declare("stamp", SETTINGS);
   let snapshots = 0;
   const values = section.values;
@@ -160,7 +164,7 @@ test("formatters are reused, and the cache is bounded", () => {
 });
 
 function importDir(piStamp, rig) {
-  const d = mkdtempSync(join(tmpdir(), "stamp-import-"));
+  const d = mkdtempSync(join(root, "stamp-import-"));
   if (piStamp !== undefined) writeFileSync(join(d, "pi-stamp.json"), typeof piStamp === "string" ? piStamp : JSON.stringify(piStamp, null, "\t"));
   if (rig !== undefined) writeFileSync(join(d, "rig.json"), JSON.stringify(rig));
   const run = () => {
@@ -239,7 +243,7 @@ test("locale: POSIX names are imported as BCP 47 tags; only well-formed tags are
 });
 
 test("frozenSettings stops following changes once stopped", () => {
-  const section = createRigSettings(mkdtempSync(join(tmpdir(), "stamp-"))).declare("stamp", SETTINGS);
+  const section = createRigSettings(mkdtempSync(join(root, "stamp-"))).declare("stamp", SETTINGS);
   const frozen = frozenSettings(section);
   section.set("showSeconds", false);
   assert.equal(frozen.get().showSeconds, false);

@@ -1,9 +1,13 @@
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRigSettings } from "./index.ts";
+
+// Every temp dir lives under one root, removed when the file finishes.
+const root = mkdtempSync(join(tmpdir(), "rig-settings-"));
+after(() => rmSync(root, { recursive: true, force: true }));
 
 const DECL = [
   { key: "maxConcurrent", type: "integer", min: 1, max: 32, default: 10, description: "Parallel subagents" },
@@ -12,7 +16,7 @@ const DECL = [
 ];
 
 function dir(file) {
-  const d = mkdtempSync(join(tmpdir(), "rig-settings-"));
+  const d = mkdtempSync(join(root, "rig-settings-"));
   if (file !== undefined) writeFileSync(join(d, "rig.json"), typeof file === "string" ? file : JSON.stringify(file));
   return d;
 }
@@ -264,7 +268,7 @@ test("sections lists declared sections with their settings for the menu", () => 
 
 test("a project .pi/rig.json is ignored", () => {
   const agentDir = dir();
-  const project = mkdtempSync(join(tmpdir(), "rig-project-"));
+  const project = mkdtempSync(join(root, "rig-project-"));
   mkdirSync(join(project, ".pi"));
   writeFileSync(join(project, ".pi", "rig.json"), JSON.stringify({ subagents: { maxConcurrent: 2 } }));
   const cwd = process.cwd();
