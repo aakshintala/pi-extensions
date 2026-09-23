@@ -11,13 +11,16 @@ It registers no tools, no commands and no settings.
 
 - The prompt is sent unchanged. Each newly named skill's body follows it in one
   `inline-skill` message, shown as `[skill] <name>` rows (`Ctrl+O` expands them).
-- A skill loads once per session branch. Moving to another point in the tree
-  (`/tree`) restores the set loaded on that branch.
+- Steering and follow-up messages, typed or queued, carry their skills in the
+  same message, in the block form Pi uses for `/skill:name`. The live transcript
+  shows only your text; the `[skill]` row appears when the session is reopened.
+- A skill counts as loaded once its message reaches the model, so a prompt Pi
+  refuses loads nothing. It loads once per session branch; moving to another
+  point in the tree (`/tree`) restores the set loaded on that branch.
 - At the start of a prompt, a registered command or prompt template with the
   same name wins.
-- Prompts naming no skill cost nothing. Skill files are read in the background
-  while the prompt is submitted; an unreadable one is reported and skipped.
-- Steering and follow-up messages sent while the agent runs load no skills.
+- Prompts naming no skill cost nothing. Skill files are read asynchronously when
+  the message is delivered; an unreadable one is reported and skipped.
 
 ## Autocomplete
 

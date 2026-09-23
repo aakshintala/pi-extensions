@@ -1,5 +1,5 @@
 // inline-skills module tests: token detection, the injected message, the autocomplete
-// provider, the input path, and the editor patch's shape guard.
+// provider, delivery, and the editor patch.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import "./fixtures/tool-display/pi-tui.mjs";
@@ -76,7 +76,7 @@ test("provider completion replaces the token and adds one space", async () => {
   assert.deepEqual(calls, [["apply", "pi"]], "Pi's own items go to Pi");
 });
 
-test("the input handler returns at once; reads finish before the turn starts", async () => {
+test("a skill counts as loaded only once its message is delivered", async () => {
   const handlers = {};
   const pi = {
     on: (name, h) => (handlers[name] = h),
@@ -84,12 +84,13 @@ test("the input handler returns at once; reads finish before the turn starts", a
     getCommands: () => [{ name: "skill:tdd", source: "skill", sourceInfo: { path: new URL("./fixtures/inline-skills/skills/tdd/SKILL.md", import.meta.url).pathname } }],
   };
   ext.default(pi);
-  const result = handlers.input({ type: "input", text: "use /tdd", source: "interactive" }, {});
-  assert.equal(result, undefined, "no transform, and no promise to wait on");
-  const started = await handlers.before_agent_start({}, { ui: { notify: assert.fail } });
-  assert.match(started.message.content, /Body of tdd\./);
-  assert.equal(handlers.input({ type: "input", text: "use /tdd", source: "interactive" }, {}), undefined);
-  assert.equal(await handlers.before_agent_start({}, {}), undefined, "already loaded");
+  const ctx = { ui: { notify: assert.fail } };
+  const first = await handlers.before_agent_start({ prompt: "use /tdd" }, ctx);
+  assert.match(first.message.content, /Body of tdd\./);
+  const retry = await handlers.before_agent_start({ prompt: "use /tdd" }, ctx); // the first never reached the model
+  assert.deepEqual(retry, first);
+  await handlers.message_end({ message: { role: "custom", ...retry.message } }, ctx);
+  assert.equal(await handlers.before_agent_start({ prompt: "use /tdd" }, ctx), undefined);
 });
 
 // A real CustomEditor mounted where Pi mounts it; counts autocomplete triggers.

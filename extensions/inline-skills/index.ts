@@ -67,23 +67,50 @@ export async function readSkill(skill: Skill): Promise<ParsedSkillBlock> {
   return { name: skill.name, location: skill.path, content: body, userMessage: undefined };
 }
 
-export function skillMessage(blocks: ParsedSkillBlock[]) {
+const HEADER = "Skills the user named in this request, loaded in full. Follow them for it; read a skill's file only to inspect its source.";
+
+function skillText(blocks: ParsedSkillBlock[]): string {
   const parts = blocks.map(
     (b) => `Skill \`${b.name}\` (${b.location}). Its relative paths start at ${dirname(b.location)}.\n${fence(b.content)}`,
   );
+  return `${HEADER}\n\n${parts.join("\n\n")}`;
+}
+
+/** The custom message that follows a prompt naming skills. */
+export function skillMessage(blocks: ParsedSkillBlock[]) {
   return {
     customType: MESSAGE_TYPE,
-    content: `Skills named in the user's message above, loaded in full. Follow them for that request; read a skill's file only to inspect its source.\n\n${parts.join("\n\n")}`,
+    content: skillText(blocks),
     display: true,
     details: { names: blocks.map((b) => b.name), skills: blocks },
   };
 }
+
+/**
+ * A steer or follow-up carries its skills in its own text, in the block form Pi uses
+ * for `/skill:name`, so they arrive in the same message: queued messages are
+ * delivered one per turn by default, so a separate message would arrive a turn early.
+ */
+export function withSkills(message: any, blocks: ParsedSkillBlock[]) {
+  const block = `<skill name="${blocks.map((b) => b.name).join(", ")}" location="${blocks[0].location}">\n${skillText(blocks)}\n</skill>`;
+  const text = textOf(message);
+  const rest = typeof message.content === "string" ? [] : message.content.filter((c: any) => c.type !== "text");
+  return { ...message, content: [{ type: "text", text: `${block}\n\n${text}` }, ...rest] };
+}
+
+const textOf = (message: any): string =>
+  typeof message.content === "string" ? message.content : message.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
+
+/** Names of a leading skill block, Pi's own (`/skill:name`) or ours. */
+const blockNames = (text: string) => /^<skill name="([^"]+)"/.exec(text)?.[1].split(", ");
 
 function restoreLoaded(ctx: ExtensionContext): Set<string> {
   const loaded = new Set<string>();
   for (const e of ctx.sessionManager.getBranch() as any[]) {
     if (e.type === "custom_message" && e.customType === MESSAGE_TYPE) {
       for (const s of e.details?.skills ?? []) if (s?.name) loaded.add(s.name);
+    } else if (e.type === "message" && e.message?.role === "user") {
+      for (const name of blockNames(textOf(e.message)) ?? []) loaded.add(name);
     }
   }
   return loaded;
@@ -166,9 +193,18 @@ export function patchEditor(tui: any, version = VERSION): boolean {
 
 export default function (pi: ExtensionAPI) {
   let loaded = new Set<string>();
-  let pending: Promise<{ blocks: ParsedSkillBlock[]; failed: string[] }> | undefined;
+  // Named by the prompt being started; loaded once its message is delivered.
+  let starting = new Set<string>();
   const skills = () => listSkills(pi);
   const commands = () => pi.getCommands().filter((c) => c.source !== "skill").map((c) => c.name.toLowerCase());
+  const toLoad = (text: string) => (blockNames(text) ? [] : namedSkills(text, skills, new Set([...loaded, ...starting]), commands));
+
+  async function read(named: Skill[], ctx: ExtensionContext): Promise<ParsedSkillBlock[]> {
+    const results = await Promise.allSettled(named.map(readSkill));
+    const failed = named.filter((_, i) => results[i].status === "rejected").map((s) => s.name);
+    if (failed.length) ctx.ui.notify(`inline-skills: could not read ${failed.join(", ")}`, "error");
+    return results.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+  }
 
   pi.registerMessageRenderer(MESSAGE_TYPE, (message, { expanded }) => {
     const blocks = (message.details as { skills?: ParsedSkillBlock[] } | undefined)?.skills;
@@ -184,7 +220,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", (_e, ctx) => {
     loaded = restoreLoaded(ctx);
-    pending = undefined;
+    starting = new Set();
     if (!ctx.hasUI) return;
     ctx.ui.addAutocompleteProvider((current) => skillProvider(skills, current));
     // The widget factory is called synchronously with Pi's TUI; drop the widget at once.
@@ -199,30 +235,36 @@ export default function (pi: ExtensionAPI) {
     loaded = restoreLoaded(ctx);
   });
 
-  pi.on("input", (event) => {
-    pending = undefined;
-    // ponytail: steer and follow-up messages load no skills; they never reach before_agent_start.
-    if (event.source === "extension" || event.streamingBehavior) return;
-    const named = namedSkills(event.text, skills, loaded, commands);
+  // A prompt: its skills follow it as one custom message. Runs after Pi accepted the
+  // prompt (model and auth checked); the text is already expanded.
+  pi.on("before_agent_start", async (event, ctx) => {
+    starting = new Set();
+    const named = toLoad(event.prompt);
     if (!named.length) return;
-    for (const s of named) loaded.add(s.name);
-    // Start the reads now; before_agent_start awaits them. The input path never waits on disk.
-    pending = Promise.allSettled(named.map(readSkill)).then((results) => {
-      const blocks: ParsedSkillBlock[] = [];
-      const failed: string[] = [];
-      results.forEach((r, i) => (r.status === "fulfilled" ? blocks.push(r.value) : failed.push(named[i].name)));
-      for (const name of failed) loaded.delete(name);
-      return { blocks, failed };
-    });
+    starting = new Set(named.map((s) => s.name)); // the prompt's own text is not scanned again
+    const blocks = await read(named, ctx);
+    return blocks.length ? { message: skillMessage(blocks) } : undefined;
   });
 
-  pi.on("before_agent_start", async (_e, ctx) => {
-    if (!pending) return;
-    const p = pending;
-    pending = undefined;
-    const { blocks, failed } = await p;
-    if (failed.length) ctx.ui.notify(`inline-skills: could not read ${failed.join(", ")}`, "error");
+  // Delivery. A skill counts as loaded only once its message is delivered. A steer or
+  // follow-up (from Pi or the queue) is delivered here, so its skills join its text.
+  pi.on("message_end", async (event, ctx) => {
+    const message: any = event.message;
+    if (message.role === "custom" && message.customType === MESSAGE_TYPE) {
+      for (const s of message.details?.skills ?? []) {
+        starting.delete(s.name);
+        loaded.add(s.name);
+      }
+      return;
+    }
+    if (message.role !== "user") return;
+    const text = textOf(message);
+    const named = toLoad(text);
+    for (const name of blockNames(text) ?? []) loaded.add(name);
+    if (!named.length) return;
+    const blocks = await read(named, ctx);
     if (!blocks.length) return;
-    return { message: skillMessage(blocks) };
+    for (const b of blocks) loaded.add(b.name);
+    return { message: withSkills(message, blocks) };
   });
 }
