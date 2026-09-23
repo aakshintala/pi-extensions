@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { parseEvents, startTui } from "./helpers/tui.mjs";
+import { liveGroup, parseEvents, startTui } from "./helpers/tui.mjs";
 
 test("events file: a partly written last line is not read yet", () => {
   assert.deepEqual(parseEvents('{"event":"a"}\n{"event":"b"}\n{"ev'), ["a", "b"]);
@@ -9,9 +9,9 @@ test("events file: a partly written last line is not read yet", () => {
 
 test("tmux harness: pi shows a scripted reply", async (t) => {
   const tui = await startTui(t, { replies: ["Hello from the scripted model."] });
-  // Registered after the helper's hook, so it runs after cleanup: pi's whole
-  // process group is gone.
-  t.after(() => assert.throws(() => process.kill(-tui.pid, 0), { code: "ESRCH" }));
+  // Registered after the helper's hook, so it runs after cleanup: nothing in pi's
+  // process group is still running.
+  t.after(() => assert.deepEqual(liveGroup(tui.pid), []));
 
   tui.type("say hello");
   tui.keys("Enter");

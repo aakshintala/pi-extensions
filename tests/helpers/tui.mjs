@@ -124,23 +124,25 @@ async function until(ok, describe, timeoutMs = TIMEOUT_MS) {
   }
 }
 
+// Live (non-zombie) processes in process group `pgid`, as "pid stat command" lines.
+// Zombies are skipped: they hold no files and are reaped by whoever inherited them.
+export const liveGroup = (pgid) =>
+  spawnSync("ps", ["-A", "-o", "pgid=,pid=,stat=,comm="], { encoding: "utf8" })
+    .stdout.split("\n")
+    .map((l) => l.trim().split(/\s+/))
+    .filter(([g, , stat]) => Number(g) === pgid && stat && !stat.startsWith("Z"))
+    .map((f) => f.slice(1).join(" "));
+
 // The pane process leads its own process group (tmux setsid()s it); signal the group.
-async function stopGroup(pid) {
-  const gone = () => {
-    try {
-      process.kill(-pid, 0);
-      return false;
-    } catch (e) {
-      return e.code === "ESRCH";
-    }
-  };
+async function stopGroup(pgid) {
+  const gone = () => liveGroup(pgid).length === 0;
   for (const [signal, wait] of [["SIGTERM", 5_000], ["SIGKILL", TIMEOUT_MS]]) {
     if (gone()) return;
     try {
-      process.kill(-pid, signal);
+      process.kill(-pgid, signal);
     } catch {}
     try {
-      await until(gone, () => `pi (pid ${pid}) to exit after ${signal}`, wait);
+      await until(gone, () => `pi group ${pgid} to exit after ${signal}: [${liveGroup(pgid)}]`, wait);
       return;
     } catch (e) {
       if (signal === "SIGKILL") throw e;
