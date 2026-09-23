@@ -25,6 +25,8 @@ export interface MessageStampInput {
   previousTimestamp?: number;
   completedAt?: number;
   firstContentAt?: number;
+  /** The first hidden tool-only response of the run this reply ends (#142). */
+  runStartedAt?: number;
 }
 
 /** A well-formed BCP 47 tag with a 2–3 letter language, such as `en-US` or `de-CH-u-hc-h23`. */
@@ -67,7 +69,9 @@ export function formatMessageStampLabel(input: Readonly<MessageStampInput>, sett
   const label = formatStampLabel(input.timestamp, input.previousTimestamp, settings);
   if (!label || settings.responseTiming === "off") return label;
   if (!isValidTimestamp(input.completedAt) || input.completedAt < input.timestamp) return label;
-  const total = formatElapsedSeconds(input.completedAt - input.timestamp);
+  // The total covers the whole run; time to first content is the reply's own.
+  const start = isValidTimestamp(input.runStartedAt) && input.runStartedAt <= input.timestamp ? input.runStartedAt : input.timestamp;
+  const total = formatElapsedSeconds(input.completedAt - start);
   if (!total) return label;
   if (settings.responseTiming === "duration") return `${label} · ${total}`;
   const first =

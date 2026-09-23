@@ -51,6 +51,10 @@ export interface AssistantStamp {
   estimatedCost?: number;
   costSinceUser?: number;
   tools?: ToolTiming[];
+  /** No text: the response only called tools. Absent in entries written before #142. */
+  toolOnly?: true;
+  /** When this reply ends a run of tool-only responses: the first one's timestamp. */
+  runStartedAt?: number;
 }
 
 // Read-only shapes written by earlier versions of the fork.
@@ -86,7 +90,7 @@ const KEYS: Record<number, string[]> = {
   4: [...TIMING_KEYS, "metadata"],
   5: [...TIMING_KEYS, "metadata", "thinkingLevel"],
   6: [...TIMING_KEYS, "metadata", "thinkingLevel", "estimatedCost", "costSinceUser"],
-  7: [...TIMING_KEYS, "metadata", "thinkingLevel", "estimatedCost", "costSinceUser", "tools"],
+  7: [...TIMING_KEYS, "metadata", "thinkingLevel", "estimatedCost", "costSinceUser", "tools", "toolOnly", "runStartedAt"],
 };
 
 export function isMessageStamp(value: unknown): value is MessageStamp {
@@ -106,6 +110,8 @@ export function isMessageStamp(value: unknown): value is MessageStamp {
     if (!isAssistantEstimatedCost(value.estimatedCost)) return false;
     if (has("costSinceUser") && value.estimatedCost > (value.costSinceUser as number)) return false;
   }
+  if (has("toolOnly") && value.toolOnly !== true) return false;
+  if (has("runStartedAt") && !(isValidTimestamp(value.runStartedAt) && value.runStartedAt <= value.timestamp)) return false;
   return !has("tools") || (Array.isArray(value.tools) && value.tools.every(isToolTiming));
 }
 
@@ -141,8 +147,10 @@ interface Line {
 /**
  * Renders every valid stamp entry as a component, including tool stamps while
  * `toolStamps` is off (they render no lines), so changing a setting reaches every
- * stamp already on screen. Lines are rebuilt only when the frozen settings object
- * changes, and wrapped output only when the width changes too.
+ * stamp already on screen. The exception is a tool-only response while `toolStamps`
+ * is off: Pi puts a spacer row above every component, so it gets none, and a later
+ * change reaches it when Pi rebuilds the chat. Lines are rebuilt only when the frozen
+ * settings object changes, and wrapped output only when the width changes too.
  */
 export function stampRenderer(settings: () => Readonly<StampSettings>): EntryRenderer {
   return (entry, options, theme) => {
@@ -152,6 +160,8 @@ export function stampRenderer(settings: () => Readonly<StampSettings>): EntryRen
       const tool = { name: data.toolName, startedAt: data.startedAt, completedAt: data.completedAt, outcome: data.outcome };
       lines = (s) => toolLines([tool], s, options.expanded);
     } else if (isMessageStamp(data)) {
+      // Zero lines would still leave Pi's spacer row, so a hidden stamp is no component.
+      if (isHidden(data, settings())) return undefined;
       lines = (s) => messageLines(data, s, options.expanded);
     } else return undefined;
     return rightAligned(lines, settings, theme);
@@ -159,6 +169,7 @@ export function stampRenderer(settings: () => Readonly<StampSettings>): EntryRen
 }
 
 function messageLines(data: MessageStamp, s: Readonly<StampSettings>, expanded: boolean): Line[] {
+  if (isHidden(data, s)) return [];
   const label = formatMessageStampLabel(data, s);
   if (!label) return [];
   const timeline: Array<[TimelineBoundary, number | undefined]> = [
@@ -184,6 +195,9 @@ function messageLines(data: MessageStamp, s: Readonly<StampSettings>, expanded: 
     ...("tools" in data && data.tools ? toolLines(data.tools, s, expanded) : []),
   ];
 }
+
+/** A tool-only response draws nothing in the chat (#142), so neither does its stamp, unless tool stamps are on. */
+const isHidden = (data: MessageStamp, s: Readonly<StampSettings>) => "toolOnly" in data && data.toolOnly === true && !s.toolStamps;
 
 function toolLines(tools: readonly ToolTiming[], s: Readonly<StampSettings>, expanded: boolean): Line[] {
   if (!s.toolStamps) return [];

@@ -1,7 +1,7 @@
 // Stamps in a real pi (spec #36, ADR 0001): fixed clock in UTC, full-screen asserts.
 import { test } from "node:test";
 import assert from "node:assert";
-import { readFileSync } from "node:fs";
+import { cpSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { liveGroup, startTui } from "./helpers/tui.mjs";
@@ -43,7 +43,8 @@ ${STAMP}
 });
 
 test("turning toolStamps on in /rig shows stamps for tools that already ran", async (t) => {
-  const tui = await start(t, [[{ type: "toolCall", id: "c1", name: "ls", arguments: {} }], "Done."], 48);
+  // The response has text, so its stamp shows while toolStamps is off (#142).
+  const tui = await start(t, [[{ type: "text", text: "Listing." }, { type: "toolCall", id: "c1", name: "ls", arguments: {} }], "Done."], 48);
   tui.type("run it");
   tui.keys("Enter");
   await tui.waitForEvent("agent_end");
@@ -54,6 +55,8 @@ test("turning toolStamps on in /rig shows stamps for tools that already ran", as
 
 
 ${STAMP}
+
+ Listing.
 
 
  ls .
@@ -68,7 +71,7 @@ ${STAMP}${on ? `\n${" ".repeat(58)}tool ls · 0.0s · error` : ""}
 ${STAMP}
 `;
   const FOOTER = `~/cwd
-↑16 ↓4 R3 W16 CH10.3% 0.0%/128k (auto)                                 harness-1`;
+↑18 ↓6 R3 W18 CH9.1% 0.0%/128k (auto)                                  harness-1`;
   const editor = (on) => fill(`${transcript(on)}
 ────────────────────────────────────────────────────────────────────────────────
 
@@ -177,4 +180,93 @@ ${FOOTER}`, 24);
   }
   const rigJson = JSON.parse(readFileSync(join(dirname(tui.home), "agent", "rig.json"), "utf8"));
   assert.deepEqual(rigJson, { stamp: { locale: "de-DE" } });
+});
+
+// #142: a tool-only response draws nothing, so its stamp draws nothing unless toolStamps
+// is on. Pi's reload rebuilds the chat from the saved entries, as a resume does.
+const read = (id, p) => ({ type: "toolCall", id, name: "read", arguments: { path: p } });
+const RUN_ROWS = 30;
+const run = (...top) => "\n" + [...top, ...Array(RUN_ROWS - top.length).fill("")].join("\n");
+const RELOADED = " Reloaded keybindings, extensions, skills, prompts, themes, and context files";
+
+async function startRun(t, replies) {
+  const tui = await startTui(t, {
+    extensions: [...extensions, root("extensions/tool-display/index.ts")],
+    args: ["--tools", "read"],
+    rows: RUN_ROWS,
+    replies,
+  });
+  t.after(() => assert.deepEqual(liveGroup(tui.pid), []));
+  cpSync(root("tests/fixtures/tool-display/workspace"), tui.cwd, { recursive: true });
+  return tui;
+}
+
+// Syncs on a screen that a later full-screen assert pins down.
+async function waitForText(tui, text, present = true) {
+  const deadline = Date.now() + 20_000;
+  while (tui.screen().includes(text) !== present) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${present ? "" : "no "}${JSON.stringify(text)}\n${tui.screen()}`);
+    await new Promise((r) => setTimeout(r, 10)); // poll interval, not a sync point
+  }
+}
+
+async function setToolStamps(tui, n = 1) {
+  tui.type("/rig");
+  tui.keys("Enter");
+  await waitForText(tui, "(1/12)");
+  tui.keys("Up");
+  await waitForText(tui, "(12/12)");
+  tui.keys("Enter");
+  await tui.waitForEvent("stamp.toolStamps=true", n);
+  tui.keys("Escape");
+  await waitForText(tui, "[stamp]", false);
+}
+
+async function reload(tui, n) {
+  tui.type("/reload");
+  tui.keys("Enter");
+  await tui.waitForEvent("session_start", n);
+}
+
+const footer = (usage) => ["", "─".repeat(80), "", "─".repeat(80), "~/cwd", usage];
+
+test("four tool-only responses draw no stamp rows: the summary, the reply, one stamp; the same after a reload", async (t) => {
+  const tui = await startRun(t, [[read("c1", "a.txt")], [read("c2", "b.txt")], [read("c3", "a.txt")], [read("c4", "b.txt")], "Done."]);
+  tui.type("go");
+  tui.keys("Enter");
+  await tui.waitForEvent("agent_end");
+  const transcript = ["", " go", "", "", STAMP, "", " ⏺ Read 4 files", "", " Done.", "", STAMP];
+  const usage = "↑71 ↓26 R112 W72 CH60.7% 0.1%/128k (auto)                              harness-1";
+  await tui.waitForScreen(run(...transcript, ...footer(usage)));
+  await reload(tui, 2);
+  await tui.waitForScreen(run(...transcript, "", RELOADED, ...footer(usage)));
+});
+
+test("with toolStamps on, every response keeps its row, live and after a reload; turning it on brings hidden rows back", async (t) => {
+  const tui = await startRun(t, [[read("c1", "a.txt")], [read("c2", "b.txt")], "Done."]);
+  tui.type("go");
+  tui.keys("Enter");
+  await tui.waitForEvent("agent_end");
+  const tool = `${" ".repeat(54)}tool read · 0.0s · success`;
+  const usage = "↑37 ↓14 R21 W37 CH34.5% 0.0%/128k (auto)                               harness-1";
+  const off = ["", " go", "", "", STAMP, "", " ⏺ Read 2 files", "", " Done.", "", STAMP];
+  await tui.waitForScreen(run(...off, ...footer(usage)));
+  await setToolStamps(tui);
+  await reload(tui, 2);
+  const on = ["", " go", "", "", STAMP, "", " ⏺ Read 2 files", "", STAMP, tool, "", STAMP, tool, "", " Done.", "", STAMP];
+  await tui.waitForScreen(run(...on, "", RELOADED, ...footer(usage)));
+});
+
+test("with toolStamps on from the start, the live rows match the reloaded ones", async (t) => {
+  const tui = await startRun(t, [[read("c1", "a.txt")], [read("c2", "b.txt")], "Done."]);
+  await setToolStamps(tui);
+  tui.type("go");
+  tui.keys("Enter");
+  await tui.waitForEvent("agent_end");
+  const tool = `${" ".repeat(54)}tool read · 0.0s · success`;
+  const usage = "↑37 ↓14 R21 W37 CH34.5% 0.0%/128k (auto)                               harness-1";
+  const on = ["", " go", "", "", STAMP, "", " ⏺ Read 2 files", "", STAMP, tool, "", STAMP, tool, "", " Done.", "", STAMP];
+  await tui.waitForScreen(run(...on, ...footer(usage)));
+  await reload(tui, 2);
+  await tui.waitForScreen(run(...on, "", RELOADED, ...footer(usage)));
 });
