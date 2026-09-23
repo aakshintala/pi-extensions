@@ -29,6 +29,10 @@ its ID and log paths at once.
   30 s stops the monitor as failed with code `flooded`. 2 s without a drop ends
   it.
 - **Deadline.** At its deadline the monitor stops as failed with code `timeout`.
+- **Output.** A monitor whose log passes 5 GB stops as failed with code
+  `output`.
+- **Cap.** Monitors count toward jobs' `maxJobs` (default 16), shared with
+  background jobs. A start past it is refused.
 
 ## Lifecycle
 
@@ -37,15 +41,13 @@ its ID and log paths at once.
   process group. If any of the group is still alive 800 ms later, it gets
   SIGKILL until the group is empty.
 - Each monitor is a `monitor` row in FleetView. Opening it shows the live
-  standard output log, and Ctrl+Q stops it with one notice.
+  standard output log, and Ctrl+Q stops it with one notice. `jobs stop <id>`
+  stops it too.
 - A monitor belongs to its session: shutdown, `/reload` and a session switch
   stop it without a notice. If Pi exits without shutting down, an `exit`
-  handler sends SIGKILL to every monitor group.
+  handler sends SIGKILL to every monitor group. If Pi is killed outright, the
+  next Pi reaps the group from its crash record (`<id>.pid`), as jobs do.
 - Logs are left in a per-session temporary directory for the OS to clean.
 
 No commands, keys or settings.
 
-## Not yet
-
-- `jobs stop` does not reach monitors yet; the model cannot stop one before
-  it ends.
