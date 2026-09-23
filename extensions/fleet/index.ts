@@ -3,8 +3,9 @@
 // only one that draws them. Enter or a click opens an item in the viewer frame
 // (#45, viewer.ts). It also delivers the session's notices (#46) and
 // keeps a run without the UI alive until the work it started returns.
-import type { ExtensionAPI, ExtensionContext, MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
+import { getKeybindings, isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
+import { join } from "node:path";
 import { duration, fleet, isFinished, viewerTakes, type Item, type Notice } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
 import { createViewer, type Viewer } from "./viewer.ts";
@@ -13,6 +14,13 @@ import { createViewer, type Viewer } from "./viewer.ts";
 const MAX_LINES = 6;
 const MAIN = "main";
 const NOTICE = "rig.notice";
+const WARNED = Symbol.for("pi-rig.fleet.ctrlBWarned");
+
+/**
+ * Ctrl+B backgrounds only once the user frees it from Pi's default cursor-left binding (#29).
+ * Read live: /reload re-reads keybindings.json after session_start.
+ */
+const ctrlBFree = () => !getKeybindings().getKeys("tui.editor.cursorLeft").includes("ctrl+b");
 
 type Row = { item?: Item; depth: number };
 
@@ -106,6 +114,11 @@ export default function (pi: ExtensionAPI) {
     cleanup?.();
     detach?.();
     if (ctx.mode === "tui") {
+      const g = globalThis as { [WARNED]?: boolean };
+      if (!ctrlBFree() && !g[WARNED]) {
+        g[WARNED] = true; // once per process: after /reload this check still sees the old bindings
+        ctx.ui.notify(`Ctrl+B moves the cursor left, so it cannot background commands. Add "tui.editor.cursorLeft": ["left"] to ${join(getAgentDir(), "keybindings.json")}`, "warning");
+      }
       const mounted = mount(ctx);
       viewer = mounted.viewer;
       cleanup = mounted.cleanup;
@@ -202,13 +215,17 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   const view = {
     render(width: number) {
       const all = current();
-      if (all.length === 1) return [];
       const theme = ctx.ui.theme;
-      const { start, end, hidden } = window(all);
-      const out = all.slice(start, end).map((row, i) => line(row, start + i, theme));
-      if (hidden) out.push(theme.fg("dim", `   … ${hidden} more`));
-      const confirm = viewer.confirmation();
-      if (confirm) out.push(theme.fg("warning", ` ${confirm}`));
+      const out: string[] = [];
+      if (all.length > 1) {
+        const { start, end, hidden } = window(all);
+        out.push(...all.slice(start, end).map((row, i) => line(row, start + i, theme)));
+        if (hidden) out.push(theme.fg("dim", `   … ${hidden} more`));
+        const confirm = viewer.confirmation();
+        if (confirm) out.push(theme.fg("warning", ` ${confirm}`));
+      }
+      // Last, so a click's row index still counts from the first row.
+      if (registry.foregrounds().length && ctrlBFree()) out.push(theme.fg("dim", " ctrl+b to run in background"));
       return out.map((l) => truncateToWidth(l, width));
     },
     invalidate() {},
@@ -216,6 +233,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   const region = new MouseRegion(view, (event) => {
     if (event.type !== "click" || event.button !== "left") return undefined;
     const all = current();
+    if (all.length === 1) return undefined; // only the Ctrl+B hint is showing
     const { start, end } = window(all);
     const index = start + event.y;
     if (index >= end) return undefined;
@@ -248,6 +266,16 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
 
   const unlisten = ctx.ui.onTerminalInput((data) => {
     if (data.startsWith("\x1b[<") || isKeyRelease(data)) return undefined;
+    if (matchesKey(data, "ctrl+b") && ctrlBFree() && registry.foregrounds().length) {
+      for (const background of registry.foregrounds()) {
+        try {
+          background();
+        } catch {
+          // A producer bug must not stop the others from backgrounding.
+        }
+      }
+      return { consume: true };
+    }
     if (!focused && viewer.handleKey(data)) return { consume: true };
     // The overlay covers FleetView and takes every other key.
     if (current().length === 1 || viewer.overlay()) return undefined;

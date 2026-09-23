@@ -79,6 +79,13 @@ export interface Fleet {
   viewing?: string;
   /** Set while the queue extension edits one of its rows in Pi's editor: typed input then belongs to the queue. */
   editing?: boolean;
+  /**
+   * Adds a foreground command that Ctrl+B can move to the background: `background` does that.
+   * Call the returned function once the command ends or is backgrounded.
+   */
+  foreground(background: () => void): () => void;
+  /** The current foreground commands' `background` handlers. Only the fleet extension calls them. */
+  foregrounds(): readonly (() => void)[];
 }
 
 /**
@@ -105,6 +112,7 @@ export function createFleet(): Fleet {
   const sinks = new Map<string, (notice: Notice) => void>();
   const held = new Map<string, Notice[]>(); // for owners not attached yet
   const gone = new Set<string>(); // detached owners: their notices are dropped
+  const foregrounds = new Set<{ background: () => void }>();
   const send = (owner: string, notice: Notice) => {
     const deliver = sinks.get(owner);
     if (!deliver) {
@@ -173,6 +181,15 @@ export function createFleet(): Fleet {
       listeners.add(listener);
       return () => void listeners.delete(listener);
     },
+    foreground(background) {
+      const entry = { background };
+      foregrounds.add(entry);
+      changed();
+      return () => {
+        if (foregrounds.delete(entry)) changed();
+      };
+    },
+    foregrounds: () => [...foregrounds].map((f) => f.background),
   };
   return fleet;
 }
