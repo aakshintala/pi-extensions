@@ -1,0 +1,7 @@
+pi-context-view (https://github.com/dimk90/pi-context-view)
+version 0.6.0, npm tarball https://registry.npmjs.org/pi-context-view/-/pi-context-view-0.6.0.tgz
+integrity sha512-Ngo1m+3lzyi4AE1WxYW2MRKOAYdzvL3XcZSmJg27fqAlJPuDM3Rnp+rqheFBe3ElX+wsK4xZuv1CaZb+FrFKRA==
+License: MIT (LICENSE)
+
+Kept for reference:
+- upstream/pi-context-view/src/: the package's source, ported to extensions/context/

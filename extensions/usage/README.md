@@ -38,5 +38,5 @@ None.
 ## Upstream
 
 Ported from [`@tmustier/pi-usage-extension`](https://github.com/tmustier/pi-extensions/tree/main/usage-extension)
-0.9.5, MIT licence (see `LICENSE`). Cut: export, the table filter and hide
+0.9.5, MIT licence (see `LICENSE`); the upstream snapshot and its SOURCE record are in `upstream/pi-usage-extension/`. Cut: export, the table filter and hide
 keys, the formula footer and the Insights view.
