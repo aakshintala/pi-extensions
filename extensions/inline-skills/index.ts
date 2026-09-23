@@ -105,14 +105,14 @@ export function withSkills(message: any, blocks: ParsedSkillBlock[]) {
 const textOf = (message: any): string =>
   typeof message.content === "string" ? message.content : message.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
 
-/** Names of a leading skill block, Pi's own (`/skill:name`) or ours. */
-const blockNames = (text: string) => /^<skill name="([^"]+)"/.exec(text)?.[1].split(", ");
-
-/** The leading skill blocks' names and the text after them; no text when a block does not parse. */
+/**
+ * The names of the leading skill blocks, Pi's own (`/skill:name`) or ours, and the text
+ * after them; no text when a block does not parse.
+ */
 function leadingBlocks(text: string): { names: string[]; rest: string } {
   const names: string[] = [];
-  for (let b; (b = parseSkillBlock(text)); text = b.userMessage ?? "") names.push(...b.name.split(", "));
-  return { names, rest: blockNames(text) ? "" : text };
+  for (let b; (b = parseSkillBlock(text)); text = b.userMessage ?? "") names.push(...b.name.split(/,\s*/));
+  return { names, rest: /^<skill name="[^"]+"/.test(text) ? "" : text };
 }
 
 function restoreLoaded(ctx: ExtensionContext): Set<string> {
@@ -123,7 +123,7 @@ function restoreLoaded(ctx: ExtensionContext): Set<string> {
     } else if (e.type === "custom" && e.customType === "loaded-skill" && typeof e.data?.name === "string") {
       loaded.add(e.data.name); // written by upstream when the agent read a skill file
     } else if (e.type === "message" && e.message?.role === "user") {
-      for (const name of blockNames(textOf(e.message)) ?? []) loaded.add(name);
+      for (const name of leadingBlocks(textOf(e.message)).names) loaded.add(name);
     }
   }
   return loaded;
@@ -320,7 +320,7 @@ export default function (pi: ExtensionAPI) {
     if (message.role !== "user") return;
     const text = textOf(message);
     const named = toLoad(text);
-    for (const name of blockNames(text) ?? []) loaded.add(name);
+    for (const name of leadingBlocks(text).names) loaded.add(name);
     if (!named.length) return;
     const blocks = await read(named, ctx);
     if (!blocks.length) return;

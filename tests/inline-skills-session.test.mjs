@@ -140,3 +140,46 @@ test("skills upstream recorded as loaded in a branch are not loaded again", asyn
   assert.doesNotMatch(message, /Skill `tdd`/);
   assert.match(message, /Skill `grilling`/);
 });
+
+test("a malformed leading skill block loads nothing", async (t) => {
+  const { session, requests } = await start(t, 2);
+  await session.prompt('<skill name="tdd" location="/s/tdd/SKILL.md">\nno closing tag, then /grilling');
+  assert.deepEqual(skillMessages(requests[0]), []);
+  await session.prompt("now /tdd");
+  assert.match(skillMessages(requests[1])[0], /Skill `tdd`/, "the block did not parse, so tdd was never loaded");
+});
+
+// A steer is sent while a tool runs, then the model answers it.
+const steered = (text) => [
+  (s) => (void s.steer(text), fauxAssistantMessage(fauxToolCall("read", { path: "none" }), { stopReason: "toolUse" })),
+  () => fauxAssistantMessage(fauxText("steered")),
+];
+
+test("a steer that starts with a skill block records its skills and the ones it adds", async (t) => {
+  // Names joined by a comma and no space still count, one by one.
+  const block = '<skill name="tdd,setup-grill" location="/s/tdd/SKILL.md">\nBody\n</skill>\n\n';
+  const { session, requests } = await start(t, [...steered(`${block}steer with /grilling /tdd /setup-grill`), () => fauxAssistantMessage(fauxText("ok"))]);
+  await session.prompt("go");
+  const steer = requests[1].find((m) => m.includes("steer with"));
+  assert.match(steer, /^<skill name="grilling" [\s\S]*<\/skill>\n\n<skill name="tdd,setup-grill" /, "only grilling is added");
+  await session.prompt("more /tdd /grilling /setup-grill");
+  assert.deepEqual(skillMessages(requests[2]), [], "all three count as loaded");
+});
+
+test("after a reopen or /tree, every leading block's skills count as loaded", async (t) => {
+  const block = '<skill name="tdd" location="/s/tdd/SKILL.md">\nBody\n</skill>\n\n';
+  const ok = () => fauxAssistantMessage(fauxText("ok"));
+  const { session, requests } = await start(t, [...steered(`${block}steer with /grilling`), ok, ok]);
+  await session.prompt("go");
+  assert.match(requests[1].find((m) => m.includes("steer with")), /^<skill name="grilling" [\s\S]*<\/skill>\n\n<skill name="tdd" /);
+  const answer = session.sessionManager.getBranch().at(-1);
+
+  await session.extensionRunner.emit({ type: "session_shutdown", reason: "resume" });
+  await session.extensionRunner.emit({ type: "session_start", reason: "resume" });
+  await session.prompt("after reopen /tdd /grilling");
+  assert.deepEqual(skillMessages(requests[2]), [], "both blocks' skills count as loaded after a reopen");
+
+  await session.navigateTree(answer.id);
+  await session.prompt("after tree /tdd /grilling");
+  assert.deepEqual(skillMessages(requests[3]), [], "both blocks' skills count as loaded after /tree");
+});
