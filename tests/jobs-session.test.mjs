@@ -518,6 +518,24 @@ test("the sleep check reads shell structure, not the word", async () => {
   for (const [command, blocks] of Object.entries(cases)) assert.equal(blockingSleep(command), blocks, command);
 });
 
+test("only an unfinished prompt-shaped line counts as a prompt", async () => {
+  const { PROMPT } = await import("../extensions/jobs/guards.ts");
+  const lines = {
+    "Continue? [y/N] ": true,
+    "Password: ": true,
+    "[sudo] password for me:": true,
+    "Enter passphrase for key '/k': ": true,
+    "? Pick a template ": true,
+    "Are you sure? ": true,
+    "> ": true,
+    "Why?": false,
+    "password reset done": false,
+    "checked password policy: ok": false,
+    "Compiling foo": false,
+  };
+  for (const [line, prompt] of Object.entries(lines)) assert.equal(PROMPT.test(line), prompt, line);
+});
+
 test("a job whose log passes 5 GB is stopped, and its notice says why", async (t) => {
   let id;
   // Extends its log to just past 5 GB without writing it (a sparse file), then blocks.
