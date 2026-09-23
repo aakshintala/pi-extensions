@@ -17,6 +17,7 @@ jobs:
           node-version: "22"
           cache: npm
       - run: command -v tmux || (sudo apt-get update && sudo apt-get install -y tmux)
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep fd-find # parity with Pi's built-in grep and find
       - run: npm ci
       - run: npm test
       - run: npm run audit

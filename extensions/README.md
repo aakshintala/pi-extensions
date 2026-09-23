@@ -23,5 +23,6 @@ Every entry point default-exports a factory function receiving pi's
   handler that releases it; running cleanup twice must be a safe no-op.
 - Dependency-free and credential-free: `node:` built-ins plus the pi API
   only. (`pi install` uses `--omit=dev`, so anything a distributed
-  package needs at runtime must be in `dependencies` — this package
-  ships none.)
+  package needs at runtime must be in `dependencies`.) One exception,
+  allowed by spec #35: `search` depends on `@ff-labs/fff-node`, pinned to
+  an exact version.
