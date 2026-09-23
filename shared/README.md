@@ -128,3 +128,8 @@ default line; a `null` notice sends nothing. See `extensions/fleet/README.md`.
 whether typed input belongs to it (an item is open and the text is not a slash
 command); another extension's `input` handler lets such input through, so the
 routing does not depend on load order.
+
+`foreground(background)` registers a foreground command that Ctrl+B can move to
+the background, and returns the function to call once it ends or is
+backgrounded. The fleet extension binds Ctrl+B, calls every registered
+`background`, and shows the hint while any is registered.

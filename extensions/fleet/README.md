@@ -37,6 +37,18 @@ Applies only to runs without the UI, which includes every child session.
 
 Interactive sessions end their runs as usual: their work keeps running and its notices start new turns.
 
+## Ctrl+B
+
+Ctrl+B moves every running foreground command, such as a shell command, into the background. While one can be moved, `ctrl+b to run in background` shows under the editor.
+
+Pi binds Ctrl+B to cursor left by default. To free it, add this to `keybindings.json` in Pi's agent directory:
+
+```json
+"tui.editor.cursorLeft": ["left"]
+```
+
+Until then Ctrl+B keeps moving the cursor, the hint never shows, and a warning at startup names the line to add.
+
 ## Keys
 
 | Key | When | Does |
@@ -49,6 +61,7 @@ Interactive sessions end their runs as usual: their work keeps running and its n
 | Esc | Viewing an item | Returns to the chat |
 | Ctrl+Q, then y | Viewing an item | Stops it. Any other key cancels |
 | End | Viewing an item | Jumps to the end and follows again |
+| Ctrl+B | A foreground command runs | Moves every foreground command into the background |
 
 Typing at a non-empty prompt is never captured.
 
@@ -81,6 +94,9 @@ fleet().finish("job-1", "failed", "exit 1\nError: boom",  // the user's summary:
   "shell job-1 failed (exit 1). Log: /tmp/job-1.log");    // the model's notice, in your own wording
 fleet().finish("job-1", "completed", "done", null);       // no notice: the model already has the result
 fleet().notify("job-1", "build 42 passed");              // a notice while running, such as a monitor line
+
+const end = fleet().foreground(() => moveToBackground()); // Ctrl+B calls this; the hint shows while any is registered
+end();                                                     // once the command ends or is backgrounded
 ```
 
 A notice goes to the owner session only. One sent before that session attaches is held until it does, up to the latest 50. Once the session shuts down, or its delivery throws because it was disposed, its notices are dropped.
