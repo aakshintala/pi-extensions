@@ -191,6 +191,36 @@ test("the default auto-background wait is 30 s", async (t) => {
   assert.match(s.results()[0][1], /^Still running after 30s/);
 });
 
+test("Ctrl+B backgrounds a foreground command: its call returns the job ID and log path, and only it is listed", async (t) => {
+  let result;
+  const s = await start(t, [
+    calls(["bash", { command: `echo early; ${hold("go")}; echo late` }]),
+    (context) => ((result = lastText(context)), says("waiting")()),
+    () => (writeFileSync(join(s.cwd, "go"), ""), says("still waiting")()),
+    says("done"),
+  ]);
+  const run = s.session.prompt("go");
+  await until(() => fleet().foregrounds() === 1, "the foreground command");
+  fleet().backgroundAll("another session"); // a steer in another session leaves it alone
+  assert.equal(fleet().foregrounds(), 1);
+  fleet().backgroundAll(); // what Ctrl+B calls
+  assert.equal(fleet().foregrounds(), 0);
+  await run;
+  const id = s.jobId(result);
+  const log = s.logOf(result);
+  assert.equal(result, `Moved to the background as job ${id}. Log: ${log}\nA notice arrives when it ends.`);
+  assert.equal(readFileSync(log, "utf8"), "early\nlate\n");
+  assert.deepEqual(s.notices().filter((n) => n.startsWith("Job ")), [`Job ${id} completed (exit 0) after 0s. Log: ${log}`]);
+  assert.equal(s.timers.has(30_000), false, "the auto-background timer is cleared");
+});
+
+test("a command that ends in the foreground is no longer listed for Ctrl+B", async (t) => {
+  const s = await start(t, [calls(["bash", { command: "echo hi" }]), says("ok")]);
+  await s.session.prompt("go");
+  assert.equal(fleet().foregrounds(), 0);
+  assert.deepEqual(s.results(), [[false, "hi\n"]]);
+});
+
 test("a failure notice carries the last 20 lines, cut to 2,000 characters", async (t) => {
   let result;
   const s = await start(t, [
