@@ -5,13 +5,22 @@
 import "./fixtures/tool-display/pi-tui.mjs"; // lets the extension modules load in plain node
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { after } from "node:test";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage, fauxText, fauxToolCall, scriptedSession } from "./helpers/session.mjs";
 import { liveGroup } from "./helpers/tui.mjs";
 import { fleet } from "../shared/fleet/index.ts";
+import { MAX_GROUPS, MAX_OUTPUT_BYTES, setGroupLimit, tooManyJobs } from "../shared/process-groups/index.ts";
+import { rigSettings } from "../shared/settings/index.ts";
+
+// The process's one settings instance, pinned to a directory this file owns, for the jobs extension.
+const settingsDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-monitor-settings-")));
+rigSettings(settingsDir);
+after(() => rmSync(settingsDir, { recursive: true, force: true }));
 
 const path = (p) => fileURLToPath(new URL(p, import.meta.url));
 const SCRIPT = path("./fixtures/monitor/batches.sh");
@@ -39,15 +48,20 @@ const settles = (p, what) => Promise.race([p, until(() => false, what)]);
 function fakeClock(t) {
   let now = 0;
   const pending = new Set();
+  let zombieWaits = 0;
   globalThis[TIMERS] = {
     setTimeout: (fn, ms) => {
-      const h = { fn, at: now + ms };
+      if (ms === 10) return (zombieWaits++, setTimeout(fn, ms)); // a killed group's zombie wait runs in real time
+      const h = { fn, ms, at: now + ms };
       pending.add(h);
       return h;
     },
     clearTimeout: (h) => pending.delete(h),
   };
   const clock = {
+    /** The lengths of the pending timers, in ms. */
+    pending: () => [...pending].map((h) => h.ms).sort((a, b) => a - b),
+    zombieWaits: () => zombieWaits,
     advance(ms) {
       const end = now + ms;
       for (let h; (h = [...pending].filter((h) => h.at <= end).sort((a, b) => a.at - b.at)[0]); ) {
@@ -68,7 +82,7 @@ function fakeClock(t) {
 }
 
 /** Starts a session whose model calls monitor with `args` (command defaults to the fixture). */
-async function start(t, args = {}, { ui = false } = {}) {
+async function start(t, args = {}, { ui = false, extensions = [], replies = [says("ok")] } = {}) {
   const clock = fakeClock(t);
   let cwd;
   t.after(() => {
@@ -78,7 +92,7 @@ async function start(t, args = {}, { ui = false } = {}) {
   });
   let ctx;
   const capture = (pi) => pi.on("session_start", (_e, c) => (ctx = c));
-  const s = await scriptedSession(t, { replies: [calls({ command: `sh ${SCRIPT}`, description: "watch builds", ...args }), says("ok")], extensions: [path("../extensions/monitor/index.ts"), capture] });
+  const s = await scriptedSession(t, { replies: [calls({ command: `sh ${SCRIPT}`, description: "watch builds", ...args }), ...replies], extensions: [path("../extensions/monitor/index.ts"), ...extensions, capture] });
   cwd = s.cwd;
   await s.session.bindExtensions({});
   const notices = [];
@@ -292,4 +306,61 @@ test("session shutdown kills the monitor without a notice", async (t) => {
   await settles(shutdown, "the shutdown");
   assert.deepEqual(liveGroup(pgid), []);
   assert.deepEqual(s.notices, []);
+});
+
+test("a monitor is tracked: a crash record, a place under the job cap, both released once its group is empty", async (t) => {
+  setGroupLimit(1);
+  t.after(() => setGroupLimit(MAX_GROUPS));
+  const s = await start(t);
+  const pgid = await s.pgid();
+  const record = s.log.replace(/\.log$/, ".pid");
+  assert.match(basename(dirname(record)), /^pi-monitor-/, "reap scans this directory");
+  assert.equal(statSync(dirname(record)).mode & 0o777, 0o700);
+  assert.equal(statSync(record).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(readFileSync(record, "utf8")).pgid, pgid);
+  const tool = s.session.extensionRunner.getToolDefinition("monitor");
+  await assert.rejects(tool.execute("c2", { command: "true", description: "x" }, undefined, undefined, {}), {
+    message: "Not started: 1 jobs and monitors are running, the most allowed. Wait for one or stop one with jobs, then retry.",
+  });
+  await settles(s.item.stop(), "the stop");
+  assert.equal(existsSync(record), false, "the empty group is forgotten with its record");
+  assert.equal(tooManyJobs(), undefined);
+});
+
+test("a monitor whose log passes 5 GB stops as failed and says why", async (t) => {
+  const s = await start(t);
+  truncateSync(s.log, MAX_OUTPUT_BYTES + 1); // sparse: nothing is written
+  writeFileSync(join(s.cwd, "tmp"), "one more\n");
+  renameSync(join(s.cwd, "tmp"), join(s.cwd, "m1"));
+  assert.equal(await s.ended(), `${s.head} failed [output]: its output passed 5 GB. Tighten the command's filter. ${s.logs}`);
+  assert.equal(s.notices.length, 1, "the batch past the cap is not delivered");
+});
+
+test("stop clears the rate and flood timers, and the SIGKILL wait runs on the extension's clock", async (t) => {
+  const s = await start(t, { command: `trap '' TERM; exec sh ${SCRIPT}` });
+  const pgid = await s.pgid();
+  for (let i = 1; i <= 11; i++) await s.send(`event ${i}\n`); // the 11th is dropped: flood and gap timers
+  assert.deepEqual(s.clock.pending(), [2000, 2000, 30_000, 300_000]);
+  const stopped = s.item.stop();
+  assert.deepEqual(s.clock.pending(), [800], "only the kill grace is left");
+  s.clock.advance(800);
+  await settles(stopped, "the stop to finish");
+  assert.deepEqual(liveGroup(pgid), []);
+  assert.ok(s.clock.zombieWaits() > 0, "the SIGKILL found the killed group before its processes were reaped");
+});
+
+test("jobs stop ends a monitor", async (t) => {
+  let pgid;
+  const stopIt = (context) => {
+    const text = textOf(context.messages.at(-1));
+    const id = /monitor (\w{8})/.exec(text)[1];
+    pgid = JSON.parse(readFileSync(/Log: (\S+)\.log\./.exec(text)[1] + ".pid", "utf8")).pgid; // the crash record
+    assert.notDeepEqual(liveGroup(pgid), []);
+    return fauxAssistantMessage([fauxToolCall("jobs", { action: "stop", id })], { stopReason: "toolUse" });
+  };
+  const s = await start(t, {}, { extensions: [path("../extensions/jobs/index.ts")], replies: [stopIt, says("done")] });
+  const results = s.session.messages.filter((m) => m.role === "toolResult").map(textOf);
+  assert.deepEqual(results.slice(1), [`Monitor ${s.id} stopped.`]);
+  assert.deepEqual(liveGroup(pgid), []);
+  assert.equal(await s.ended(), `${s.head} stopped. ${s.logs}`);
 });
