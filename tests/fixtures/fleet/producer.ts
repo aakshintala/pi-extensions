@@ -4,7 +4,8 @@
 //   {"act": id, "text"}                       new activity line
 //   {"update": id, ...fields}                 registry.update(id, fields)
 //   {"add": ..., "throws": true}              activity() throws
-//   {"finish": id, "status", "result"}
+//   {"finish": id, "status", "result", "notice"?}  notice: the model's line; none if absent
+//   {"notify": id, "text"}
 //   {"clock": seconds}                        the registry's clock (starts at 0)
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -16,7 +17,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("fx", {
     description: "Test producer",
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const registry = fleet();
       registry.now = () => now * 1000;
       for (const op of JSON.parse(args)) {
@@ -24,6 +25,7 @@ export default function (pi: ExtensionAPI) {
           activity.set(op.add, op.activity ?? "");
           registry.register({
             id: op.add,
+            owner: ctx.sessionManager.getSessionId(),
             kind: op.kind,
             label: op.label,
             parentId: op.parent,
@@ -41,7 +43,8 @@ export default function (pi: ExtensionAPI) {
         } else if ("update" in op) {
           const { update, ...change } = op;
           registry.update(update, change);
-        } else if ("finish" in op) registry.finish(op.finish, op.status, op.result);
+        } else if ("finish" in op) registry.finish(op.finish, op.status, op.result, op.notice ?? null);
+        else if ("notify" in op) registry.notify(op.notify, op.text);
         else if ("clock" in op) {
           now = op.clock;
           for (const item of registry.items()) registry.update(item.id);

@@ -73,4 +73,13 @@ pi.registerTool({
 
 `oneLine(s)` turns model or producer text into one plain line for the screen:
 7- and 8-bit CSI, OSC, DCS, SOS, PM and APC sequences are removed, and control
-characters and newlines collapse to a space. Used by `extensions/todo`.
+characters and newlines collapse to a space. Used by `extensions/todo` and
+`extensions/fleet`.
+
+### `fleet/`
+
+The background-work registry (#29). Items carry an `owner` session id.
+`finish(id, status, result, notice?)` and `notify(id, text)` send notices to the
+owner's fleet extension. That extension delivers them, and it keeps a run
+without the UI alive until its items return. A `finish` with no notice sends a
+default line; a `null` notice sends nothing. See `extensions/fleet/README.md`.
