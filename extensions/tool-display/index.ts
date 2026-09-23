@@ -1,8 +1,12 @@
-// Tool display (spec #40, ticket #55): gives the built-in read, edit, write and ls
-// tools the shared style. Pi keeps built-in definitions out of reach of extensions
-// (getAllTools returns copies), so the decoration sits on ToolExecutionComponent's
-// renderer lookups, installed once per session and removed on shutdown.
-import { ToolExecutionComponent, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+// Tool display (spec #40, ticket #55): the built-in read, edit, write and ls tools,
+// built from Pi's own definitions and drawn in the shared style.
+import {
+  createEditToolDefinition,
+  createLsToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import {
   diffBody,
   plural,
@@ -60,48 +64,11 @@ export const RENDERERS: Record<string, ReturnType<typeof toolRenderers>> = {
   }),
 };
 
-// One decoration per process, whichever extension instance installed it.
-const SAVED = Symbol.for("pi-rig.tool-display.saved");
-const METHODS = ["getCallRenderer", "getResultRenderer", "getRenderShell"] as const;
-const proto = ToolExecutionComponent.prototype as any;
-
-function undecorate() {
-  const saved = proto[SAVED];
-  if (!saved) return;
-  for (const m of METHODS) proto[m] = saved[m];
-  delete proto[SAVED];
-}
-
-function decorate(names: Set<string>) {
-  undecorate();
-  if (!METHODS.every((m) => typeof proto[m] === "function")) return; // Pi changed shape: leave its rendering alone
-  const saved: Record<string, Function> = Object.fromEntries(METHODS.map((m) => [m, proto[m]]));
-  proto[SAVED] = saved;
-  const style = (c: any) => (names.has(c.toolName) ? RENDERERS[c.toolName] : undefined);
-  proto.getCallRenderer = function () {
-    return style(this)?.renderCall ?? saved.getCallRenderer.call(this);
-  };
-  proto.getResultRenderer = function () {
-    return style(this)?.renderResult ?? saved.getResultRenderer.call(this);
-  };
-  proto.getRenderShell = function () {
-    return style(this)?.renderShell ?? saved.getRenderShell.call(this);
-  };
-}
-
 export default function (pi: ExtensionAPI) {
-  pi.on("session_start", (_event, ctx) => {
-    // Only the built-ins: a tool another extension registered under one of these names keeps its own look.
-    decorate(new Set(pi.getAllTools().filter((t) => t.sourceInfo?.source === "builtin" && t.name in RENDERERS).map((t) => t.name)));
-    // On /resume and fork Pi draws the history before session_start; redraw it decorated.
-    if (ctx.mode === "tui") {
-      ctx.ui.setWidget("rig-tool-display", (tui) => {
-        tui.invalidate();
-        tui.requestRender();
-        return { render: () => [], invalidate() {} };
-      });
-      ctx.ui.setWidget("rig-tool-display", undefined);
-    }
-  });
-  pi.on("session_shutdown", undecorate);
+  // Execution stays Pi's own (each built-in resolves paths against the call's ctx.cwd);
+  // only the renderers change. Registering a built-in's name replaces the built-in.
+  const cwd = process.cwd();
+  for (const def of [createReadToolDefinition(cwd), createEditToolDefinition(cwd), createWriteToolDefinition(cwd), createLsToolDefinition(cwd)]) {
+    pi.registerTool({ ...def, ...RENDERERS[def.name] } as any);
+  }
 }
