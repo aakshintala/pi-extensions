@@ -170,6 +170,8 @@ test("a check resolved before git's pipe closes releases the pipe", { timeout: 2
   const stop = new AbortController();
   const check = gitDirty(tmpdir(), stop.signal, LIMITS);
   await until(() => runs().length === 1, "git to start");
+  // getActiveResourcesInfo is experimental: if Node renames PipeWrap, fail here rather than pass on 0 === 0.
+  assert.ok(pipes() > before, "git's stdout shows up as a PipeWrap");
   stop.abort();
   assert.equal(await check, null);
   assert.ok(alive(runs()[0][1]), "the descendant still holds the pipe");

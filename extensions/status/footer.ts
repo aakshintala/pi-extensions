@@ -48,7 +48,6 @@ function runGit(args: string[], cwd: string, signal: AbortSignal, first: boolean
       signal.removeEventListener("abort", stop);
       // Resolved before close (grace expired): a descendant may hold the pipe, so release our end.
       child.stdout?.destroy();
-      child.stderr?.destroy();
       resolve({ ok, out, stopped });
     };
     const stop = () => {

@@ -343,3 +343,41 @@ test("a fetch aborted by invalidate never repopulates the cache", async () => {
   await stale;
   assert.equal((await c.get()).providers[0].id, "new");
 });
+
+// A fetch that ignores its abort signal; settle(value) replies, settle(error) fails.
+function lateFetch() {
+  const f = { calls: 0 };
+  f.fetch = () => (f.calls++, new Promise((resolve, reject) => (f.settle = (v) => (v instanceof Error ? reject(v) : resolve({ ok: true, json: async () => v })))));
+  return f;
+}
+
+test("a fetch that settles after stop never touches the cache or its listeners", async () => {
+  for (const reply of [new Error("fetch failed"), { providers: [{ id: "late", quotas: [] }] }]) {
+    const f = lateFetch();
+    const c = createQuotaClient({ port: () => 1, refreshMs: () => 60_000, timers: fakeTimers(), fetch: f.fetch });
+    const heard = [];
+    c.onFeed((feed) => heard.push(feed));
+    const p = c.get();
+    c.stop();
+    f.settle(reply);
+    assert.equal(await p, null);
+    assert.deepEqual(heard, [], "no settle after stop");
+  }
+});
+
+test("a timeout that fires after the feed arrived still caches it and tells listeners", async () => {
+  const timers = fakeTimers();
+  let parse;
+  const fresh = { providers: [{ id: "fresh", quotas: [] }] };
+  const fetchFn = async () => ({ ok: true, json: () => new Promise((r) => (parse = () => r(fresh))) });
+  const c = createQuotaClient({ port: () => 1, refreshMs: () => 60_000, timers, fetch: fetchFn });
+  const heard = [];
+  c.onFeed((feed) => heard.push(feed));
+  const p = c.get();
+  await waitFor(() => parse);
+  timers.fireTimeouts();
+  parse();
+  assert.equal(await p, fresh);
+  assert.deepEqual(heard, [fresh]);
+  assert.equal(await c.get(), fresh, "served from the cache");
+});
