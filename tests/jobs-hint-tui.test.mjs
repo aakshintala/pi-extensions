@@ -1,6 +1,6 @@
 // The Ctrl+B hint on the running call (#139) in a real pi: while a foreground command
 // can be backgrounded, its call shows outside the group summary with a spinner and a
-// dim hint line, and folds back into the summary when it ends or moves to the background.
+// dim hint line, and folds back into the summary when it ends, is killed or moves to the background.
 // Running screens wait for the spinner's first frame (⠋): it comes round every 800 ms,
 // and the clock fixture makes Pi's own working indicator still.
 import { test } from "node:test";
@@ -77,6 +77,16 @@ test("after Ctrl+B the call folds into its summary and the job is listed in Flee
   const row = [" ● main", `   shell ${LONG} · 0s`];
   await tui.waitForScreen(screen([...GO, " ⏺ Ran 1 shell command", "", " backgrounded", ""], BORDER, row, "↑55 ↓22 R2 W55 CH1.9% 0.1%/128k (auto)"));
   writeFileSync(join(tui.cwd, "done"), ""); // lets the job end before shutdown checks its group
+});
+
+test("Esc during a hinted run kills the command and leaves no hint", async (t) => {
+  const tui = await start(t, [bash(LONG), "never reached"]);
+  await started(t, tui);
+  await tui.waitForScreen(RUNNING);
+  tui.keys("Escape");
+  await tui.waitForEvent("agent_end");
+  await tui.waitForScreen(screen([...GO, " ⏺ Ran 1 shell command · 1 cancelled", "", " Error: This operation was aborted", ""], BORDER, [], "↑2 ↓19 W2 0.0%/128k (auto)"));
+  await poll(() => !liveGroup(tui.pgid).length, "the command's group to be gone"); // SIGKILL may follow SIGTERM by 800 ms
 });
 
 test("a fast command leaves no hint row", async (t) => {

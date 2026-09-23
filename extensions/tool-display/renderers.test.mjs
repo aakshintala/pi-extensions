@@ -20,7 +20,7 @@ test("a child session's start, agent_end and shutdown leave the parent's groups 
   const session = () => {
     const on = {};
     toolDisplay({ registerTool() {}, on: (name, f) => (on[name] = f) });
-    const ctx = { sessionManager: { getBranch: () => [] } };
+    const ctx = { sessionManager: { getBranch: () => [], getSessionId: () => "s" } };
     return (name, event = {}) => on[name]?.(event, ctx);
   };
   const read = (id) => ({ type: "toolCall", id, name: "read", arguments: { path: id } });
@@ -49,7 +49,7 @@ test("sessions that share a call id keep their own groups", async () => {
   const session = () => {
     const on = {};
     toolDisplay({ registerTool() {}, on: (name, f) => (on[name] = f) });
-    const ctx = { sessionManager: { getBranch: () => [] } };
+    const ctx = { sessionManager: { getBranch: () => [], getSessionId: () => "s" } };
     return (name, event = {}) => on[name]?.(event, ctx);
   };
   const read = (id, args = { path: id }) => ({ type: "toolCall", id, name: "read", arguments: args });
@@ -77,7 +77,7 @@ test("a real error stays failed and shown when Esc comes during a thinking-only 
   const on = {};
   toolDisplay({ registerTool() {}, on: (name, f) => (on[name] = f) });
   const branch = [];
-  const piCtx = { sessionManager: { getBranch: () => branch } };
+  const piCtx = { sessionManager: { getBranch: () => branch, getSessionId: () => "s" } };
   const emit = (name, event = {}) => on[name]?.(event, piCtx);
   const call = { type: "toolCall", id: "enoent1", name: "read", arguments: { path: "missing.txt" } };
   const failure = { content: [{ type: "text", text: "ENOENT: no such file or directory, access 'missing.txt'" }] };

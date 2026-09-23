@@ -11,11 +11,11 @@ import { closeSync, fstatSync, mkdtempSync, openSync, readSync, rmdirSync, rmSyn
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createBashToolDefinition, getAgentDir, getShellConfig, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getKeybindings } from "@earendil-works/pi-tui";
 import { duration, fleet, type FinalStatus } from "../../shared/fleet/index.ts";
 import { rigSettings } from "../../shared/settings/index.ts";
 import { keepSgr, oneLine } from "../../shared/text/index.ts";
 import { resultText, showHint, toolRenderers } from "../../shared/tool-display/index.ts";
+import { ctrlBFree } from "../../shared/tui/index.ts";
 import { groupOf, MAX_GROUPS, pastOutputCap, reap, setGroupLimit, signalGroup, tooManyJobs, track, type Group } from "../../shared/process-groups/index.ts";
 import { blockingSleep, PROMPT } from "./guards.ts";
 
@@ -33,12 +33,6 @@ const ZOMBIE_MS = 10;
 const TICK_MS = 1000;
 /** Ticks of unchanged output before a prompt-shaped last line warns the agent. */
 const QUIET_TICKS = 10;
-
-/**
- * The fleet extension binds Ctrl+B only once the user frees it from Pi's default
- * cursor-left binding (#29); the same check as there (extensions/fleet).
- */
-const ctrlBFree = () => !getKeybindings().getKeys("tui.editor.cursorLeft").includes("ctrl+b");
 
 type Timers = Pick<typeof globalThis, "setTimeout" | "clearTimeout">;
 /** The auto-background, wait and kill timers. Tests replace them through this symbol. */
@@ -290,8 +284,8 @@ export default function (pi: ExtensionAPI) {
         const seconds = autoSeconds();
         const auto = t.setTimeout(() => move(`Still running after ${seconds}s, so it moved to the background`), seconds * 1000);
         const unlist = fleet().foreground(owner, () => move("Moved to the background"));
-        // Its call shows the hint while it can be backgrounded (#139).
-        const unhint = ctrlBFree() ? showHint(call, "ctrl+b to run in background") : () => {};
+        // Its call shows the hint while it can be backgrounded and Ctrl+B does that (#139).
+        const unhint = showHint(owner, call, () => (ctrlBFree() ? "ctrl+b to run in background" : undefined));
         const end = () => {
           unlist();
           unhint();

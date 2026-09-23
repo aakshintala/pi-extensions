@@ -131,7 +131,7 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
       const c = groups?.describe(context.toolCallId, style.summary, context.invalidate, failure);
       const g = c && groups!.group(context.toolCallId);
       // A running call with a hint (#139) spins and shows the hint under its call line.
-      const hint = HINTS.get(context.toolCallId);
+      const hint = c?.hint?.();
       const own = (w: number) => {
         const state = c ? c.state() : context.isError ? "error" : context.isPartial ? "pending" : "done";
         const status: CallStatus = state === "cancelled" ? "error" : state;
@@ -249,6 +249,8 @@ class Call {
   open = false;
   summary?: Summary;
   invalidate?: () => void;
+  /** While running: the hint it shows (see `showHint`). */
+  hint?: () => string | undefined;
   /** Its rows when it failed, drawn by its group's first call. */
   failure?: (width: number) => string[];
   result?: unknown;
@@ -291,22 +293,16 @@ const unindex = (id: string, groups: ToolGroups) => {
   else INDEX.delete(id);
 };
 
-// Call id → the hint its running call shows (#139). Process-wide, like INDEX: the tool
-// that sets a hint and the session's groups can come from different copies of this module.
-const HINTS: Map<string, string> = ((globalThis as any)[Symbol.for("pi-rig.tool-hints")] ??= new Map());
-
 /**
- * Shows running call `id` outside its group, with a spinner and a dim `text` line under
- * its call line, until the returned function is called; it then folds back in.
+ * Shows running call `id` of session `owner` outside its group, with a spinner and a dim
+ * line of `hint()` under its call line, until the returned function is called; it then
+ * folds back in. `hint` is read on every draw; while it returns nothing the call stays
+ * folded. Needs the session's groups (extensions/tool-display).
  */
-export function showHint(id: string, text: string): () => void {
-  HINTS.set(id, text);
-  const redraw = () => INDEX.get(id)?.forEach((g) => g.redraw(id));
-  redraw();
-  return () => {
-    HINTS.delete(id);
-    redraw();
-  };
+export function showHint(owner: string, id: string, hint: () => string | undefined): () => void {
+  const groups = INDEX.get(id)?.find((g) => g.owner === owner);
+  const c = groups?.hinted(id, hint);
+  return () => void (c && groups!.hinted(id, undefined, c));
 }
 
 /** Messages Pi draws in the chat, besides assistant messages (a custom one when `display` is set). */
@@ -328,6 +324,8 @@ export class ToolGroups {
   /** Whether Pi draws thinking, for messages whose renderer has not reported (Pi's default: yes). */
   showThinking = true;
   frame = 0;
+  /** The session's id, which `showHint` names it by. Its extension sets it. */
+  owner?: string;
 
   /**
    * Feeds one message, in order. An assistant message registers its calls: pass
@@ -441,19 +439,28 @@ export class ToolGroups {
   /** Advances the spinner and redraws the summary line of each running group. */
   tick(): void {
     this.frame++;
+    // Each running group's first call, and each call with a hint, once.
+    const redraw = new Set([...this.calls.values()].filter((c) => c.hint));
     for (const run of new Set([...this.calls.values()].map((c) => c.run))) {
       if (run.ended || !run.ids.some((id) => this.calls.get(id)?.status === "pending")) continue;
       for (const id of run.ids) {
         const g = this.group(id);
-        if (g && g.calls[0].id === id && g.calls.some((c) => c.state() === "pending")) g.calls[0].invalidate?.();
+        if (g && g.calls[0].id === id && g.calls.some((c) => c.state() === "pending")) redraw.add(g.calls[0]);
       }
     }
-    for (const id of HINTS.keys()) this.redraw(id);
+    for (const c of redraw) c.invalidate?.();
   }
 
-  /** Redraws one call. */
-  redraw(id: string): void {
-    this.calls.get(id)?.invalidate?.();
+  /**
+   * Sets or clears a call's hint (see `showHint`) and redraws the call. Clearing with
+   * `only` leaves a call that has been replaced since.
+   */
+  hinted(id: string, hint: (() => string | undefined) | undefined, only?: Call): Call | undefined {
+    const c = this.calls.get(id);
+    if (!c || (only && c !== only)) return undefined;
+    c.hint = hint;
+    c.invalidate?.();
+    return c;
   }
 
   /** Called by a renderer: records the call's summary, redraw hook and failure rows. */
