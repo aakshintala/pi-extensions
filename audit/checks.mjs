@@ -70,8 +70,7 @@ export function gate(snap, lifecycle, budgets) {
   const toolBudgets = budgets.tools ?? {};
   for (const t of report(snap).tools) {
     const max = toolBudgets[t.name];
-    if (t.source === "builtin") continue;
-    if (max === undefined) failures.push(`tool ${t.name} has no budget in budgets.json tools`);
+    if (max === undefined && t.source !== "builtin") failures.push(`tool ${t.name} has no budget in budgets.json tools`);
     else if (t.tokens > max) failures.push(`tool ${t.name} over budget: ${t.tokens} > ${max} tokens`);
   }
   for (const name of Object.keys(toolBudgets)) {

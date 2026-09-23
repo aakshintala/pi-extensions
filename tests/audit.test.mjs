@@ -49,3 +49,7 @@ test("gate enforces per-tool budgets for non-builtin tools", () => {
   assert.match(gate(s, ok, { maxPromptTokens: 200 }).join(), /rig_tool has no budget/);
   assert.match(gate(snap(), ok, { maxPromptTokens: 200, tools: { gone: 5 } }).join(), /budgeted tool gone is not active/);
 });
+
+test("a budget on a builtin tool is enforced", () => {
+  assert.match(gate(snap(), ok, { maxPromptTokens: 200, tools: { t: 1 } }).join(), /tool t over budget/);
+});
