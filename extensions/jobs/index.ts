@@ -44,6 +44,8 @@ type Job = {
   endedAt?: number;
   stopped?: boolean;
   timedOut?: number;
+  /** Its group is being killed: leftover processes are not reported. */
+  killing?: boolean;
   /** Tool calls (wait, stop) that will return the final state: the notice is then left out. */
   waiters: number;
   /** Resolves once `status` is set. */
@@ -128,7 +130,7 @@ export default function (pi: ExtensionAPI) {
   const lingers = (j: Job) => !!j.status && !!j.child.pid && alive(j.child.pid);
   const state = (j: Job) =>
     `Job ${j.id} ${j.status ?? "running"}${j.code === undefined ? "" : ` (exit ${j.code})`}${j.timedOut ? `, timed out after ${j.timedOut}s` : ""} after ${duration((j.endedAt ?? now()) - j.startedAt)}. Log: ${j.log}` +
-    (lingers(j) ? "\nIts shell exited, but processes it started are still running; stop ends them." : "");
+    (lingers(j) && !j.killing ? "\nIts shell exited, but processes it started are still running; stop ends them." : "");
 
   function start(command: string, cwd: string, env: NodeJS.ProcessEnv | undefined, owner: string): Job {
     dir ??= mkdtempSync(join(tmpdir(), "pi-jobs-"));
@@ -190,6 +192,7 @@ export default function (pi: ExtensionAPI) {
    * A process that calls setsid leaves the group, and nothing here reaches it.
    */
   async function kill(j: Job) {
+    j.killing = true;
     const pgid = j.child.pid!;
     signalGroup(pgid, "SIGTERM");
     const grace = delay(KILL_MS);
