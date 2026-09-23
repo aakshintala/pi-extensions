@@ -1,1 +1,7 @@
-{"maxPromptTokens": 4000, "maxSkills": 5, "piVersion": "0.87.1"}
+{
+  "piVersion": "0.87.1",
+  "maxPromptTokens": 4000,
+  "maxSkills": 5,
+  "tools": {
+  }
+}

@@ -1,5 +1,14 @@
 # pi-rig
 
-Customized Pi extensions maintained as a lightweight monorepo.
+Customized Pi extensions maintained as a lightweight monorepo. Every extension is rebuilt here from a behaviour spec; vendored upstream source is kept for reference and never loaded by Pi.
 
-Third-party extensions are audited and rebuilt here before use. Vendored upstream source is never loaded directly by Pi.
+## Install
+
+```sh
+pi install /path/to/pi-rig
+```
+
+## Extensions
+
+| Extension | What it is for | Spec |
+|---|---|---|
