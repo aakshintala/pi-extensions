@@ -19,6 +19,8 @@ It registers no tools, no commands and no settings.
   point in the tree (`/tree`) restores the set loaded on that branch.
 - At the start of a prompt, a registered command or prompt template with the
   same name wins.
+- After `/skill:name`, which Pi loads itself, the skills named in the rest of
+  the prompt load too, as in `/skill:tdd then /grilling`.
 - Prompts naming no skill cost nothing. Skill files are read asynchronously when
   the message is delivered; an unreadable one is reported and skipped.
 
