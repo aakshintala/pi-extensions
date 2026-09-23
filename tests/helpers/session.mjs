@@ -5,12 +5,18 @@
 //   replies     faux steps: fauxAssistantMessage(...) or (context) => fauxAssistantMessage(...)
 //   extensions  extension file paths or inline factories (pi) => {...}; only these load
 //   tools       tool allowlist (default: pi's default built-ins)
+//   persist     true saves the session as a .jsonl under the temp box, via SessionManager.create;
+//               read it at session.sessionManager.getSessionFile() (default: in-memory)
 //
 // Hermetic: temp cwd, HOME and agent dir, PI_OFFLINE=1, in-memory session and settings,
 // no credentials. HOME/PI_CODING_AGENT_DIR/PI_OFFLINE are set on process.env for the
 // test's duration, so run one scripted session at a time per file (node:test's default).
 // In t.after, like pi on quit: session_shutdown is emitted, the session disposed, then
 // env restored and temp dirs removed, so cleanup runs on failure too.
+// Credentials and model catalogs live in memory, so the session never writes agent/auth.json
+// or agent/models-store.json, even from refreshes that finish after cleanup. An in-process
+// child must pass createAgentSession({ modelRuntime: session.modelRuntime, ... }); without
+// it Pi builds a file-backed runtime that can recreate those files after the box is gone.
 import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,7 +31,29 @@ import {
 
 export { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 
-export async function scriptedSession(t, { replies = [], extensions = [], tools } = {}) {
+// pi-ai's CredentialStore in memory; modify and delete run one at a time per provider.
+function memoryCredentials() {
+  const creds = new Map();
+  const queues = new Map();
+  const serial = (id, op) => {
+    const run = (queues.get(id) ?? Promise.resolve()).then(op);
+    queues.set(id, run.catch(() => {}));
+    return run;
+  };
+  return {
+    read: async (id) => structuredClone(creds.get(id)),
+    list: async () => [...creds].map(([providerId, c]) => ({ providerId, type: c.type })),
+    modify: (id, fn) =>
+      serial(id, async () => {
+        const next = await fn(structuredClone(creds.get(id)));
+        if (next !== undefined) creds.set(id, structuredClone(next));
+        return structuredClone(creds.get(id));
+      }),
+    delete: (id) => serial(id, async () => void creds.delete(id)),
+  };
+}
+
+export async function scriptedSession(t, { replies = [], extensions = [], tools, persist = false } = {}) {
   const box = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-session-")));
   const home = join(box, "home");
   const cwd = join(box, "cwd");
@@ -53,7 +81,7 @@ export async function scriptedSession(t, { replies = [], extensions = [], tools 
   const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1" }] });
   faux.setResponses(replies);
   const modelRuntime = await ModelRuntime.create({
-    authPath: join(agentDir, "auth.json"),
+    credentials: memoryCredentials(),
     modelsPath: null,
     refreshOnCreate: false,
   });
@@ -82,7 +110,7 @@ export async function scriptedSession(t, { replies = [], extensions = [], tools 
     modelRuntime,
     resourceLoader,
     settingsManager,
-    sessionManager: SessionManager.inMemory(cwd),
+    sessionManager: persist ? SessionManager.create(cwd, join(box, "sessions")) : SessionManager.inMemory(cwd),
     tools,
   }));
   return { session, faux, cwd, home, agentDir };
