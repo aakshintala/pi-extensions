@@ -29,8 +29,10 @@ function rows(items: readonly Item[]): Row[] {
   return out;
 }
 
-// CSI, OSC, DCS/SOS/PM/APC strings, then any other escape pair.
-const SEQUENCE = /\x1b\[[0-?]*[ -/]*[@-~]|\x9b[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[PX^_][^\x1b]*\x1b\\|\x1b[\s\S]?/g;
+// CSI (7- and 8-bit); OSC, DCS, SOS, PM and APC strings (7- and 8-bit), ended by
+// BEL, ST (ESC \\ or 0x9c) or the end of the text; then any other escape pair.
+const SEQUENCE =
+  /(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1b[\]PX^_]|[\x90\x98\x9d-\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c|$)|\x1b[\s\S]?/g;
 
 /** One line of plain text: terminal sequences and control characters removed. */
 const clean = (s: string) =>
@@ -38,6 +40,15 @@ const clean = (s: string) =>
     .replace(SEQUENCE, "")
     .replace(/[\x00-\x1f\x7f-\x9f]+/g, " ")
     .trim();
+
+/** A producer's activity line; a producer that throws breaks only its own row. */
+function safeActivity(item: Item) {
+  try {
+    return item.activity();
+  } catch {
+    return "activity failed";
+  }
+}
 
 function duration(ms: number) {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -96,8 +107,8 @@ function mount(ctx: ExtensionContext): () => void {
         ? "queued"
         : (done ? (item.status === "completed" ? "done " : `${item.status} `) : "") +
           duration((item.endedAt ?? registry.now()) - item.startedAt);
-    const activity = clean(done && item.result !== undefined ? item.result : item.activity());
-    const text = `${"  ".repeat(row.depth)}${item.kind} ${clean(item.label)} · ${state}${activity ? ` · ${activity}` : ""}`;
+    const activity = clean(done && item.result !== undefined ? item.result : safeActivity(item));
+    const text = `${"  ".repeat(row.depth)}${clean(item.kind)} ${clean(item.label)} · ${state}${activity ? ` · ${activity}` : ""}`;
     const color = item.status === "failed" ? "error" : done ? "muted" : "text";
     return theme.fg("accent", mark) + " " + theme.fg(color, text);
   }

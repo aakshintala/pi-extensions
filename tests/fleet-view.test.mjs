@@ -73,12 +73,20 @@ test("control sequences are stripped from every row", async (t) => {
     { add: "b", kind: "shell", label: "tab\there", activity: "\u001b[?1049hwipe\u001bc\u009b2J\u001bP1$r\u001b\\" },
     { add: "c", kind: "monitor", label: "ci" },
     { finish: "c", status: "failed", result: "exit\u001b[1A 1\u0007" },
+    // 8-bit OSC, ST and string introducers; BEL- and ST-terminated DCS, APC, PM and SOS.
+    {
+      add: "d",
+      kind: "shell",
+      label: "\u009d0;pwned\u0007eight\u009d8;;x\u009cbit",
+      activity: "\u001bP1$r\u0007a\u001b_apc\u009cb\u009fapc\u001b\\c\u0090dcs\u0007d\u001b^pm\u0007e\u0098sos\u009cf",
+    },
   );
   await tui.waitForScreen(idle([
     " ● main",
     "   agent scout · 0s · red next",
     "   shell tab here · 0s · wipe",
     "   monitor ci · failed 0s · exit 1",
+    "   shell eightbit · 0s · abcdef",
   ]));
 });
 
@@ -121,6 +129,27 @@ test("finished items stay until the next user prompt", async (t) => {
     "~/cwd",
     "↑2 ↓1 W2 CH0.0% 0.0%/128k (auto)                                       harness-1",
   ]));
+});
+
+test("a finished item stays finished when its producer updates it", async (t) => {
+  const tui = await start(t);
+  await tui.fx(
+    { add: "a", kind: "agent", label: "scout" },
+    { clock: 5 },
+    { finish: "a", status: "completed", result: "found 3 files" },
+    { clock: 9 },
+    { update: "a", status: "running", label: "renamed" },
+  );
+  await tui.waitForScreen(idle([" ● main", "   agent scout · done 5s · found 3 files"]));
+});
+
+test("an activity line that throws breaks only its own row", async (t) => {
+  const tui = await start(t);
+  await tui.fx(
+    { add: "a", kind: "agent", label: "broken", throws: true },
+    { add: "b", kind: "shell", label: "fine", activity: "PASS 3" },
+  );
+  await tui.waitForScreen(idle([" ● main", "   agent broken · 0s · activity failed", "   shell fine · 0s · PASS 3"]));
 });
 
 test("arrow keys at an empty prompt move through FleetView; Esc returns", async (t) => {

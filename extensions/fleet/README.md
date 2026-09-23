@@ -7,7 +7,7 @@ FleetView: one list below the editor of all background work (agents, shell jobs 
 - Finished items stay until you send your next prompt.
 - FleetView shows at most 6 lines. A `… N more` line counts the hidden rows, and the list scrolls to keep the selection visible.
 - FleetView is hidden when nothing is registered.
-- Terminal control sequences are stripped from every row.
+- Terminal control sequences are stripped from every row. A row whose activity line throws shows `activity failed`.
 
 ## Keys
 
@@ -31,7 +31,17 @@ Other extensions import the registry from `shared/fleet` and never draw UI. It l
 ```ts
 import { fleet } from "../../shared/fleet/index.ts";
 
-fleet().register({ id, kind: "shell", label: "npm test", parentId, activity: () => lastLine, stop, view: { log: path } });
-fleet().update(id);                       // redraw; or update(id, { label, status, parentId })
-fleet().finish(id, "completed", "12 tests passed");
+fleet().register({
+  id: "job-1",                    // any id but "main", which is the main session's row
+  kind: "shell",                  // "agent", "shell" or "monitor"
+  label: "npm test",
+  parentId: "agent-1",            // optional: shows the row under that item
+  activity: () => lastLine,       // required: the row's latest activity, read on every render
+  view: { log: logPath },         // required: a log file, or { transcript: () => component }
+  stop: () => child.kill(),       // required
+  steer: undefined,               // optional, agents only
+});
+fleet().update("job-1");                              // redraw the activity line
+fleet().update("job-1", { label: "npm test --watch" }); // ignored once finished
+fleet().finish("job-1", "completed", "12 tests passed");
 ```

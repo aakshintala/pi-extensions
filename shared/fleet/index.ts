@@ -20,7 +20,7 @@ export interface ItemSpec {
   status?: "queued" | "running";
   /** A short line of latest activity, read on every render. */
   activity(): string;
-  view?: ItemView;
+  view: ItemView;
   stop(): void | Promise<void>;
   /** Agents only. */
   steer?(text: string): void | Promise<void>;
@@ -37,9 +37,9 @@ export interface Item extends Omit<ItemSpec, "status"> {
 }
 
 export interface Fleet {
-  /** Adds an item. Registering an existing id replaces it. */
+  /** Adds an item. Registering an existing id replaces it. Throws for the id "main", which is the main session's row. */
   register(spec: ItemSpec): void;
-  /** Changes an item's fields and redraws. Call with no change to redraw a new activity line. */
+  /** Changes an item's fields and redraws. Call with no change to redraw a new activity line. Ignored once the item is finished. */
   update(id: string, change?: Partial<Pick<ItemSpec, "label" | "parentId" | "status">>): void;
   finish(id: string, status: FinalStatus, result: string): void;
   get(id: string): Item | undefined;
@@ -64,13 +64,14 @@ export function createFleet(): Fleet {
   const fleet: Fleet = {
     now: () => Date.now(),
     register(spec) {
+      if (spec.id === "main") throw new Error('fleet: the id "main" is reserved for the main session');
       items.delete(spec.id);
       items.set(spec.id, { ...spec, status: spec.status ?? "running", startedAt: fleet.now() });
       changed();
     },
     update(id, change = {}) {
       const item = items.get(id);
-      if (!item) return;
+      if (!item || isFinished(item.status)) return;
       Object.assign(item, change);
       changed();
     },

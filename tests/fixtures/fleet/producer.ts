@@ -2,6 +2,8 @@
 // `/fx <json array of ops>` applies each op, then reports event "fx":
 //   {"add": id, "kind", "label", "parent"?, "activity"?, "status"?}
 //   {"act": id, "text"}                       new activity line
+//   {"update": id, ...fields}                 registry.update(id, fields)
+//   {"add": ..., "throws": true}              activity() throws
 //   {"finish": id, "status", "result"}
 //   {"clock": seconds}                        the registry's clock (starts at 0)
 import { appendFileSync } from "node:fs";
@@ -26,12 +28,19 @@ export default function (pi: ExtensionAPI) {
             label: op.label,
             parentId: op.parent,
             status: op.status,
-            activity: () => activity.get(op.add) ?? "",
+            activity: () => {
+              if (op.throws) throw new Error("producer bug");
+              return activity.get(op.add) ?? "";
+            },
+            view: { log: "/dev/null" },
             stop() {},
           });
         } else if ("act" in op) {
           activity.set(op.act, op.text);
           registry.update(op.act);
+        } else if ("update" in op) {
+          const { update, ...change } = op;
+          registry.update(update, change);
         } else if ("finish" in op) registry.finish(op.finish, op.status, op.result);
         else if ("clock" in op) {
           now = op.clock;
