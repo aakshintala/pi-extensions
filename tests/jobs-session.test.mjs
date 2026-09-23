@@ -445,3 +445,22 @@ test("a Pi that exits without shutting down still kills its job groups", async (
   t.after(() => rmSync(dirname(log), { recursive: true, force: true }));
   await until(() => liveGroup(Number(pgid)).length === 0, `group ${pgid} to be killed at exit`);
 });
+
+test("a stop whose SIGKILL is still pending does not report leftover processes (#122)", async (t) => {
+  let id;
+  // The shell dies on SIGTERM; its child ignores it and lives until the SIGKILL.
+  const script = `echo $$ > pgid; (trap '' TERM; echo child; exec tail -f /dev/null) & wait`;
+  const s = await start(t, [calls(bg(script)), (context) => ((id = s.jobId(lastText(context))), says("waiting")()), says("still waiting"), says("done")]);
+  const run = s.session.prompt("go");
+  await until(() => id && readFileSync(fleet().get(id).view.log, "utf8").includes("child"), "the child");
+  const pgid = await pgidIn(s);
+  await until(() => liveGroup(pgid).length === 2, "the shell and its child");
+  const stopped = fleet().get(id).stop();
+  await until(() => fleet().get(id).status === "stopped", "the shell to exit on SIGTERM");
+  assert.equal(liveGroup(pgid).length, 1, "the child waits for the SIGKILL");
+  await s.timers.fire(800);
+  await settles(stopped, "the stop to finish");
+  await run;
+  const log = fleet().get(id).view.log;
+  assert.deepEqual(s.notices().filter((n) => n.startsWith("Job ")), [`Job ${id} stopped (exit 143) after 0s. Log: ${log}`]);
+});
