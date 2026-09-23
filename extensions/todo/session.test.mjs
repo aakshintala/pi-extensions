@@ -202,3 +202,23 @@ test("widget row: terminal control sequences are stripped", async (t) => {
 test("widget row: long text is truncated to the width", async (t) => {
   assert.equal((await row(t, "a very long item that cannot fit")).replace(/\x1b\[0m/g, ""), " ◻ a very long i...");
 });
+
+test("widget row: OSC and 8-bit sequences leave no payload", async (t) => {
+  assert.equal(await row(t, "\x1b]0;spoofed\x07title \x9d0;x\x9c8bit"), " ◻ title 8bit");
+});
+
+// Pi can drain several queued prompts into one request: the turn before them still counts.
+test("reminder still rides a request that carries two queued prompts", async () => {
+  await import("../../tests/fixtures/tool-display/pi-tui.mjs");
+  const { default: ext } = await import(EXT);
+  const on = {};
+  ext({ on: (name, f) => (on[name] = f), registerTool() {} });
+  const entry = { type: "message", message: { role: "toolResult", toolName: "todo_write", details: { todos: [{ text: "build", status: "in_progress" }] } } };
+  on.session_start({}, { mode: "print", sessionManager: { getBranch: () => [entry], getEntries: () => [] }, ui: {} });
+  const user = (text) => ({ role: "user", content: text });
+  const reply = (content) => ({ role: "assistant", content });
+  const plain = [user("a"), reply([{ type: "text", text: "done" }]), user("b"), user("c")];
+  assert.match(JSON.stringify(on.context({ messages: plain })?.messages), REMINDER);
+  const tool = [user("a"), reply([{ type: "toolCall", id: "1", name: "read", arguments: {} }]), user("b"), user("c")];
+  assert.equal(on.context({ messages: tool }), undefined);
+});

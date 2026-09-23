@@ -2,6 +2,7 @@
 // and is rebuilt from the active branch; nothing is written to disk.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import { oneLine } from "../../shared/text/index.ts"; // item text is model input
 
 type Status = "pending" | "in_progress" | "completed";
 type Todo = { text: string; status: Status };
@@ -10,9 +11,6 @@ const STATUSES: Status[] = ["pending", "in_progress", "completed"];
 const MARK = { completed: "✔", in_progress: "◼", pending: "◻" };
 const MAX_OPEN_ROWS = 7; // open items shown before "… N more"
 
-// Item text is model input: one row each, no terminal control sequences.
-const oneLine = (text: string) =>
-  text.replace(/\s*[\r\n]+\s*/g, " ").replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]|[\x00-\x1f\x7f-\x9f]/g, "");
 
 export const widgetLines = (todos: Todo[]): string[] => {
   const done = todos.filter((t) => t.status === "completed").length;
@@ -70,16 +68,18 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // Reminder: on the first request of a prompt, when the previous turn (everything between
-  // the last two user messages) made no tool call while an item is in progress.
+  // Reminder: on the first request of a prompt, when the previous turn (from the user
+  // message that started it through its last reply; later queued prompts join it) made
+  // no tool call while an item is in progress.
   // Added to this request only; the returned copy is never saved.
   pi.on("context", (event) => {
     const active = todos.filter((t) => t.status === "in_progress");
     const users = event.messages.flatMap((m: any, i) => (m.role === "user" ? [i] : []));
     const end = users.at(-1);
-    if (!active.length || end !== event.messages.length - 1 || users.length < 2) return;
-    const turn = event.messages.slice(users.at(-2)! + 1, end);
-    if (!turn.some((m: any) => m.role === "assistant") || turn.some(hasToolCall)) return;
+    if (!active.length || end !== event.messages.length - 1) return;
+    const reply = event.messages.findLastIndex((m: any) => m.role === "assistant");
+    const start = users.filter((i) => i < reply).at(-1);
+    if (reply < 0 || start === undefined || event.messages.slice(start + 1, end).some(hasToolCall)) return;
     const text = `<system-reminder>Todo items still in progress: ${active.map((t) => JSON.stringify(t.text)).join(", ")}. Update your list with todo_write: mark finished items completed and stalled ones pending.</system-reminder>`;
     const messages = [...event.messages];
     const last: any = messages[end];
