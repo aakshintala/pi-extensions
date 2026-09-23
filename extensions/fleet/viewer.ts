@@ -226,6 +226,17 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
         // The chat-area swap: main-session output keeps going to the detached chat.
         const { chat } = found;
         const shown = new Container();
+        // Pi invalidates every component after a mode switch (switchTuiMode). In regular mode
+        // the swap cannot follow or pause, so the item moves to the overlay. The reverse cannot
+        // happen: Pi refuses to switch mode while an overlay is open.
+        shown.invalidate = () => {
+          Container.prototype.invalidate.call(shown);
+          if (isViewportTUI(t)) return;
+          queueMicrotask(() => {
+            const again = fleet().get(item.id);
+            if (open?.content === content && again) viewer.open(again);
+          });
+        };
         shown.addChild(head);
         shown.addChild(content);
         const kids = found.parent.children;

@@ -17,7 +17,7 @@ const FOOTER = ["~/cwd", "0.0%/128k (auto)                                      
 
 // Fullscreen mode: the chat area on top, the editor, FleetView and footer pinned to the bottom.
 const screen = (chat, fleet, { editor = "", footer = FOOTER, above = [], border = BORDER } = {}) => {
-  const dock = [...above, border, editor, BORDER, ...fleet, ...footer];
+  const dock = [...above, border, ...[editor].flat(), BORDER, ...fleet, ...footer];
   const top = [...chat, ...Array(ROWS - dock.length - chat.length).fill("")];
   return "\n" + [...top, ...dock].join("\n");
 };
@@ -389,3 +389,28 @@ for (const [order, extensions] of [
     await tui.waitForScreen(screen(agentView([]), rows("b"), opts([" Steering (1) · next turn", "   first two"])));
   });
 }
+
+test("switching to regular mode while viewing moves the item to the overlay", async (t) => {
+  const tui = await start(t);
+  tui.keys("Down", "Down", "Enter");
+  await tui.waitForScreen(screen(logView(["one", "two", "three"]), rows("a")));
+  tui.type("/settings");
+  tui.keys("Enter");
+  tui.type("tui mode");
+  await tui.waitForScreen(
+    screen([...logView(["one", "two", "three"]), "", "", "", "", "", ""], rows("a"), {
+      editor: ["> tui mode", "", "→ TUI mode                          fullscreen", "", "  Interface layout; fullscreen mode is experimental", "", "  Type to search · Enter/Space to change · Esc to cancel"],
+    }),
+  );
+  tui.keys("Enter"); // fullscreen → regular
+  await tui.waitForScreen(overlay(["one", "two", "three", ...Array(19).fill("")]));
+  // Regular mode: the chat is back in place, content from the top.
+  const regular = (editor) =>
+    "\n" + ["", " TUI mode: regular", "", BORDER, ...editor, BORDER, ...rows("main"), ...FOOTER, ...Array(ROWS).fill("")].slice(0, ROWS).join("\n");
+  tui.keys("Escape"); // closes the viewer
+  await tui.waitForScreen(
+    regular(["> tui mode", "", "→ TUI mode                          regular", "", "  Interface layout; fullscreen mode is experimental", "", "  Type to search · Enter/Space to change · Esc to cancel"]),
+  );
+  tui.keys("Escape"); // closes the settings
+  await tui.waitForScreen(regular([""]));
+});
