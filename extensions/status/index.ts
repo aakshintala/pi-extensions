@@ -15,5 +15,6 @@ export default function (pi: ExtensionAPI, deps: StatusDeps = {}) {
   ]);
   pi.on("session_start", (_event, ctx) => rig.notifyWarnings(ctx.ui));
   const footer = registerFooter(pi, deps);
-  registerQuota(pi, settings, { fetch: deps.fetch, now: deps.now, timers: deps.quotaTimers }).onFeed(footer.quotas);
+  const off = registerQuota(pi, settings, { fetch: deps.fetch, now: deps.now, timers: deps.quotaTimers }).onFeed(footer.quotas);
+  pi.on("session_shutdown", () => void off()); // idempotent: a second delete is a no-op
 }

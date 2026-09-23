@@ -41,7 +41,7 @@ export function createQuotaClient({ port, refreshMs, fetch: fetchFn = fetch, tim
   type Pending = { promise: Promise<Feed | null>; controller: AbortController; timer?: ReturnType<typeof setTimeout>; deadline: number };
   let feed: Feed | null | undefined; // undefined: nothing fetched since creation or the last invalidate
   let fetchedAt = -Infinity;
-  let epoch = 0; // bumped by invalidate, so a fetch it aborted never touches the cache
+  let epoch = 0; // bumped by invalidate and stop, so a fetch they abort never touches the cache
   let inFlight: Pending | null = null;
   let poll: ReturnType<typeof setInterval> | undefined;
   const listeners = new Set<(feed: Feed | null | undefined) => void>();
@@ -56,8 +56,9 @@ export function createQuotaClient({ port, refreshMs, fetch: fetchFn = fetch, tim
       const res = await fetchFn(`http://127.0.0.1:${port()}/quotas`, { signal: p.controller.signal });
       const json = res.ok ? await res.json() : null;
       if (!Array.isArray(json?.providers)) throw new Error("bad feed");
-      // An aborted fetch (stop, invalidate) must not repopulate the cache.
-      if (p.controller.signal.aborted) return feed ?? null;
+      // A fetch from before stop or invalidate must not repopulate the cache. A
+      // timeout that fired after the feed arrived still counts: the feed is good.
+      if (at !== epoch) return feed ?? null;
       fetchedAt = now();
       cache(json as Feed);
     } catch {
@@ -117,8 +118,9 @@ export function createQuotaClient({ port, refreshMs, fetch: fetchFn = fetch, tim
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    /** Idempotent: stops polling and aborts the in-flight fetch. */
+    /** Idempotent: stops polling and aborts the in-flight fetch, which then never touches the cache. */
     stop() {
+      epoch++;
       if (poll) timers.clearInterval(poll);
       poll = undefined;
       inFlight?.controller.abort();

@@ -385,7 +385,8 @@ test("a hung quota fetch that times out drops a stale feed from the footer, as t
   let clock = 0;
   let mode = "ok";
   let fetches = 0;
-  const timers = { ...fakeTimers(), setInterval: () => 0, clearInterval() {} };
+  let tick;
+  const timers = { ...fakeTimers(), setInterval: (fn) => ((tick = fn), 1), clearInterval() {} };
   const fetch = (_url, init) => {
     fetches++;
     if (mode === "ok") return Promise.resolve(Response.json(FEED));
@@ -402,8 +403,7 @@ test("a hung quota fetch that times out drops a stale feed from the footer, as t
 
     mode = "hang";
     clock = 61_000; // the feed is now stale
-    await s.emit("session_shutdown");
-    await s.emit("session_start");
+    tick();
     await settle(() => fetches === 2);
     assert.match(quotas(), /^Q <text>claude/, "still shown while the fetch hangs");
     timers.fire(); // the client's 5 s timeout aborts the fetch
@@ -414,4 +414,25 @@ test("a hung quota fetch that times out drops a stale feed from the footer, as t
   } finally {
     await s.emit("session_shutdown");
   }
+});
+
+test("a shut-down footer stops mirroring the quota client", async () => {
+  let reply = () => Response.json(FEED);
+  let clock = 0;
+  const pi = fakePi();
+  status(pi, { fetch: async () => reply(), now: () => clock, quotaTimers: { ...fakeTimers(), setInterval: () => 1, clearInterval() {} }, gitDirty: async () => null });
+  const s = session(pi, { trusted: false });
+  const quotas = () => s.lines()[1].split("  │  ").find((p) => p.startsWith("Q"));
+  await s.emit("session_start");
+  await settle(() => quotas()?.startsWith("Q <text>claude"), "first feed shown");
+  const shown = quotas();
+  await s.emit("session_shutdown");
+  await s.emit("session_shutdown"); // idempotent
+  reply = () => Promise.reject(new TypeError("fetch failed"));
+  clock = 61_000;
+  const renders = s.renders;
+  await pi.commands.quota.handler("", s.ctx); // the client still fetches; the footer must not hear it
+  assert.match(s.notes.at(-1), /unavailable/);
+  assert.equal(quotas(), shown);
+  assert.equal(s.renders, renders);
 });
