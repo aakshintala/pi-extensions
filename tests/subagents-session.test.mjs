@@ -5,11 +5,11 @@
 import "./fixtures/tool-display/pi-tui.mjs"; // lets the extension module load in plain node
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxText, fauxToolCall, scriptedSession } from "./helpers/session.mjs";
-import { getCurrentTools } from "@earendil-works/pi-ai";
+import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
 import { fleet } from "../shared/fleet/index.ts";
 
 const path = (p) => fileURLToPath(new URL(p, import.meta.url));
@@ -34,15 +34,19 @@ function gate() {
 }
 
 /**
- * Parent session with the subagents extension. `kid(context)` answers every child
- * request. Resolves with the session, its sealed dirs and `results()`, the parent's
- * tool results.
+ * Parent session with the subagents extension. `kid(context, options)` answers every
+ * child request. `tools` is the parent's tool allowlist; `before(session)` runs before
+ * session_start. Resolves with the session, its sealed dirs, `ctx` (the parent's
+ * extension context), `results()` (its tool results) and `notices()`.
  */
-async function start(t, replies, kid) {
+async function start(t, replies, kid, { tools, before } = {}) {
   globalThis[KID] = kid;
-  const s = await scriptedSession(t, { replies, extensions: EXTENSIONS });
+  let ctx;
+  const capture = (pi) => pi.on("session_start", (_event, c) => (ctx = c));
+  const s = await scriptedSession(t, { replies, extensions: [...EXTENSIONS, capture], tools });
   // Children discover their extensions from the agent dir, like a real install.
   writeFileSync(join(s.agentDir, "settings.json"), JSON.stringify({ extensions: EXTENSIONS }));
+  await before?.(s.session);
   await s.session.bindExtensions({});
   const registry = fleet();
   const now = registry.now;
@@ -56,8 +60,33 @@ async function start(t, replies, kid) {
   });
   const results = () => s.session.messages.filter((m) => m.role === "toolResult").map((m) => [m.isError, textOf(m)]);
   const notices = () => s.session.messages.filter((m) => m.customType === "rig.notice").map(textOf);
-  return { ...s, results, notices };
+  return { ...s, ctx, results, notices };
 }
+
+/** A second, fresh instance of the subagents extension, as after a restart; `tools` maps names to definitions. */
+async function freshInstance() {
+  const tools = new Map();
+  const pi = {
+    registerTool: (tool) => tools.set(tool.name, tool),
+    on() {},
+    getActiveTools: () => ["read"],
+    setActiveTools() {},
+    sendMessage() {},
+  };
+  const { default: subagents } = await import("../extensions/subagents/index.ts");
+  subagents(pi);
+  const call = (name, params, ctx) => tools.get(name).execute("call", params, undefined, undefined, ctx);
+  return { tools, call };
+}
+
+/** `ctx` as another session would see it: the same everything but its session id. */
+const asSession = (ctx, id) => ({
+  ...ctx,
+  cwd: ctx.cwd,
+  scopedModels: ctx.scopedModels,
+  modelRegistry: ctx.modelRegistry,
+  sessionManager: new Proxy(ctx.sessionManager, { get: (sm, k) => (k === "getSessionId" ? () => id : sm[k].bind(sm)) }),
+});
 
 // Runs `fn` once a fleet extension starts a session-end wait, which it begins by
 // subscribing to the registry (sessions without the UI have no FleetView).
@@ -72,7 +101,7 @@ function onWait(fn) {
   };
 }
 
-const STATS = /^\d+ turns? · \d+ tool uses? · [\d,]+ tokens? · \$0\.0000 · 0s$/;
+const STATS = /^\d+ turns? · \d+ tool uses? · [\d,]+ tokens? · \$0\.00 · 0s$/;
 
 test("spawn rejects an unknown model or thinking level and requires both", async (t) => {
   const { session, results } = await start(t, [
@@ -80,15 +109,20 @@ test("spawn rejects an unknown model or thinking level and requires both", async
       spawn("a", { model: "kid/nope" }),
       spawn("b", { thinking: "huge" }),
       ["subagent_spawn", { description: "c", prompt: "c", thinking: "low" }],
+      spawn("d", { thinking: "xhigh" }),
+      spawn("e", { model: "faux/faux-1" }),
     ),
     says("ok"),
   ], says("never"));
   await session.prompt("go");
   const r = results();
-  assert.deepEqual(r.map(([e]) => e), [true, true, true]);
+  assert.deepEqual(r.map(([e]) => e), [true, true, true, true, true]);
   assert.match(r[0][1], /^Unknown model "kid\/nope"\.$/);
   assert.match(r[1][1], /^Validation failed for tool "subagent_spawn":\n  - thinking: must be equal to one of the allowed values\n/);
   assert.match(r[2][1], /^Validation failed for tool "subagent_spawn":\n  - model: must have required properties model\n/);
+  // Pi would clamp these silently: xhigh above what kid-1 offers, any thinking on a model without it.
+  assert.equal(r[3][1], 'kid/kid-1 cannot think at "xhigh". Use one of: off, minimal, low, medium, high.');
+  assert.equal(r[4][1], 'faux/faux-1 cannot think at "low". Use one of: off.');
   assert.equal(fleet().items().length, 0);
 });
 
@@ -177,7 +211,7 @@ test("a message steers a running child, and resumes a finished one from its save
       async () => {
         await held; // the child is mid-run
         release.open();
-        return calls(["subagent_message", { id, message: "focus on src/" }])();
+        return calls(["subagent_message", { id, message: "/kidcmd focus on src/" }])();
       },
       says("waiting"),
       // The child's first notice: it needs context, so answer it.
@@ -204,13 +238,18 @@ test("a message steers a running child, and resumes a finished one from its save
     [false, "Subagent ID resumed."],
   ]);
   // The steer reached the running child; the resume carried its whole history.
-  assert.deepEqual(seen[1], ["scout", "focus on src/"]);
-  assert.deepEqual(seen[2], ["scout", "focus on src/", "use the main branch"]);
+  // A steer is literal text, like every other message: a command name is not run.
+  assert.deepEqual(seen[1], ["scout", "/kidcmd focus on src/"]);
+  assert.deepEqual(seen[2], ["scout", "/kidcmd focus on src/", "use the main branch"]);
   const got = notices().filter((n) => n.startsWith("Subagent "));
   assert.deepEqual(got.map((n) => n.split("\n")[0]), [
     `Subagent ${id} (do scout) completed. STATUS: NEEDS_CONTEXT`,
     `Subagent ${id} (do scout) completed. STATUS: DONE`,
   ]);
+  // The resumed run's notice gives that run, then the session's totals over both runs.
+  const [, run, total] = got[1].split("\n");
+  assert.match(run, /^1 turn · 0 tool uses · [\d,]+ tokens · \$0\.00 · 0s$/);
+  assert.match(total, /^Session total: 3 turns · 1 tool use · [\d,]+ tokens · \$0\.00$/);
 });
 
 test("stop ends a child waiting on its own work, with its partial output marked incomplete", { timeout: 20_000 }, async (t) => {
@@ -345,31 +384,147 @@ test("the parent's shutdown stops its running children and shuts each down", { t
   await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
   assert.equal(fleet().get(id).status, "stopped");
   assert.equal(shut.filter((s) => s !== session.sessionId).length, 1);
+  // The fleet has already detached this session, so the notice is saved in it directly.
+  const saved = session.sessionManager.getEntries().filter((e) => e.type === "custom_message" && e.customType === "rig.notice");
+  assert.equal(saved.length, 1);
+  assert.match(saved[0].content, new RegExp(`^Subagent ${id} \\(do long\\) stopped\\. STATUS: STOPPED\n`));
+  assert.equal(saved[0].details.status, "stopped");
 });
 
-test("with enabledModels set, the model parameter is an enum of them and nothing else is accepted", async (t) => {
-  await scriptedSession(t); // only for its sealed agent dir
-  const tools = new Map();
-  const handlers = {};
-  const pi = {
-    registerTool: (tool) => tools.set(tool.name, tool),
-    on: (event, handler) => (handlers[event] = handler),
-    getActiveTools: () => [],
-    setActiveTools() {},
-  };
-  const { default: subagents } = await import("../extensions/subagents/index.ts");
-  subagents(pi);
-  const model = (provider, id) => ({ model: { provider, id } });
-  const ctx = {
-    scopedModels: [model("a", "one"), model("b", "two"), model("a", "one")],
-    sessionManager: { getEntries: () => [], getSessionId: () => "p" },
-    modelRegistry: { getAll: () => [model("c", "three").model] },
-  };
-  handlers.session_start({}, ctx);
-  const spawnTool = tools.get("subagent_spawn");
-  assert.deepEqual(spawnTool.parameters.properties.model.enum, ["a/one", "b/two"]);
-  await assert.rejects(
-    spawnTool.execute("x", { description: "d", prompt: "p", model: "c/three", thinking: "low" }, undefined, undefined, ctx),
-    { message: 'Unknown model "c/three". Use one of: a/one, b/two.' },
+test("with enabledModels set, subagent_spawn is replaced by one whose model is an enum of them", { timeout: 20_000 }, async (t) => {
+  let kid;
+  const { session, results } = await start(t, [calls(spawn("x", { model: "faux/faux-1", thinking: "off" })), says("ok")], says("never"), {
+    before(session) {
+      kid = session.modelRuntime.getModel("kid", "kid-1");
+      session.setScopedModels([{ model: kid }, { model: kid }]);
+    },
+  });
+  // Pi keeps one definition per tool name, so the scoped registration replaces the base one.
+  const spawns = session.getAllTools().filter((tool) => tool.name === "subagent_spawn");
+  assert.equal(spawns.length, 1);
+  assert.deepEqual(spawns[0].parameters.properties.model, { type: "string", enum: ["kid/kid-1"] });
+  await session.prompt("go");
+  assert.match(results()[0][1], /^Validation failed for tool "subagent_spawn":\n  - model: must be equal to one of the allowed values\n/);
+});
+
+test("costs below a cent keep two significant digits", async () => {
+  const { money } = await import("../extensions/subagents/index.ts");
+  assert.deepEqual([0, 0.00003, 0.000314, 0.0312, 1.5].map(money), ["$0.00", "$0.000030", "$0.00031", "$0.03", "$1.50"]);
+});
+
+test("a result that cannot be filed is sent inline, truncated, and the parent's run still ends", { timeout: 20_000 }, async (t) => {
+  const big = "x".repeat(20_000) + "\nSTATUS: DONE";
+  const s = await start(t, [calls(spawn("review")), says("waiting"), says("waiting"), says("read it")], (_context, options) => {
+    // A directory where the result file goes: the rename onto it fails.
+    mkdirSync(join(s.agentDir, "sessions", s.session.sessionId, `${options.sessionId}.result.md`, "blocker"), { recursive: true });
+    return says(big)();
+  });
+  await s.session.prompt("go");
+  const notice = s.notices().find((n) => n.startsWith("Subagent "));
+  const [head, , , cause, ...rest] = notice.split("\n");
+  assert.match(head, /^Subagent \w+ \(do review\) completed\. STATUS: DONE$/);
+  assert.match(cause, /^Could not save the full result \(.+\)\. Truncated to its first 16,000 characters:$/);
+  assert.equal(rest.join("\n"), big.slice(0, 16_000));
+  assert.equal(s.session.messages.at(-1).role, "assistant");
+});
+
+test("after a restart, a message resumes a saved child from its session file", { timeout: 20_000 }, async (t) => {
+  const seen = [];
+  let id;
+  const { session, ctx, notices } = await start(
+    t,
+    [calls(spawn("scout")), (context) => ((id = /^Subagent (\w+)/.exec(lastText(context))[1]), says("waiting")()), says("waiting"), says("got it"), says("got it again")],
+    (context) => {
+      seen.push(context.messages.filter((m) => m.role === "user").map((m) => textOf(m).split("\n\nEnd your")[0]));
+      return says(seen.length === 1 ? "first\nSTATUS: NEEDS_CONTEXT" : "second\nSTATUS: DONE")();
+    },
   );
+  await session.prompt("go");
+
+  // A new extension instance knows nothing in memory; it finds the child on disk.
+  const fresh = await freshInstance();
+  const resumed = await fresh.call("subagent_message", { id, message: "here is the context" }, ctx);
+  assert.equal(resumed.content[0].text, `Subagent ${id} resumed.`);
+  await new Promise((resolve) => {
+    const off = fleet().subscribe(() => fleet().get(id)?.status === "completed" && (off(), resolve()));
+  });
+  await session.waitForIdle();
+  assert.deepEqual(seen[1], ["scout", "here is the context"]);
+  assert.deepEqual(notices().filter((n) => n.startsWith("Subagent ")).map((n) => n.split("\n")[0]), [
+    `Subagent ${id} (do scout) completed. STATUS: NEEDS_CONTEXT`,
+    `Subagent ${id} (do scout) completed. STATUS: DONE`,
+  ]);
+});
+
+test("only the session that spawned a child can message or stop it", { timeout: 20_000 }, async (t) => {
+  const held = gate();
+  const { ctx } = await start(t, [], (_context, options) => {
+    held.open();
+    return new Promise((resolve) => options.signal.addEventListener("abort", () => resolve(fauxAssistantMessage([], { stopReason: "aborted" }))));
+  });
+  const { call } = await freshInstance();
+  const started = await call("subagent_spawn", { description: "mine", prompt: "p", model: "kid/kid-1", thinking: "low" }, ctx);
+  const id = started.details.id;
+  await held;
+  const other = asSession(ctx, "someone-else");
+  const refused = `No subagent ${id} of yours. Use an id that your subagent_spawn returned.`;
+  await assert.rejects(call("subagent_message", { id, message: "hi" }, other), { message: refused });
+  await assert.rejects(call("subagent_stop", { id }, other), { message: refused });
+  assert.equal((await call("subagent_stop", { id }, ctx)).content[0].text, `Subagent ${id} stopped.`);
+});
+
+test("stop waits for the child's own work to stop before shutting it down, but not forever", { timeout: 20_000 }, async (t) => {
+  const shut = (globalThis[Symbol.for("pi-rig.test.kidShutdown")] = []);
+  t.after(() => delete globalThis[Symbol.for("pi-rig.test.kidShutdown")]);
+  const waiting = gate();
+  const shutWhenStopped = {};
+  let id;
+  const { session } = await start(
+    t,
+    [
+      calls(spawn("builder")),
+      (context) => ((id = /^Subagent (\w+)/.exec(lastText(context))[1]), says("waiting")()),
+      async () => (await waiting, calls(["subagent_stop", { id }])()),
+      says("stopped"),
+      says("noted"),
+    ],
+    (context) => {
+      if (context.messages.at(-1).role === "toolResult") return says("jobs started")();
+      if (!lastText(context).startsWith("Your run is ending")) return calls(["start_job", { id: "slow" }], ["start_job", { id: "stuck" }])();
+      onWait(() => waiting.open());
+      return says("waiting on jobs")();
+    },
+  );
+  globalThis[JOB_STOPPED] = (job) =>
+    job === "slow"
+      ? new Promise((resolve) => setImmediate(() => ((shutWhenStopped.slow = shut.length), resolve())))
+      : new Promise(() => {}); // never stops: the wait is bounded
+  await session.prompt("go");
+  assert.equal(shutWhenStopped.slow, 0, "the child shut down only after its job stopped");
+  assert.equal(shut.length, 1);
+  assert.equal(fleet().get(id).status, "stopped");
+});
+
+test("a child inherits the parent's active tools and prompt sections", { timeout: 20_000 }, async (t) => {
+  const PROMPT = Symbol.for("pi-rig.test.parentPrompt");
+  globalThis[PROMPT] = {
+    customPrompt: "PARENT CUSTOM PROMPT",
+    appendSystemPrompt: "PARENT APPENDED",
+    contextFiles: [{ path: "/parent/AGENTS.md", content: "PARENT RULES" }],
+  };
+  t.after(() => delete globalThis[PROMPT]);
+  let child;
+  const { session } = await start(
+    t,
+    [calls(spawn("look")), says("waiting"), says("waiting"), says("ok")],
+    (context) => {
+      child = { tools: getCurrentTools(context.messages).map((tool) => tool.name).sort(), prompt: getCurrentSystemPrompt(context.messages) };
+      return says("done")();
+    },
+    { tools: ["read", "ls", ...["subagent_spawn", "subagent_message", "subagent_stop"]] },
+  );
+  await session.prompt("go");
+  assert.deepEqual(child.tools, ["ls", "read"]);
+  assert.match(child.prompt, /^PARENT CUSTOM PROMPT/);
+  for (const text of ["PARENT APPENDED", "PARENT RULES"]) assert.ok(child.prompt.includes(text), text);
 });

@@ -9,6 +9,10 @@
 // child session writes its agent id to <agent dir>/child-id, then reports event
 // "child_start" to $PI_HARNESS_EVENTS (tests/helpers/tui.mjs).
 //
+// In a parent (no rig.subagent entry), globalThis[Symbol.for("pi-rig.test.parentPrompt")],
+// when set, is merged into before_agent_start's systemPromptOptions; this fixture loads
+// ahead of the subagents extension, which reads them.
+// Command /kidcmd exists so a test can send its name as plain text.
 // Each session_shutdown pushes the session id to globalThis[Symbol.for("pi-rig.test.kidShutdown")].
 // Tool `start_job` registers a fleet item owned by its session; the item's stop() calls
 // globalThis[Symbol.for("pi-rig.test.jobStopped")](id) and leaves it running.
@@ -63,6 +67,12 @@ export default function (pi: ExtensionAPI) {
       api: { stream: next(core.stream), streamSimple: next(core.streamSimple) },
     }),
   );
+
+  pi.on("before_agent_start", (event, ctx) => {
+    const extra = g[Symbol.for("pi-rig.test.parentPrompt")];
+    if (extra && !ctx.sessionManager.getEntries().some((e: any) => e.customType === "rig.subagent")) Object.assign(event.systemPromptOptions, extra);
+  });
+  pi.registerCommand("kidcmd", { description: "test", handler: async () => {} });
 
   pi.on("session_shutdown", (_event, ctx) => g[Symbol.for("pi-rig.test.kidShutdown")]?.push(ctx.sessionManager.getSessionId()));
 
