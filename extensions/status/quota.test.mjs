@@ -150,13 +150,14 @@ test("polling runs only while a TUI session is active, across reloads", async (t
   const timers = fakeTimers();
 
   const pi1 = fakePi();
-  registerQuota(pi1, settings(srv.port), { timers });
+  const c1 = registerQuota(pi1, settings(srv.port), { timers });
   pi1.emit("session_start", { reason: "startup" }, { mode: "print" });
   assert.equal(timers.intervals.size, 0);
   pi1.emit("session_start", { reason: "startup" }, { mode: "tui" });
   pi1.emit("session_start", { reason: "startup" }, { mode: "tui" });
   assert.deepEqual([...timers.intervals.values()].map((x) => x.ms), [60_000]);
-  await waitFor(() => srv.hits() === 1);
+  await c1.get(); // joins the startup fetch; a tick while it is in flight would merge into it
+  assert.equal(srv.hits(), 1);
   timers.tick();
   await waitFor(() => srv.hits() === 2);
 
