@@ -193,3 +193,42 @@ test("rigSettings is one instance per process, shared through globalThis", async
   const b = (await import("./index.ts?copy")).rigSettings(d);
   assert.equal(a, b);
 });
+
+test("a redeclared section retires the old handle: it refuses writes and its listeners stay silent", () => {
+  const d = dir();
+  const rig = createRigSettings(d);
+  const old = rig.declare("subagents", DECL);
+  const heard = [];
+  old.onChange(() => heard.push("old"));
+  rig.declare("subagents", DECL);
+  assert.throws(() => old.set("maxConcurrent", 4), /redeclared/);
+  assert.throws(() => old.reset("maxConcurrent"), /redeclared/);
+  assert.equal(existsSync(join(d, "rig.json")), false);
+  assert.deepEqual(heard, []);
+});
+
+test("a section named __proto__ is an ordinary section", () => {
+  const d = dir();
+  const decl = [{ key: "n", type: "integer", min: 1, max: 9, default: 1, description: "n" }];
+  const section = createRigSettings(d).declare("__proto__", decl);
+  assert.equal(section.get("n"), 1);
+  section.set("n", 4);
+  assert.equal({}.n, undefined);
+  assert.deepEqual(Object.entries(JSON.parse(readFileSync(join(d, "rig.json"), "utf8"))), [["__proto__", { n: 4 }]]);
+  assert.equal(createRigSettings(d).declare("__proto__", decl).get("n"), 4);
+});
+
+for (const [bounds, bad, message] of [
+  [{ min: 1 }, 0, "must be at least 1"],
+  [{ max: 5 }, 6, "must be at most 5"],
+  [{ min: 1, max: 5 }, 6, "must be between 1 and 5"],
+]) {
+  test(`an integer bound ${JSON.stringify(bounds)} warns "${message}"`, () => {
+    const rig = createRigSettings(dir({ s: { n: bad } }));
+    rig.declare("s", [{ key: "n", type: "integer", ...bounds, default: 3, description: "n" }]);
+    const warnings = [];
+    rig.notifyWarnings({ notify: (m) => warnings.push(m) });
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], new RegExp(`s\\.n ${message};`));
+  });
+}

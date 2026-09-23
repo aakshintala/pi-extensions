@@ -6,7 +6,7 @@ const ok = { timedOut: false, shutdownObserved: true };
 const snap = (extra = {}) => ({
   activeTools: ["t"],
   allTools: [{ name: "t", description: "x".repeat(40), sourceInfo: { path: "<builtin:t>" } }, { name: "inactive", description: "x".repeat(4000) }],
-  commands: [],
+  commands: [{ name: "rig" }],
   systemPrompt: "y".repeat(400),
   ...extra,
 });
@@ -52,4 +52,15 @@ test("gate enforces per-tool budgets for non-builtin tools", () => {
 
 test("a budget on a builtin tool is enforced", () => {
   assert.match(gate(snap(), ok, { maxPromptTokens: 200, tools: { t: 1 } }).join(), /tool t over budget/);
+});
+
+test("gate requires /rig and refuses /agents, /tasks and /bg* commands", () => {
+  const names = (...n) => snap({ commands: n.map((name) => ({ name })) });
+  assert.deepEqual(gate(names("rig", "other"), ok, { maxPromptTokens: 200 }), []);
+  assert.deepEqual(gate(names("other"), ok, { maxPromptTokens: 200 }), ["/rig is not registered"]);
+  assert.deepEqual(gate(names("rig", "agents", "tasks", "bg-list", "agents-report", "tasks-help"), ok, { maxPromptTokens: 200 }), [
+    "/agents is registered; settings belong in /rig",
+    "/tasks is registered; settings belong in /rig",
+    "/bg-list is registered; settings belong in /rig",
+  ]);
 });
