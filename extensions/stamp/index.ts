@@ -182,6 +182,7 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
       ...(level === undefined ? {} : { thinkingLevel: level }),
       ...(withCost ? { ...(estimatedCost === undefined ? {} : { estimatedCost }), costSinceUser: cost.total } : {}),
       ...(done.length ? { tools: done } : {}),
+      ...(isToolOnly(message) ? { toolOnly: true } : {}),
     });
   });
 
@@ -199,6 +200,15 @@ export default function stamp(pi: ExtensionAPI, { now = Date.now }: { now?: () =
     lastStamp = undefined;
     cost = noCost();
   });
+}
+
+/** A response that only calls tools: no text, just thinking (if any) and the calls. */
+function isToolOnly(message: { stopReason?: string; content?: unknown }): boolean {
+  return (
+    message.stopReason === "toolUse" &&
+    Array.isArray(message.content) &&
+    !message.content.some((b) => isRecord(b) && b.type === "text" && typeof b.text === "string" && b.text.trim() !== "")
+  );
 }
 
 function isMeaningfulUpdate(value: unknown): boolean {

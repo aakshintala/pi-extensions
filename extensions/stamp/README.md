@@ -16,6 +16,14 @@ Everything is recorded; settings only decide what is shown, so a change applies
 to stamps already on screen, including tools that ran while `toolStamps` was off.
 Entries written by every earlier version of the fork still render.
 
+A response that only calls tools, with no text, draws nothing in the chat, so its
+stamp draws no row either: a collapsed run of tool calls has one stamp, under the
+reply that ends it. Its entry is still written, and `toolStamps` brings its row
+back. That setting reaches these rows when Pi rebuilds the chat (`/reload`,
+`/resume`, `/tree`), not at once. The rule looks at text only, because Pi does not
+tell extensions whether thinking is shown: a tool-only response whose thinking you
+show with `Ctrl+T` gets no row either.
+
 ## Keys
 
 - `Ctrl+O` (Pi's expand tool output) adds exact ISO and unix-ms times when

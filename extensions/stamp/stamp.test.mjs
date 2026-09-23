@@ -102,6 +102,20 @@ test("toolStamps shows recorded tools, and legacy tool entries still render a (h
   assert.deepEqual(render(legacy, { toolStamps: true }), ["tool read · <0.1s · success"]);
 });
 
+test("a tool-only response renders no component unless toolStamps is on; entries without the flag render as before", () => {
+  const tools = [{ name: "read", startedAt: T, completedAt: T + 100, outcome: "success" }];
+  assert.equal(render(assistant({ toolOnly: true, tools })), undefined);
+  assert.deepEqual(render(assistant({ toolOnly: true, tools }), { toolStamps: true }), ["14:05:09", "tool read · 0.1s · success"]);
+  assert.deepEqual(render(assistant({ tools })), ["14:05:09"]);
+  assert.equal(render(assistant({ toolOnly: false })), undefined); // only `true` is ever written
+  // Drawn while toolStamps was on, it goes blank when it is turned off.
+  let settings = Object.freeze({ ...DEFAULTS, toolStamps: true });
+  const shown = stampRenderer(() => settings)({ type: "custom", customType: "pi-stamp", data: assistant({ toolOnly: true }) }, { expanded: false }, theme);
+  assert.deepEqual(shown.render(20).map((l) => l.trimStart()), ["14:05:09"]);
+  settings = Object.freeze({ ...DEFAULTS });
+  assert.deepEqual(shown.render(20), []);
+});
+
 test("every version the fork wrote still renders, and malformed data renders nothing", () => {
   assert.deepEqual(render({ version: 1, role: "user", timestamp: T }), ["14:05:09"]);
   assert.deepEqual(render({ version: 3, role: "assistant", timestamp: T, completedAt: T + 1000 }, { responseTiming: "duration" }), [
