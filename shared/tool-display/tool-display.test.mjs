@@ -147,3 +147,11 @@ test("group summary: failed and cancelled calls are not counted as done work and
   assert.equal(theme.keys.at(-2), "error");
   assert.equal(plain(td.summaryText(recordingTheme(), [{ summary: READ, status: "cancelled" }])), "1 cancelled");
 });
+
+test("a group still on screen after its session is reset draws without throwing", () => {
+  const r = td.toolRenderers({ title: "Read", arg: () => "", result: () => ({ summary: "", body: [] }), summary: { tool: "read", verb: "read", one: "file" } });
+  td.trackMessage({ role: "assistant", content: [{ type: "toolCall", id: "r1", name: "read", arguments: {} }] });
+  const line = r.renderCall({}, recordingTheme(), { toolCallId: "r1", args: {}, cwd: "/w", expanded: false, invalidate() {} });
+  td.resetGroups();
+  assert.doesNotThrow(() => line.render(80));
+});

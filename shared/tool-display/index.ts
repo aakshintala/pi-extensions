@@ -197,7 +197,8 @@ const SPIN_MS = 80;
 const call = (id: string): Call => S.calls.get(id) ?? S.calls.set(id, { status: "pending" }).get(id)!;
 const stateOf = (c: Call): CallState => (c.status === "pending" && c.group?.ended ? "cancelled" : c.status);
 const isOpen = (g: Group, context: ToolRenderContext) => context.expanded || g.expanded;
-const members = (g: Group) => g.ids.map((id) => S.calls.get(id)!);
+// A chat can still draw a group after resetGroups (session switch) forgot its calls.
+const members = (g: Group) => g.ids.flatMap((id) => S.calls.get(id) ?? []);
 const running = (g: Group) => members(g).some((c) => stateOf(c) === "pending");
 const refresh = (g: Group) => members(g).forEach((c) => c.invalidate?.());
 
