@@ -16,6 +16,9 @@ import { rigSettings } from "../shared/settings/index.ts";
 const path = (p) => fileURLToPath(new URL(p, import.meta.url));
 const EXTENSIONS = [path("./fixtures/subagents/kid.ts"), path("../extensions/fleet/index.ts"), path("../extensions/subagents/index.ts")];
 const KID = Symbol.for("pi-rig.test.kid");
+const PRICE = Symbol.for("pi-rig.test.kidPrice");
+const JOB_STARTED = Symbol.for("pi-rig.test.jobStarted");
+const SUBAGENT_TOOLS = ["subagent_spawn", "subagent_message", "subagent_stop"];
 const JOB_STOPPED = Symbol.for("pi-rig.test.jobStopped");
 
 const textOf = (m) => (typeof m.content === "string" ? m.content : m.content.map((c) => c.text ?? `call ${c.name}`).join(""));
@@ -58,6 +61,8 @@ async function start(t, replies, kid, { tools, before } = {}) {
     registry.prune();
     delete globalThis[KID];
     delete globalThis[JOB_STOPPED];
+    delete globalThis[JOB_STARTED];
+    delete globalThis[PRICE];
   });
   const results = () => s.session.messages.filter((m) => m.role === "toolResult").map((m) => [m.isError, textOf(m)]);
   const notices = () => s.session.messages.filter((m) => m.customType === "rig.notice").map(textOf);
@@ -70,7 +75,7 @@ async function freshInstance() {
   const pi = {
     registerTool: (tool) => tools.set(tool.name, tool),
     on() {},
-    getActiveTools: () => ["read"],
+    getActiveTools: () => ["read", ...SUBAGENT_TOOLS],
     setActiveTools() {},
     sendMessage() {},
   };
@@ -122,6 +127,10 @@ const idOf = (label) => fleet().items().find((i) => i.label === `do ${label}`)?.
 const noticed = (context, label, status = "completed") => context.messages.some((m) => m.role !== "assistant" && m.role !== "toolResult" && textOf(m).includes(`(do ${label}) ${status}`));
 /** Answers only when aborted, as a provider does. */
 const untilAborted = (options) => new Promise((resolve) => options.signal.addEventListener("abort", () => resolve(fauxAssistantMessage([], { stopReason: "aborted" }))));
+
+const tokens = (line) => Number(/ · ([\d,]+) tokens? · /.exec(line)[1].replace(/,/g, ""));
+const cost = (line) => /tokens? · (\$[\d.]+)/.exec(line)[1];
+const { money } = await import("../extensions/subagents/index.ts");
 
 const STATS = /^\d+ turns? · \d+ tool uses? · [\d,]+ tokens? · \$0\.00 · 0s$/;
 
@@ -453,12 +462,14 @@ test("a result that cannot be filed is sent inline, truncated, and the parent's 
 
 test("after a restart, a message resumes a saved child from its session file", { timeout: 20_000 }, async (t) => {
   const seen = [];
+  const tools = [];
   let id;
-  const { session, ctx, notices } = await start(
+  const { session, ctx, agentDir, notices } = await start(
     t,
     [calls(spawn("scout")), (context) => ((id = /^Subagent (\w+)/.exec(lastText(context))[1]), says("waiting")()), says("waiting"), says("got it"), says("got it again")],
     (context) => {
       seen.push(context.messages.filter((m) => m.role === "user").map((m) => textOf(m).split("\n\nEnd your")[0]));
+      tools.push(getCurrentTools(context.messages).map((tool) => tool.name).filter((name) => name.startsWith("subagent_")));
       return says(seen.length === 1 ? "first\nSTATUS: NEEDS_CONTEXT" : "second\nSTATUS: DONE")();
     },
   );
@@ -473,6 +484,11 @@ test("after a restart, a message resumes a saved child from its session file", {
   });
   await session.waitForIdle();
   assert.deepEqual(seen[1], ["scout", "here is the context"]);
+  // The child's depth is saved in its first entry, and a depth-1 child reopened after a restart keeps its tools.
+  const dir = join(agentDir, "sessions", session.sessionId);
+  const [, marker] = readFileSync(join(dir, readdirSync(dir).find((f) => f.endsWith(`_${id}.jsonl`))), "utf8").split("\n").map((l) => l && JSON.parse(l));
+  assert.deepEqual(marker.data, { agentId: id, parentSessionId: session.sessionId, depth: 1 });
+  assert.deepEqual(tools, [SUBAGENT_TOOLS, SUBAGENT_TOOLS]);
   assert.deepEqual(notices().filter((n) => n.startsWith("Subagent ")).map((n) => n.split("\n")[0]), [
     `Subagent ${id} (do scout) completed. STATUS: NEEDS_CONTEXT`,
     `Subagent ${id} (do scout) completed. STATUS: DONE`,
@@ -561,6 +577,7 @@ test("a child ending with a grandchild running is woken once, and its notice, co
     if (noticed(context, "C")) grandDoneAtNotice = fleet().get(idOf("G")).status;
     return says("waiting")();
   };
+  globalThis[PRICE] = 1e-6;
   const { session, agentDir, notices } = await start(t, Array(6).fill(root), async (context, options) => {
     const task = taskOf(context);
     tools[task] = getCurrentTools(context.messages).map((tool) => tool.name).filter((name) => name.startsWith("subagent_"));
@@ -594,7 +611,6 @@ test("a child ending with a grandchild running is woken once, and its notice, co
   assert.match(notice, /\n\nC done\nSTATUS: DONE$/);
 
   // Tokens roll up: the child's count is its own replies plus the grandchild's count.
-  const tokens = (text) => Number(/ · ([\d,]+) tokens? · /.exec(text)[1].replace(/,/g, ""));
   const grand = users.find((u) => u.startsWith(`Subagent ${idOf("G")} `));
   const dir = join(agentDir, "sessions", session.sessionId);
   const file = readdirSync(dir).find((f) => f.endsWith(`_${child.id}.jsonl`));
@@ -603,6 +619,8 @@ test("a child ending with a grandchild running is woken once, and its notice, co
     .reduce((n, e) => n + e.message.usage.totalTokens, 0);
   assert.ok(tokens(grand) > 0);
   assert.equal(tokens(notice), own + tokens(grand));
+  // Cost rolls up the same way: every reply costs $0.000001 a token.
+  assert.equal(cost(notice), money(tokens(notice) * 1e-6));
 });
 
 test("nested children take no queue slot, and a nested spawn over maxSessions is refused", { timeout: 20_000 }, async (t) => {
@@ -720,4 +738,124 @@ test("a nested agent finishing frees room for a queued top-level spawn", { timeo
   await session.prompt("go");
   assert.match(results()[1][1], /^Subagent \w+ queued\.$/);
   assert.equal(cAtD, "running");
+});
+
+test("tokens and cost roll up across a resumed nested run, and Session total counts every child's run", { timeout: 20_000 }, async (t) => {
+  let g, cContext;
+  let asked = false;
+  const root = (context) => {
+    if (!context.messages.some((m) => m.role === "toolResult")) return calls(spawn("C"))();
+    if (noticed(context, "C") && !asked) return (asked = true), calls(["subagent_message", { id: idOf("C"), message: "again" }])();
+    return says("waiting")();
+  };
+  globalThis[PRICE] = 1e-6;
+  const { session, agentDir, notices } = await start(t, Array(12).fill(root), (context, options) => {
+    if (taskOf(context) === "G") return (g = options.sessionId), says("G\nSTATUS: DONE")();
+    cContext = context;
+    const users = context.messages.filter((m) => m.role === "user").map(textOf);
+    const heard = users.filter((u) => u.startsWith(`Subagent ${g} `)).length;
+    const second = users.some((u) => u.startsWith("again"));
+    if (!second) {
+      if (!context.messages.some((m) => m.role === "toolResult")) return calls(spawn("G"))();
+      return says(heard ? "C one\nSTATUS: DONE" : "waiting")();
+    }
+    if (textOf(context.messages.at(-1)).startsWith("again")) return calls(["subagent_message", { id: g, message: "more" }])();
+    return says(heard === 2 ? "C two\nSTATUS: DONE" : "waiting")();
+  });
+  await session.prompt("go");
+
+  const c = idOf("C");
+  const second = notices().filter((n) => n.startsWith(`Subagent ${c} `))[1];
+  assert.match(second, /\n\nC two\nSTATUS: DONE$/);
+  const [, run, total] = second.split("\n");
+  const grand = cContext.messages.filter((m) => m.role === "user").map(textOf).filter((u) => u.startsWith(`Subagent ${g} `)).map((u) => tokens(u.split("\n")[1]));
+  // C's own replies, from its saved session, split at the resume.
+  const dir = join(agentDir, "sessions", session.sessionId);
+  const entries = readFileSync(join(dir, readdirSync(dir).find((f) => f.endsWith(`_${c}.jsonl`))), "utf8").trim().split("\n").map(JSON.parse).filter((e) => e.type === "message");
+  const resumedAt = entries.findIndex((e) => e.message.role === "user" && textOf(e.message).startsWith("again"));
+  const own = (list) => list.filter((e) => e.message.role === "assistant").reduce((n, e) => n + e.message.usage.totalTokens, 0);
+  assert.equal(grand.length, 2);
+  assert.equal(tokens(run), own(entries.slice(resumedAt)) + grand[1]);
+  assert.equal(tokens(total), own(entries) + grand[0] + grand[1]);
+  assert.equal(cost(run), money(tokens(run) * 1e-6));
+  assert.equal(cost(total), money(tokens(total) * 1e-6));
+});
+
+test("a stopped agent leaves the tree's cap at once, even while it winds down", { timeout: 20_000 }, async (t) => {
+  const [g1Running, release] = [gate(), gate()];
+  let second;
+  const root = (context) => (context.messages.some((m) => m.role === "toolResult") ? says("waiting")() : calls(spawn("C"))());
+  const { session } = await start(t, Array(6).fill(root), async (context) => {
+    const task = taskOf(context);
+    if (task === "G1") return g1Running.open(), await release, says("late")(); // ignores its abort
+    if (task === "G2") return release.open(), says("G2 done")();
+    const results = context.messages.filter((m) => m.role === "toolResult");
+    if (!results.length) return calls(spawn("G1"))();
+    if (results.length === 1) return await g1Running, calls(["subagent_stop", { id: idOf("G1") }])();
+    if (results.length === 2) return calls(spawn("G2"))();
+    if (results.length === 3 && context.messages.at(-1).role === "toolResult") second = [results[2].isError, textOf(results[2])];
+    return says("C done")();
+  });
+  setting(t, "maxSessions", 3); // the root, C and one more
+  await session.prompt("go");
+  assert.deepEqual(second, [false, `Subagent ${idOf("G2")} started.`]);
+});
+
+test("an agent being stopped cannot start anything below it", { timeout: 20_000 }, async (t) => {
+  let attempt;
+  const gDone = new Promise((resolve) => {
+    const off = fleet().subscribe(() => fleet().get(idOf("G") ?? "")?.status === "completed" && (off(), resolve()));
+  });
+  const root = async (context) => {
+    if (!context.messages.some((m) => m.role === "toolResult")) return calls(spawn("C"))();
+    if (context.messages.filter((m) => m.role === "toolResult").length === 1) return await gDone, calls(["subagent_stop", { id: idOf("C") }])();
+    return says("ok")();
+  };
+  const { session } = await start(t, Array(6).fill(root), (context) => {
+    if (taskOf(context) === "G") return says("G done")();
+    if (!context.messages.some((m) => m.role === "toolResult")) return calls(["start_job", { id: "hold" }], spawn("G"))();
+    return says("waiting")(); // the job keeps C alive
+  });
+  // Mid-stop, while C's job is being stopped, the user resumes C's finished child from FleetView.
+  globalThis[JOB_STOPPED] = () =>
+    fleet().get(idOf("G")).steer("again").then(() => (attempt = "resumed"), (e) => (attempt = e.message));
+  await session.prompt("go");
+  assert.equal(attempt, "Refused: you are being stopped.");
+});
+
+test("the parent's shutdown gives up on a child that will not stop, after a bound", { timeout: 30_000 }, async (t) => {
+  const [held, release] = [gate(), gate()];
+  const { session, results } = await start(t, [calls(spawn("stuck")), says("started")], () => (held.open(), release.then(says("late"))));
+  t.after(() => release.open());
+  const ui = new Proxy({}, { get: () => () => undefined });
+  await session.bindExtensions({ uiContext: ui, mode: "rpc" }); // with a UI the run ends at once
+  await session.prompt("go");
+  const id = /^Subagent (\w+)/.exec(results()[0][1])[1];
+  await held;
+  await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+  assert.deepEqual([fleet().get(id).status, fleet().get(id).result], ["stopped", "did not stop in time"]);
+  const saved = session.sessionManager.getEntries().filter((e) => e.type === "custom_message" && e.customType === "rig.notice");
+  assert.deepEqual(saved.map((e) => e.content), [`Subagent ${id} (do stuck) stopped. It did not stop within 10s, so its session was abandoned.`]);
+});
+
+test("stopping a nested agent frees room for a queued top-level spawn at once", { timeout: 20_000 }, async (t) => {
+  const [g1Running, release] = [gate(), gate()];
+  let g1AtD;
+  const root = async (context) => {
+    const n = context.messages.filter((m) => m.role === "toolResult").length;
+    if (n === 0) return calls(spawn("C"))();
+    if (n === 1) return await g1Running, calls(spawn("D"))();
+    if (n === 2) return calls(["subagent_stop", { id: idOf("G1") }])();
+    return says("waiting")();
+  };
+  const { session, results } = await start(t, Array(10).fill(root), async (context) => {
+    const task = taskOf(context);
+    if (task === "G1") return g1Running.open(), await release, says("late")(); // ignores its abort
+    if (task === "D") return (g1AtD = fleet().get(idOf("G1")).status), release.open(), says("D done")();
+    return context.messages.some((m) => m.role === "toolResult") ? says("waiting")() : calls(spawn("G1"))();
+  });
+  setting(t, "maxSessions", 3); // the root, C and G1
+  await session.prompt("go");
+  assert.match(results()[1][1], /^Subagent \w+ queued\.$/);
+  assert.equal(g1AtD, "running"); // D started while G1 was still winding down
 });

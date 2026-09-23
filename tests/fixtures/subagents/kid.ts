@@ -17,11 +17,15 @@
 // Command /kidcmd exists so a test can send its name as plain text.
 // Each session_shutdown pushes the session id to globalThis[Symbol.for("pi-rig.test.kidShutdown")].
 // Tool `start_job` registers a fleet item owned by its session; the item's stop() calls
-// globalThis[Symbol.for("pi-rig.test.jobStopped")](id) and leaves it running.
+// globalThis[Symbol.for("pi-rig.test.jobStopped")](id) and leaves it running. It runs one
+// call at a time, and returns once globalThis[Symbol.for("pi-rig.test.jobStarted")](id), if
+// set, settles.
+// globalThis[Symbol.for("pi-rig.test.kidPrice")], when set, is each reply's cost in dollars
+// per token (the faux provider reports none).
 import { appendFileSync, existsSync, readFileSync, watch, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createFauxCore, createProvider, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, createFauxCore, createProvider, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { fleet } from "../../../shared/fleet/index.ts";
 
 const g = globalThis as any;
@@ -63,7 +67,20 @@ export default function (pi: ExtensionAPI) {
   const core = createFauxCore({ provider: "kid", models: [{ id: "kid-1", reasoning: true }] });
   const next = (stream: typeof core.stream): typeof core.stream => (model, context, options) => {
     core.setResponses([(ctx, opts) => (g[Symbol.for("pi-rig.test.kid")] ?? fromFile)(ctx, opts)]);
-    return stream(model, context, options);
+    const price = g[Symbol.for("pi-rig.test.kidPrice")];
+    const events = stream(model, context, options);
+    if (!price) return events;
+    // Re-emits every event, pricing the final message by its token count.
+    const priced = createAssistantMessageEventStream();
+    void (async () => {
+      for await (const e of events as any) {
+        const m = e.type === "done" ? e.message : e.type === "error" ? e.error : undefined;
+        if (m?.usage) m.usage = { ...m.usage, cost: { ...m.usage.cost, total: m.usage.totalTokens * price } };
+        priced.push(e);
+      }
+      priced.end();
+    })();
+    return priced as any;
   };
   pi.registerProvider(
     createProvider({
@@ -87,6 +104,7 @@ export default function (pi: ExtensionAPI) {
     label: "job",
     description: "test",
     parameters: { type: "object", properties: { id: { type: "string" } } } as any,
+    executionMode: "sequential",
     async execute(_callId, params: any, _signal, _update, ctx) {
       fleet().register({
         id: params.id,
@@ -97,6 +115,7 @@ export default function (pi: ExtensionAPI) {
         view: { log: "/dev/null" },
         stop: () => g[Symbol.for("pi-rig.test.jobStopped")]?.(params.id),
       });
+      await g[Symbol.for("pi-rig.test.jobStarted")]?.(params.id);
       return { content: [{ type: "text", text: "started" }], details: undefined };
     },
   });

@@ -2,7 +2,8 @@
 // subagent_stop. Each child is a persisted Pi session in this process, registered
 // with the shared fleet as an `agent` item; its result reaches the parent as a fleet
 // notice. Every session runs this factory, so a child spawns its own children with
-// its own instance; the instances share one process-wide map of agents (the tree).
+// its own instance. The agents form a tree of objects: each instance holds its
+// session's node, found for a child through its SessionManager.
 // Worktrees and fork (#54) and the transcript viewer (#68) are later tickets.
 import { existsSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -25,6 +26,8 @@ import { oneLine } from "../../shared/text/index.ts";
 import { toolRenderers, resultText } from "../../shared/tool-display/index.ts";
 
 const MARKER = "rig.subagent";
+/** Tokens and cost of a finished child, saved in its parent's session for the parent's `Session total:`. */
+const USAGE = "rig.subagent.usage";
 const NOTICE = "rig.notice"; // the fleet extension's notice type
 const TOOLS = ["subagent_spawn", "subagent_message", "subagent_stop"];
 const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -34,6 +37,8 @@ const STATUS_ASK = `\n\nEnd your final message with one line: ${STATUSES.map((s)
 const LEAD = 1000;
 /** Longest wait for a stopped child's own work to stop before its session shuts down. */
 const ITEM_STOP_MS = 5000;
+/** Longest wait for all of a session's children to stop when it shuts down. */
+const SHUTDOWN_MS = 10_000;
 
 const SETTINGS = [
   { key: "maxConcurrent", type: "integer", min: 1, max: 64, default: 10, description: "Top-level subagents running at once" },
@@ -46,12 +51,23 @@ type Stats = { turns: number; tools: number; tokens: number; cost: number; ms: n
 /** What a child inherits from its parent (#26 story 8), read when it starts. */
 type Inherit = { tools: string[]; prompt?: BuildSystemPromptOptions; models: ExtensionContext["scopedModels"] };
 
-type Agent = {
-  id: string;
-  /** The parent's session id: the main session's, or its parent agent's id. */
-  owner: string;
-  /** 1 for a child of the main session. */
+/** A session in a tree of agents: a root (a session that is no agent) or an agent. */
+type Node = {
+  /** 0 for a root. */
   depth: number;
+  /** Children not yet pruned: running, queued, or done with a child that is not. */
+  children: Set<Agent>;
+  parent?: Node;
+  stopped?: boolean;
+};
+type Root = Node & { pump(): void };
+
+type Agent = Node & {
+  id: string;
+  /** The parent's session id. */
+  owner: string;
+  parent: Node;
+  root: Root;
   label: string;
   model: NonNullable<ExtensionContext["model"]>;
   thinking: string;
@@ -70,29 +86,37 @@ type Agent = {
   /** The parent is shutting down: the notice is saved in its session instead of delivered. */
   closing?: boolean;
   activity: string;
-  /** The current run's counts, which finished children add their tokens and cost to. */
-  stats?: Omit<Stats, "ms">;
-  /** Starts queued top-level agents of the instance that spawned this one. */
-  pump: () => void;
+  /** Tokens and cost of children that finished since this agent's last notice; the next notice adds them. */
+  rolled: { tokens: number; cost: number };
+  /** Stops it, in the instance that spawned it. */
+  halt?: () => Promise<void>;
 };
 
-/** Every agent of every session in this process, by id; an agent's id is its session id. */
-const TREE = Symbol.for("pi-rig.subagents.tree");
-const tree: Map<string, Agent> = ((globalThis as any)[TREE] ??= new Map());
+/** Each agent by its SessionManager, so the child session's own instance finds its node. */
+const NODES = Symbol.for("pi-rig.subagents.nodes");
+const byManager: WeakMap<object, Agent> = ((globalThis as any)[NODES] ??= new WeakMap());
 
-/** The session at the top of `session`'s tree. */
-function rootOf(session: string) {
-  while (tree.has(session)) session = tree.get(session)!.owner;
-  return session;
+/** Running agents below `n`; a stopped one no longer counts, even while it winds down. */
+function running(n: Node): number {
+  let k = 0;
+  for (const a of n.children) k += (a.state === "running" && !a.stopped ? 1 : 0) + running(a);
+  return k;
 }
 
-/** Sessions running in `root`'s tree: the root and each running agent in it. */
-const sessions = (root: string) => 1 + [...tree.values()].filter((a) => a.state === "running" && rootOf(a.owner) === root).length;
+/** The agent `id` in `n`'s subtree. */
+function search(n: Node, id: string): Agent | undefined {
+  for (const a of n.children) {
+    const hit = a.id === id ? a : search(a, id);
+    if (hit) return hit;
+  }
+  return undefined;
+}
 
-/** Whether `a` is below the session `session`. */
-function below(a: Agent, session: string) {
-  for (let x: Agent | undefined = a; x; x = tree.get(x.owner)) if (x.owner === session) return true;
-  return false;
+/** Drops a finished agent with no live children from the tree, then its parent if that is now spent too; a resume reads it from disk. */
+function prune(a: Agent) {
+  if (a.state !== "done" || a.children.size) return;
+  a.parent.children.delete(a);
+  if ("root" in a.parent) prune(a.parent as Agent);
 }
 
 export const isChild = (ctx: Pick<ExtensionContext, "sessionManager">) =>
@@ -146,10 +170,11 @@ export default function (pi: ExtensionAPI) {
   const section = rig.declare("subagents", SETTINGS);
   const setting = (key: string) => section.get(key) as number;
 
-  const agents = new Map<string, Agent>();
   const queue: Agent[] = [];
-  /** This session's depth: 0 for the main session. */
-  let depth = 0;
+  /** The tree's root when this session is no agent. */
+  const top: Root = { depth: 0, children: new Set(), pump };
+  /** This session's node: `top`, or the agent it runs. */
+  let node: Node = top;
   let scope: ExtensionContext["scopedModels"] = [];
   /** The parent's prompt sections as of its latest run, for its children. */
   let promptOptions: BuildSystemPromptOptions | undefined;
@@ -157,27 +182,34 @@ export default function (pi: ExtensionAPI) {
     promptOptions = event.systemPromptOptions;
   });
 
-  const running = () => [...agents.values()].filter((a) => a.state === "running").length;
   const inherit = (): Inherit => ({ tools: pi.getActiveTools(), prompt: promptOptions, models: scope });
+  /** Starts queued top-level agents while a slot is free and the tree has room. */
   function pump() {
-    while (queue.length && running() < setting("maxConcurrent") && sessions(queue[0].owner) < setting("maxSessions")) {
+    const slots = () => [...top.children].filter((a) => a.state === "running").length;
+    while (queue.length && slots() < setting("maxConcurrent") && 1 + running(top) < setting("maxSessions")) {
       const a = queue.shift()!;
       a.run = run(a, inherit());
     }
   }
 
-  /** A nested spawn or resume that would take the tree past maxSessions is refused: it never queues, so a parent waiting on its child cannot deadlock. */
-  function admit(owner: string) {
-    const n = depth > 0 ? sessions(rootOf(owner)) : 0;
+  /**
+   * A nested spawn or resume starts at once or is refused: it never queues, so a parent
+   * waiting on its child cannot deadlock. Refused past maxSessions, and under an agent being stopped.
+   */
+  function admit() {
+    if (node.depth === 0) return;
+    for (let n: Node | undefined = node; n; n = n.parent) if (n.stopped) throw new Error("Refused: you are being stopped.");
+    const n = 1 + running((node as Agent).root);
     if (n >= setting("maxSessions")) throw new Error(`Refused: your tree of agents already runs ${n} sessions, the most allowed. Wait for one to finish or stop one.`);
   }
 
   /** Top-level agents queue for a slot; nested ones start at once (admit first). */
   function start(a: Agent) {
-    agents.set(a.id, a);
-    tree.set(a.id, a);
+    node.children.add(a);
+    byManager.set(a.manager, a);
+    a.halt = () => stop(a);
     register(a);
-    if (depth > 0) return void (a.run = run(a, inherit()));
+    if (node.depth > 0) return void (a.run = run(a, inherit()));
     queue.push(a);
     pump();
   }
@@ -188,7 +220,7 @@ export default function (pi: ExtensionAPI) {
       owner: a.owner,
       kind: "agent",
       label: a.label,
-      parentId: tree.has(a.owner) ? a.owner : undefined,
+      parentId: "root" in a.parent ? (a.parent as Agent).id : undefined,
       status: a.state === "queued" ? "queued" : "running",
       activity: () => a.activity,
       // ponytail: the transcript viewer is #68; until then the item shows where the session lives.
@@ -247,7 +279,7 @@ export default function (pi: ExtensionAPI) {
     a.state = "running";
     fleet().update(a.id, { status: "running" });
     const began = fleet().now();
-    const stats = (a.stats = { turns: 0, tools: 0, tokens: 0, cost: 0 });
+    const stats = { turns: 0, tools: 0, tokens: 0, cost: 0 };
     let error: string | undefined;
     let from = 0;
     let text = "";
@@ -285,24 +317,32 @@ export default function (pi: ExtensionAPI) {
       text = [...replies].reverse().map(textOf).find((t) => t.trim()) ?? "";
       if (!a.stopped && !error && replies.at(-1)?.stopReason === "error") error = replies.at(-1).errorMessage || "model error";
       if (from > 0 && a.session) {
-        // A resumed child: the notice also gives the session's totals over every run.
+        // A resumed child: the notice also gives the session's totals over every run, with every child's.
         const s = a.session.getSessionStats();
         total = { turns: s.assistantMessages, tools: s.toolCalls, tokens: s.tokens.total, cost: s.cost };
+        for (const e of a.manager.getEntries() as any[]) {
+          if (e.type !== "custom" || e.customType !== USAGE) continue;
+          total.tokens += e.data.tokens;
+          total.cost += e.data.cost;
+        }
       }
       await close(a);
     } catch (e) {
       error ??= (e as Error).message;
     } finally {
+      // Already done: its parent's shutdown gave up waiting and reported it.
+      const abandoned = a.state === "done";
       a.state = "done";
-      try {
-        finish(a, text, error, { ...stats, ms: fleet().now() - began }, total);
-      } catch (e) {
-        if (!isFinished(fleet().get(a.id)?.status ?? "completed")) report(a, "failed", `Error: ${(e as Error).message}`, `Subagent ${a.id} failed: ${(e as Error).message}`);
+      if (!abandoned) {
+        try {
+          finish(a, text, error, { ...stats, ms: fleet().now() - began }, total);
+        } catch (e) {
+          if (!isFinished(fleet().get(a.id)?.status ?? "completed")) report(a, "failed", `Error: ${(e as Error).message}`, `Subagent ${a.id} failed: ${(e as Error).message}`);
+        }
       }
+      prune(a);
       // A finished agent anywhere in the tree may free room for the top level's queue.
-      let top = a;
-      while (tree.has(top.owner)) top = tree.get(top.owner)!;
-      top.pump();
+      a.root.pump();
     }
   }
 
@@ -314,6 +354,15 @@ export default function (pi: ExtensionAPI) {
   }
 
   function finish(a: Agent, text: string, error: string | undefined, s: Stats, total?: Omit<Stats, "ms">) {
+    // Tokens and cost roll up: this notice counts the children that finished since the last one.
+    s = { ...s, tokens: s.tokens + a.rolled.tokens, cost: s.cost + a.rolled.cost };
+    a.rolled = { tokens: 0, cost: 0 };
+    if ("root" in a.parent) {
+      const parent = a.parent as Agent;
+      parent.rolled.tokens += s.tokens;
+      parent.rolled.cost += s.cost;
+      parent.manager.appendCustomEntry(USAGE, { tokens: s.tokens, cost: s.cost });
+    }
     const status = a.stopped ? "stopped" : error ? "failed" : "completed";
     const lines = [`${statsLine(s)} · ${duration(s.ms)}`, ...(total ? [`Session total: ${statsLine(total)}`] : [])];
     const head = `Subagent ${a.id} (${oneLine(a.label)}) ${status}. STATUS: ${a.stopped ? "STOPPED" : error ? "FAILED" : statusOf(text)}\n${lines.join("\n")}`;
@@ -333,23 +382,20 @@ export default function (pi: ExtensionAPI) {
     if (a.stopped) parts.push(body ? `Partial output, incomplete:\n${body}` : "No output.");
     else if (body) parts.push(body);
     const result = error ? `Error: ${error}` : a.stopped ? "partial output kept" : `STATUS: ${statusOf(text)}`;
-    // Tokens and cost roll up: the parent's run counts them, and passes them on when it finishes.
-    const parent = tree.get(a.owner);
-    if (parent?.state === "running" && parent.stats) {
-      parent.stats.tokens += s.tokens;
-      parent.stats.cost += s.cost;
-    }
     report(a, status, result, parts.join("\n\n"));
   }
 
   async function stop(a: Agent) {
     if (a.state === "done") return;
+    // First: from here it counts out of the tree's cap, and spawns below it are refused.
     a.stopped = true;
+    a.root.pump();
     if (a.state === "queued") {
       const i = queue.indexOf(a);
       if (i >= 0) queue.splice(i, 1);
       a.state = "done";
       report(a, "stopped", "stopped before it started", `Subagent ${a.id} (${oneLine(a.label)}) stopped before it started.`);
+      prune(a);
       return;
     }
     const s = a.session;
@@ -370,7 +416,7 @@ export default function (pi: ExtensionAPI) {
       if (a.session && a.prompted) await a.session.prompt(text, { source: "extension", expandPromptTemplates: false, streamingBehavior: "steer" });
       else a.prompt += `\n\n${text}`;
     } else {
-      admit(a.owner);
+      admit();
       a.prompt = text;
       a.stopped = false;
       a.state = "queued";
@@ -395,16 +441,18 @@ export default function (pi: ExtensionAPI) {
     const saved = manager.buildSessionContext();
     const model = saved.model && c.modelRegistry.find(saved.model.provider, saved.model.modelId);
     if (!model) return undefined;
-    const a: Agent = { id, owner, depth: depth + 1, label: manager.getSessionName() ?? id, model, thinking: saved.thinkingLevel, state: "done", prompt: "", cwd: c.cwd, manager, stopped: false, activity: "", pump };
-    agents.set(id, a);
-    tree.set(id, a);
-    return a;
+    return agent({ id, owner, depth: marker.data.depth ?? node.depth + 1, label: manager.getSessionName() ?? id, model, thinking: saved.thinkingLevel, state: "done", prompt: "", cwd: c.cwd, manager });
   }
 
-  /** Only the session that spawned a child can message or stop it. */
+  /** A new agent below this session. */
+  function agent(fields: Omit<Agent, "parent" | "root" | "children" | "stopped" | "activity" | "rolled">): Agent {
+    return { ...fields, parent: node, root: "root" in node ? (node as Agent).root : top, children: new Set(), stopped: false, activity: "", rolled: { tokens: 0, cost: 0 } };
+  }
+
+  /** Only the session that spawned a child can message it. */
   const find = (id: string, c: ExtensionContext) => {
     const owner = c.sessionManager.getSessionId();
-    const a = agents.get(id);
+    const a = [...node.children].find((x) => x.id === id);
     const mine = a && a.owner === owner ? a : !a ? restore(id, c) : undefined;
     if (!mine) throw new Error(`No subagent ${id} of yours. Use an id that your subagent_spawn returned.`);
     return mine;
@@ -428,13 +476,13 @@ export default function (pi: ExtensionAPI) {
       const levels = getSupportedThinkingLevels(model as any) as string[];
       if (!levels.includes(p.thinking)) throw new Error(`${p.model} cannot think at "${p.thinking}". Use one of: ${levels.join(", ")}.`);
       const owner = c.sessionManager.getSessionId();
-      admit(owner);
+      admit();
       // The child's session id is its agent id, so a later process can find its file.
       const id = randomUUID().slice(0, 8);
       const manager = SessionManager.create(c.cwd, childDir(c), { id, parentSession: c.sessionManager.getSessionFile() });
-      manager.appendCustomEntry(MARKER, { agentId: id, parentSessionId: owner });
+      manager.appendCustomEntry(MARKER, { agentId: id, parentSessionId: owner, depth: node.depth + 1 });
       manager.appendSessionInfo(p.description);
-      const a: Agent = { id, owner, depth: depth + 1, label: p.description, model, thinking: p.thinking, state: "queued", prompt: p.prompt, cwd: c.cwd, manager, stopped: false, activity: "", pump };
+      const a = agent({ id, owner, depth: node.depth + 1, label: p.description, model, thinking: p.thinking, state: "queued", prompt: p.prompt, cwd: c.cwd, manager });
       start(a);
       return reply(`Subagent ${id} ${a.state === "queued" ? "queued" : "started"}.`, id);
     },
@@ -471,12 +519,16 @@ export default function (pi: ExtensionAPI) {
     description: "Stop any agent below you: one of your subagents or one of theirs. Every agent under it stops too. Its notice carries its partial output, marked incomplete.",
     parameters: params({ id: str("Subagent id") }),
     async execute(_id: string, p: { id: string }, _signal: unknown, _update: unknown, c: ExtensionContext) {
-      const known = tree.get(p.id);
-      const a = known ? (below(known, c.sessionManager.getSessionId()) ? known : undefined) : restore(p.id, c);
+      // Only this session's subtree: its own children, and theirs, through their parent chain.
+      const me = c.sessionManager.getSessionId();
+      const known = search(node, p.id);
+      let mine = false;
+      for (let x: Node | undefined = known; x && "root" in x; x = x.parent) if ((x as Agent).owner === me) mine = true;
+      const a = known ? (mine ? known : undefined) : restore(p.id, c);
       if (!a) throw new Error(`No subagent ${p.id} below you.`);
       if (a.state === "done") return reply(`Subagent ${a.id} already finished.`, a.id);
-      // Through its fleet item: an agent below a child belongs to that child's instance.
-      await fleet().get(a.id)?.stop();
+      // An agent below a child belongs to that child's instance, which stops it.
+      await a.halt?.();
       return reply(`Subagent ${a.id} stopped.`, a.id);
     },
     ...toolRenderers({
@@ -488,21 +540,25 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, c) => {
     // A child session opened outside its tree (its parent is not running here) is treated as at the cap.
-    depth = tree.get(c.sessionManager.getSessionId())?.depth ?? (isChild(c) ? Infinity : 0);
+    node = byManager.get(c.sessionManager) ?? (isChild(c) ? { depth: Infinity, children: new Set() } : top);
     scope = c.scopedModels;
-    if (depth >= setting("maxDepth")) pi.setActiveTools(pi.getActiveTools().filter((t) => !TOOLS.includes(t)));
+    if (node.depth >= setting("maxDepth")) pi.setActiveTools(pi.getActiveTools().filter((t) => !TOOLS.includes(t)));
     // Same name: Pi keeps one definition per name, so this replaces the base tool.
     else if (c.scopedModels.length) pi.registerTool(spawnTool(scoped(c)) as any);
   });
 
   // Stops every child and waits for each to close, so nothing outlives the session. The
   // fleet may already have detached this session, so each notice is saved in it instead.
+  // A child that will not stop (a stream ignoring its abort) is given up on after SHUTDOWN_MS, so the whole cascade is bounded.
   pi.on("session_shutdown", async () => {
-    const all = [...agents.values()];
+    const all = [...node.children];
     for (const a of all) a.closing = true;
-    await Promise.all(all.map(stop));
-    await Promise.all(all.map((a) => a.run));
-    for (const a of all) tree.delete(a.id);
-    agents.clear();
+    await bounded(Promise.all(all.map(stop)).then(() => Promise.all(all.map((a) => a.run))), SHUTDOWN_MS);
+    for (const a of all) {
+      if (a.state === "done") continue;
+      a.state = "done";
+      report(a, "stopped", "did not stop in time", `Subagent ${a.id} (${oneLine(a.label)}) stopped. It did not stop within ${SHUTDOWN_MS / 1000}s, so its session was abandoned.`);
+    }
+    node.children.clear();
   });
 }
