@@ -12,3 +12,4 @@ pi install /path/to/pi-rig
 
 | Extension | What it is for | Spec |
 |---|---|---|
+| [ponytail](extensions/ponytail/README.md) | Always-on guidance to build the simplest working solution, plus the `ponytail-audit` skill | [#37](https://github.com/aakshintala/pi-rig/issues/37) |
