@@ -47,7 +47,7 @@ settings.onChange((key, value) => { /* apply */ });
 ### `tool-display/`
 
 The rig's tool style (spec #40), Claude Code-like. Rig tools and the built-in
-`read`/`edit`/`write` render through it.
+`read`/`edit`/`write` render through it, and runs of calls group into one line.
 
 ```ts
 import { toolRenderers, plural } from "../../shared/tool-display/index.ts";
@@ -68,6 +68,34 @@ pi.registerTool({
   lines, expanded capped at 200), `errorLines`, `unifiedDiff` (from old/new
   text, no file reads, skipped over 100,000 characters) and `diffBody`.
 - Colours come only from theme keys; every line fits the width it is given.
+
+**Groups** (#56). Give a tool a `summary` and consecutive calls to such tools in
+one assistant message collapse into one live line, e.g. "Read 3 files, edited
+2 files +442 −12 · 1 failed":
+
+```ts
+summary: { verb: "edited", one: "file", lines: (args) => ({ added, removed }) } // "edited N files +a −r"
+summary: { verb: "updated", many: "todos" }                                     // no `one`: "updated todos"
+```
+
+- The first call draws the summary; the others draw nothing. Failed calls and
+  calls with images always show. Ctrl+O (`context.expanded`) or a click on the
+  group shows every call.
+- A tool without `summary` (such as `ask_user`) is never grouped and splits a run,
+  as does text between calls. Grouping is decided as calls render, in message
+  order, so descriptors are not registered anywhere.
+- Groups belong to a `ToolGroups`, one per session. `extensions/tool-display`
+  creates it, feeds it from Pi's events and owns its spinner timer. To group a
+  transcript built from saved messages, call `track(assistantMessage)` and
+  `settle(toolCallId, isError, result)` for each result in order, then `endRun()`;
+  `reset()` forgets the session's calls. `outcomeOf(isError, result)` classifies a
+  result: an error ending in Pi's `Operation aborted` or `Command aborted` is
+  `cancelled`, any other error `error`. Calls with no result in an aborted turn
+  are `cancelled`; a returned error is never recast.
+- Call ids can repeat across sessions; each session indexes and removes only its
+  own, and a renderer picks the session holding the call's arguments.
+- `summaryText(theme, calls, thought)` builds the text; `thought` starts it with
+  "thought ·" (#57).
 
 ### `text/`
 

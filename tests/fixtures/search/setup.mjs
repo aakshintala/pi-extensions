@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { FileFinder } from "@ff-labs/fff-node";
-import { searchExtension } from "../../../extensions/search/index.ts";
+import "../tool-display/pi-tui.mjs"; // before the extension, which draws with pi-tui
+const { searchExtension } = await import("../../../extensions/search/index.ts");
 
 const FIXTURE = new URL("./repo", import.meta.url).pathname;
 

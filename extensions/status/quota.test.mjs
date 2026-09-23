@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { compact, createQuotaClient, full, registerQuota } from "./quota.ts";
+import "../../tests/fixtures/tool-display/pi-tui.mjs"; // before quota.ts, which draws with pi-tui
+const { compact, createQuotaClient, full, registerQuota } = await import("./quota.ts");
 
 const FEED = {
   providers: [

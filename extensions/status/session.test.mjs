@@ -6,7 +6,8 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxText, fauxToolCall, scriptedSession } from "../../tests/helpers/session.mjs";
-import status from "./index.ts";
+import "../../tests/fixtures/tool-display/pi-tui.mjs"; // before the extension, which draws with pi-tui
+const { default: status } = await import("./index.ts");
 
 const FEED = {
   providers: [

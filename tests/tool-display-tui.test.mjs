@@ -1,7 +1,7 @@
 // Tool display (#55) in a real pi: the built-in read, edit and write calls are
-// drawn in the shared style, results collapsed, the edit diff taken from the call's
-// arguments, and a failed call's error visible. After /new the new session is
-// decorated exactly once.
+// grouped into one summary with the failed call's error visible, and Ctrl+O shows
+// each call in the shared style with the edit diff taken from the call's arguments.
+// After /new the new session is decorated exactly once.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync } from "node:fs";
@@ -24,34 +24,25 @@ const REPLIES = [
   "Done.",
 ];
 
-const calls = (prompt, bFile) => `
+const A_FAILS = `
+ ⏺ Edit(a.txt)
+   ⎿  Error: Could not find the exact text in a.txt. The old text must match
+      exactly including all whitespace and newlines.`;
+const calls = (prompt, summary, failures) => `
 
  ${prompt}
 
 
- ⏺ Read(a.txt)
-   ⎿  Read 3 lines
-
- ⏺ Edit(b.txt)
-${bFile}
-
- ⏺ Write(c.txt)
-   ⎿  Wrote 6 lines
-      l1
-      l2
-      l3
-      l4
-      … +2 lines (ctrl+o to expand)
-
- ⏺ Edit(a.txt)
-   ⎿  Error: Could not find the exact text in a.txt. The old text must match
-      exactly including all whitespace and newlines.
+ ⏺ ${summary}
+${failures}
 
  Done.
 `;
+// Pads a screen to the pane's 40 rows.
+const fill = (s) => s + "\n".repeat(41 - s.split("\n").length);
 const RULE = "─".repeat(80);
 
-test("tool display: decorated built-ins, collapsed results, edit diff from arguments, visible error", async (t) => {
+test("tool display: decorated built-ins grouped, visible error, Ctrl+O shows each call and the edit diff from arguments", async (t) => {
   const tui = await startTui(t, { extensions: [EXTENSION], args: ["--tools", "read,edit,write"], rows: 40, replies: REPLIES });
   t.after(() => assert.deepEqual(liveGroup(tui.pid), []));
   cpSync(WORKSPACE, tui.cwd, { recursive: true });
@@ -59,26 +50,53 @@ test("tool display: decorated built-ins, collapsed results, edit diff from argum
   tui.type("go");
   tui.keys("Enter");
   await tui.waitForEvent("agent_end");
-  await tui.waitForScreen(`${calls(
-    "go",
-    `   ⎿  Added 3 lines, removed 2 lines
-      -two
-      -three
-      +2
-      +3
-      … +1 line (ctrl+o to expand)`,
-  )}
+  await tui.waitForScreen(fill(`${calls("go", "Read 1 file, edited 2 files +3 −2, wrote 1 file +6 · 1 failed", A_FAILS)}
 ${RULE}
 
 ${RULE}
 ~/cwd
-↑130 ↓60 R2 W130 CH0.8% 0.2%/128k (auto)                               harness-1
+↑130 ↓60 R2 W130 CH0.8% 0.2%/128k (auto)                               harness-1`));
+
+  tui.keys("C-o");
+  await tui.waitForScreen(fill(`
+
+ go
 
 
+ ⏺ Read(a.txt)
+   ⎿  Read 3 lines
+      alpha
+      beta
+      gamma
 
+ ⏺ Edit(b.txt)
+   ⎿  Added 3 lines, removed 2 lines
+      -two
+      -three
+      +2
+      +3
+      +3.5
 
+ ⏺ Write(c.txt)
+   ⎿  Wrote 6 lines
+      l1
+      l2
+      l3
+      l4
+      l5
+      l6
+${A_FAILS}
 
-`);
+ Done.
+
+ Tool output: expanded
+
+${RULE}
+
+${RULE}
+~/cwd
+↑130 ↓60 R2 W130 CH0.8% 0.2%/128k (auto)                               harness-1`));
+  tui.keys("C-o");
 
   tui.type("/new");
   tui.keys("Enter");
@@ -86,10 +104,14 @@ ${RULE}
   tui.type("again");
   tui.keys("Enter");
   await tui.waitForEvent("agent_end", 2);
-  await tui.waitForScreen(`${calls(
+  await tui.waitForScreen(fill(`${calls(
     "again",
-    `   ⎿  Error: Could not find the exact text in b.txt. The old text must match
-      exactly including all whitespace and newlines.`,
+    "Read 1 file, edited 2 files, wrote 1 file +6 · 2 failed",
+    `
+ ⏺ Edit(b.txt)
+   ⎿  Error: Could not find the exact text in b.txt. The old text must match
+      exactly including all whitespace and newlines.
+${A_FAILS}`,
   )}
 
  ✓ New session started
@@ -99,11 +121,5 @@ ${RULE}
 
 ${RULE}
 ~/cwd
-↑148 ↓60 R3 W148 CH1.0% 0.2%/128k (auto)                               harness-1
-
-
-
-
-
-`);
+↑148 ↓60 R3 W148 CH1.0% 0.2%/128k (auto)                               harness-1`));
 });

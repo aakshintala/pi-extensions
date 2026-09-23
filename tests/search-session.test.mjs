@@ -5,7 +5,8 @@ import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fauxAssistantMessage, fauxText, fauxToolCall, scriptedSession } from "./helpers/session.mjs";
 import { makeRepo, spyFFF } from "./fixtures/search/setup.mjs";
-import { searchExtension } from "../extensions/search/index.ts";
+import "./fixtures/tool-display/pi-tui.mjs"; // before the extension, which draws with pi-tui
+const { searchExtension } = await import("../extensions/search/index.ts");
 
 // One session over a fresh fixture repo; run(calls) makes the faux model call each tool in turn
 // and returns the tool result texts.
