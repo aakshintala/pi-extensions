@@ -15,10 +15,11 @@ FleetView: one list below the editor of all background work (agents, shell jobs 
 - Enter on another row switches straight to it. Enter on `main`, or Esc, returns to the chat.
 - A shell job or monitor shows its log file, read as it grows, with colours kept and other control sequences stripped. An agent shows its transcript.
 - Main-session output keeps going to the chat while you view an item, so you see it when you return.
-- In fullscreen mode the viewer scrolls like the chat: it follows new output, scrolling up pauses it, and End jumps back to the end.
-- What you type while viewing an agent steers it and shows in the viewer. Other items take no steering, and the main session gets nothing.
-- The viewer stays open when its item finishes.
-- The chat swap reaches into Pi's layout. If Pi is not version 0.87.1 or its layout differs, the viewer opens as a full-size overlay instead. The overlay has its own steer line, and PageUp, PageDown, Home, End and the mouse wheel scroll it.
+- The viewer follows new output. Scrolling up pauses it, and End jumps back to the end and follows again.
+- What you type while viewing an agent steers it and shows in the viewer. Other items take no steering. Slash commands still go to Pi; nothing else reaches the main session.
+- The viewer stays open when its item finishes, and closes once the item is removed.
+- The chat swap reaches into Pi's layout, and only fullscreen mode has the scroll view it needs. In regular mode, or if Pi is not version 0.87.1 or its layout differs, the viewer opens as a full-size overlay instead. The overlay has its own steer line, PageUp, PageDown, Home, End and the mouse wheel scroll it, and while scrolled up its header counts the lines below.
+- A log shows at most its last 2,000 lines. Each read takes at most 1 MiB, and a line says how many bytes it skipped.
 
 ## Notices
 

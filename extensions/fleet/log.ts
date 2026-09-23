@@ -2,68 +2,67 @@
 // kept, every other control sequence stripped.
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
-
-// The sequences of shared/text's oneLine: CSI, then OSC/DCS/SOS/PM/APC strings, then any other escape pair.
-// ponytail: copied because shared/text does not export it; export it there if a third copy appears.
-const SEQUENCE =
-  /(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1b[\]PX^_]|[\x90\x98\x9d-\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c|$)|\x1b[\s\S]?/g;
-const SGR = /^\x1b\[[0-9;:]*m$/;
+import { keepSgr, oneLine, unfinished } from "../../shared/text/index.ts";
 
 /** Most lines kept; older lines are dropped. */
 export const MAX_LINES = 2000;
-/** Most bytes read when a log is first opened: its tail. */
-const FIRST_READ = 1 << 20;
+/** Most bytes one read takes; anything appended before them is skipped. */
+export const MAX_READ = 1 << 20;
 
 /** One log line for the screen: SGR kept, other sequences removed, tabs expanded, other control characters dropped. After a carriage return only the last write shows. */
 export function logLine(s: string) {
-  const parts = s.split("\r");
-  const last = parts.findLast((p) => p !== "") ?? "";
-  return last
-    .replace(SEQUENCE, (m) => (SGR.test(m) ? m : ""))
+  const last = s.split("\r").findLast((p) => p !== "") ?? "";
+  return keepSgr(last)
     .replace(/\t/g, "    ")
     .replace(/[\x00-\x08\x0a-\x1a\x1c-\x1f\x7f-\x9f]/g, "");
 }
 
-/** Reads a log file from where the last read stopped. A missing file reads as empty; a truncated one starts over. */
+/**
+ * Reads a log file from where the last read stopped. A missing file reads as empty;
+ * a truncated one starts over. A read never throws: any other error shows as the last line.
+ */
 export function logSource(path: string) {
-  let offset = -1; // not read yet
+  let offset = 0;
   let decoder = new StringDecoder("utf8");
   let partial = ""; // text after the last newline
   let lines: string[] = [];
+  let error = "";
   return {
-    /** Complete lines, then the unfinished last line if any. */
-    lines: () => (partial ? [...lines, logLine(partial)] : lines),
-    /** Reads what was appended. Returns whether anything changed. */
+    /** Complete lines, the unfinished last line up to any sequence cut off at its end, then a read error if any. */
+    lines() {
+      const out = partial ? [...lines, logLine(partial.slice(0, unfinished(partial)))] : lines;
+      return error ? [...out, error] : out;
+    },
+    /** Reads what was appended, at most MAX_READ bytes. Returns whether anything changed. */
     read(): boolean {
-      let fd: number;
+      const before = error;
+      let fd: number | undefined;
       try {
         fd = openSync(path, "r");
-      } catch {
-        return false;
-      }
-      try {
         const size = fstatSync(fd).size;
-        let skipFirst = false;
-        if (offset < 0 || size < offset) {
-          skipFirst = size > FIRST_READ; // starting mid-file: the first line is cut
-          offset = Math.max(0, size - FIRST_READ);
-          decoder = new StringDecoder("utf8");
-          partial = "";
-          lines = [];
+        error = "";
+        if (size < offset) [offset, partial, lines, decoder] = [0, "", [], new StringDecoder("utf8")];
+        if (size === offset) return error !== before;
+        let cut = false; // reading from mid-file: the first line is partial
+        if (size - offset > MAX_READ) {
+          lines.push(`… ${size - MAX_READ - offset + Buffer.byteLength(partial)} bytes skipped`);
+          [offset, partial, decoder, cut] = [size - MAX_READ, "", new StringDecoder("utf8"), true];
         }
-        if (size === offset) return false;
         const buffer = Buffer.alloc(size - offset);
         const n = readSync(fd, buffer, 0, buffer.length, offset);
         offset += n;
-        const text = partial + decoder.write(buffer.subarray(0, n));
-        const split = text.replace(/\r\n/g, "\n").split("\n");
+        const split = (partial + decoder.write(buffer.subarray(0, n))).replace(/\r\n/g, "\n").split("\n");
         partial = split.pop()!;
-        if (skipFirst) split.shift();
+        if (cut) split.shift();
         lines.push(...split.map(logLine));
         if (lines.length > MAX_LINES) lines = lines.slice(-MAX_LINES);
         return true;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return false; // not written yet
+        error = `cannot read the log: ${oneLine((e as Error).message)}`;
+        return error !== before;
       } finally {
-        closeSync(fd);
+        if (fd !== undefined) closeSync(fd);
       }
     },
   };

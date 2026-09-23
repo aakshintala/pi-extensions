@@ -2,12 +2,13 @@
 import "./fixtures/tool-display/pi-tui.mjs";
 import { test } from "node:test";
 import assert from "node:assert";
-import { appendFileSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { logLine, logSource, MAX_LINES } = await import("../extensions/fleet/log.ts");
-const { findChat, TESTED_PI } = await import("../extensions/fleet/viewer.ts");
+const { logLine, logSource, MAX_LINES, MAX_READ } = await import("../extensions/fleet/log.ts");
+const { createViewer, findChat, TESTED_PI } = await import("../extensions/fleet/viewer.ts");
+const { fleet } = await import("../shared/fleet/index.ts");
 const { Container, Text } = await import("@earendil-works/pi-tui");
 
 function tempLog(t) {
@@ -77,4 +78,61 @@ test("the chat lookup needs the tested Pi version and document shape", () => {
   assert.equal(findChat(tui, TESTED_PI), undefined, "four children");
   doc.children.splice(2, 2, new Text("chat"));
   assert.equal(findChat(tui, TESTED_PI), undefined, "chat not a container");
+});
+
+test("one read takes at most MAX_READ bytes and marks what it skipped", (t) => {
+  const path = tempLog(t);
+  const source = logSource(path);
+  writeFileSync(path, "start\n");
+  source.read();
+  const line = "x".repeat(999) + "\n"; // 1000 bytes: the tail stays under MAX_LINES
+  const count = Math.ceil(MAX_READ / 1000) + 50;
+  appendFileSync(path, line.repeat(count) + "last\n");
+  source.read();
+  const lines = source.lines();
+  assert.equal(lines[0], "start");
+  assert.match(lines[1], /^… \d+ bytes skipped$/);
+  assert.ok(Number(lines[1].match(/\d+/)[0]) >= 50 * 1000, lines[1]);
+  assert.equal(lines.at(-1), "last");
+  assert.ok(lines.length <= MAX_READ / 1000 + 3, `only the tail was read: ${lines.length} lines`);
+});
+
+test("a log that cannot be read shows why once, and reading never throws", (t) => {
+  const path = tempLog(t);
+  mkdirSync(path); // a directory: EISDIR
+  const source = logSource(path);
+  assert.equal(source.read(), true);
+  assert.match(source.lines().at(-1), /^cannot read the log: .*EISDIR/);
+  assert.equal(source.read(), false, "the same error again changes nothing");
+  assert.equal(source.lines().length, 1);
+});
+
+test("a sequence split across reads never shows as text", (t) => {
+  const path = tempLog(t);
+  const source = logSource(path);
+  writeFileSync(path, "abc\x1b]0;ti");
+  source.read();
+  assert.deepEqual(source.lines(), ["abc"]);
+  appendFileSync(path, "tle\x07def \x1b[3");
+  source.read();
+  assert.deepEqual(source.lines(), ["abcdef "], "the cut CSI is held back");
+  appendFileSync(path, "1mred\x1b[0m\n");
+  source.read();
+  assert.deepEqual(source.lines(), ["abcdef \x1b[31mred\x1b[0m"]);
+});
+
+test("an overlay that fails to open leaves nothing open and no watcher", async (t) => {
+  const path = tempLog(t);
+  const registry = fleet();
+  registry.register({ id: "u1", owner: "unit", kind: "shell", label: "job", activity: () => "", view: { log: path }, stop() {} });
+  t.after(() => registry.finish("u1", "completed", "", null));
+  const watchers = () => process.getActiveResourcesInfo().filter((r) => r === "StatWatcher").length;
+  const ctx = { ui: { theme: { fg: (_c, s) => s }, custom: () => Promise.reject(new Error("no overlay")) } };
+  const viewer = createViewer(ctx, () => ({ children: [], requestRender() {} }));
+  viewer.open(registry.get("u1"));
+  assert.equal(viewer.active(), "u1");
+  await new Promise(setImmediate);
+  assert.equal(viewer.active(), undefined);
+  assert.equal(registry.viewing, undefined);
+  assert.equal(watchers(), 0);
 });

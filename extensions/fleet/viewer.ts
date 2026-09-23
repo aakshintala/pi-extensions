@@ -1,11 +1,13 @@
 // The viewer frame (spec #29, #45): one item's transcript or log in place of
 // Pi's chat container, or in a full-size overlay when Pi's layout is not the
-// tested one. The frame, not the producer, handles closing, stop with
+// tested one, and in regular mode, which has no scroll view to follow with.
+// The frame, not the producer, handles closing, stop with
 // confirmation and steer, so they work the same for every item.
 import { getMarkdownTheme, UserMessageComponent, VERSION, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   Container,
   Input,
+  isViewportTUI,
   matchesKey,
   Text,
   truncateToWidth,
@@ -28,6 +30,7 @@ const LOG_POLL_MS = 200;
  * Pi's chat container and its parent. Pi mounts `documentContainer`
  * (header, loaded resources, chat) as the TUI's first child in both modes.
  * Nothing when the version or the shape differs: the viewer then uses an overlay.
+ * Restoring the chat looks the parent up again the same way.
  */
 export function findChat(tui: TUI, version = VERSION) {
   if (version !== TESTED_PI) return;
@@ -103,10 +106,13 @@ class OverlayFrame implements Component {
     const last = Math.max(0, lines.length - size);
     const top = Math.min(this.top ?? last, last);
     const shown = lines.slice(top, top + size);
-    while (shown.length < size) shown.push("");
     const confirm = this.confirm();
     const bottom = confirm !== undefined ? [" " + confirm] : this.input.render(width);
-    return [...this.head.render(width).slice(0, 1), ...shown, ...bottom].map((l) => truncateToWidth(l, width));
+    // Paused: how much is below, so new output is visible without moving the view.
+    const below = lines.length - top - shown.length;
+    const head = (this.head.render(width)[0] ?? "") + (this.top !== undefined && below > 0 ? `  ↓ ${below} below · End` : "");
+    while (shown.length < size) shown.push("");
+    return [head, ...shown, ...bottom].map((l) => truncateToWidth(l, width));
   }
 
   handleInput(data: string) {
@@ -143,11 +149,15 @@ export interface Viewer {
   handleKey(data: string): boolean;
   /** Editor text while an item is open: its steer, echoed in the viewer. */
   steer(text: string): void;
+  /** Reads new log output now; FleetView calls it when a producer updates an item. */
+  refresh(): void;
   /** Whether the viewer is an overlay, which owns the arrow keys. */
   overlay(): boolean;
   /** The stop confirmation, for FleetView to show below the editor. */
   confirmation(): string | undefined;
 }
+
+const scrollToEnd = (t: TUI) => (t as { scrollToBottom?: () => void }).scrollToBottom?.();
 
 export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined): Viewer {
   let open:
@@ -155,6 +165,7 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
         id: string;
         content: Container;
         release: () => void;
+        read?: () => void;
         frame?: OverlayFrame;
         confirm?: string;
       }
@@ -178,6 +189,7 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
 
   const viewer: Viewer = {
     active: () => open?.id,
+    refresh: () => open?.read?.(),
     overlay: () => !!open?.frame,
     confirmation: () => (open?.frame ? undefined : open?.confirm),
 
@@ -188,15 +200,17 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
       const content = new Container();
       const head = header(ctx, item.id);
       let stopWatch = () => {};
+      let read: (() => void) | undefined;
       let body: Component;
       if ("log" in item.view) {
         const path = item.view.log;
         const source = logSource(path);
-        // Every render reads what was appended; the watcher asks for a render when the file changes.
-        const poll = () => render();
-        watchFile(path, { interval: LOG_POLL_MS }, poll);
-        stopWatch = () => unwatchFile(path, poll);
-        body = logView(() => (source.read(), source.lines()));
+        // Reads happen here, never in render: on open, when the file changes, and on producer updates.
+        read = () => void (source.read() && render());
+        source.read();
+        watchFile(path, { interval: LOG_POLL_MS }, read);
+        stopWatch = () => unwatchFile(path, read);
+        body = logView(source.lines);
       } else {
         try {
           body = item.view.transcript() as Component;
@@ -206,27 +220,39 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
       }
       content.addChild(body);
 
-      const found = findChat(t);
+      // Fullscreen only: regular mode has no scroll view, so follow, pause and End need the overlay.
+      const found = isViewportTUI(t) ? findChat(t) : undefined;
       if (found) {
         // The chat-area swap: main-session output keeps going to the detached chat.
+        const { chat } = found;
         const shown = new Container();
         shown.addChild(head);
         shown.addChild(content);
         const kids = found.parent.children;
-        // Either way the chat area starts at its end, following new output (fullscreen only).
-        const swap = (from: Component, to: Component) => {
-          const i = kids.indexOf(from);
-          if (i >= 0) kids[i] = to;
-          found.parent.invalidate();
-          (t as { scrollToBottom?: () => void }).scrollToBottom?.();
+        kids[kids.indexOf(chat)] = shown;
+        open = {
+          id: item.id,
+          content,
+          read,
+          release: () => {
+            stopWatch();
+            // Put the chat back where the frame is now; if the frame is gone, into the chat's slot.
+            const doc = (t as unknown as Container).children?.[0];
+            const now = doc instanceof Container ? doc.children : kids;
+            const i = now.indexOf(shown);
+            if (i >= 0) now[i] = chat;
+            else if (!now.includes(chat)) now.splice(Math.min(2, now.length), now.length === 3 ? 1 : 0, chat);
+            (doc ?? found.parent).invalidate();
+            scrollToEnd(t);
+          },
         };
-        swap(found.chat, shown);
-        open = { id: item.id, content, release: () => (stopWatch(), swap(shown, found.chat)) };
+        found.parent.invalidate();
+        scrollToEnd(t);
       } else {
         let done: (() => void) | undefined;
-        const state: NonNullable<typeof open> = { id: item.id, content, release: () => (stopWatch(), done?.()) };
+        const state: NonNullable<typeof open> = { id: item.id, content, read, release: () => (stopWatch(), done?.()) };
         open = state;
-        void ctx.ui.custom<void>(
+        ctx.ui.custom<void>(
           (overlayTui, _theme, _keys, finish) => {
             done = () => finish();
             const frame = new OverlayFrame(overlayTui, head, content, () => state.confirm);
@@ -238,8 +264,15 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
             return frame;
           },
           { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left" } },
-        );
+        ).catch(() => {
+          // No overlay: nothing is open.
+          stopWatch();
+          if (open === state) open = undefined;
+          fleet().viewing = viewer.active();
+          render();
+        });
       }
+      fleet().viewing = item.id;
       render();
     },
 
@@ -247,6 +280,7 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
       if (!open) return;
       const { release } = open;
       open = undefined;
+      fleet().viewing = undefined;
       release();
       render();
     },
@@ -255,7 +289,7 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
       if (!open) return false;
       const item = fleet().get(open.id);
       if (open.confirm !== undefined) {
-        const yes = data === "y" || data === "Y";
+        const yes = matchesKey(data, "y") || matchesKey(data, "shift+y"); // also a kitty CSI-u key
         open.confirm = undefined;
         if (yes && item) attempt("stop", () => item.stop());
         render();
@@ -274,8 +308,12 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
     },
 
     steer(text) {
-      const item = open && fleet().get(open.id);
-      if (!item) return;
+      if (!open) return;
+      const item = fleet().get(open.id);
+      if (!item) {
+        echo(new Text(ctx.ui.theme.fg("warning", " This item finished and was removed. Esc returns to the main chat."), 0, 0));
+        return;
+      }
       if (!item.steer) {
         echo(new Text(ctx.ui.theme.fg("warning", ` ${oneLine(item.kind)} ${oneLine(item.label)} takes no steering. Esc returns to the main chat.`), 0, 0));
         return;

@@ -10,6 +10,8 @@
 //                                             stop always finishes the item as stopped
 //   {"watchers": true}                        reports event "watchers:<n>", the process's file watchers
 //   {"mismatch": true}                        adds a fourth child to Pi's document container
+//   {"unmount": true}                         replaces the document container's chat slot with an empty container
+//   {"prune": true}                           registry.prune()
 //   {"finish": id, "status", "result", "notice"?}  notice: the model's line; none if absent
 //   {"notify": id, "text"}
 //   {"clock": seconds}                        the registry's clock (starts at 0)
@@ -61,16 +63,18 @@ export default function (pi: ExtensionAPI) {
         else if ("watchers" in op) {
           const n = process.getActiveResourcesInfo().filter((r) => r === "StatWatcher").length;
           appendFileSync(process.env.PI_HARNESS_EVENTS!, JSON.stringify({ event: `watchers:${n}` }) + "\n");
-        } else if ("mismatch" in op) {
+        } else if ("mismatch" in op || "unmount" in op) {
           ctx.ui.setWidget(
-            "fx-mismatch",
+            "fx-" + Object.keys(op)[0],
             (tui: TUI) => {
-              (tui.children[0] as Container).addChild(new Container());
+              const doc = tui.children[0] as Container;
+              if ("mismatch" in op) doc.addChild(new Container());
+              else doc.children[2] = new Container();
               return new Container();
             },
             { placement: "belowEditor" },
           );
-        } else if ("clock" in op) {
+        } else if ("prune" in op) registry.prune(); else if ("clock" in op) {
           now = op.clock;
           for (const item of registry.items()) registry.update(item.id);
         }

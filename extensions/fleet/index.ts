@@ -5,7 +5,7 @@
 // keeps a run without the UI alive until the work it started returns.
 import type { ExtensionAPI, ExtensionContext, MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, MouseRegion, Text, truncateToWidth, type TUI } from "@earendil-works/pi-tui";
-import { duration, fleet, isFinished, type Item, type Notice } from "../../shared/fleet/index.ts";
+import { duration, fleet, isFinished, viewerTakes, type Item, type Notice } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
 import { createViewer, type Viewer } from "./viewer.ts";
 
@@ -93,7 +93,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("input", (event) => {
     // While an item is open, what the user types steers it; the main session gets nothing.
-    if (viewer?.active() && event.source === "interactive") {
+    // Slash commands still go to Pi.
+    if (viewer?.active() && event.source === "interactive" && viewerTakes(event.text)) {
       viewer.steer(event.text);
       return { action: "handled" };
     }
@@ -171,11 +172,12 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
 
   const current = () => rows(registry.items());
 
-  // Rows shown, as indices into current(), plus the hidden count.
+  // Rows shown, as indices into current(), plus the hidden count. A stop confirmation takes one line of the budget.
   function window(all: Row[]) {
     selected = Math.min(selected, all.length - 1);
-    if (all.length <= MAX_LINES) return { start: 0, end: all.length, hidden: 0 };
-    const size = MAX_LINES - 1;
+    const budget = MAX_LINES - (viewer.confirmation() ? 1 : 0);
+    if (all.length <= budget) return { start: 0, end: all.length, hidden: 0 };
+    const size = budget - 1;
     top = Math.max(0, Math.min(Math.max(top, selected - size + 1), selected, all.length - size));
     return { start: top, end: top + size, hidden: all.length - size };
   }
@@ -230,6 +232,9 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   };
 
   const redraw = () => {
+    const shown = viewer.active();
+    if (shown && !registry.get(shown)) viewer.close(); // pruned: nothing left to show
+    viewer.refresh(); // a producer update often means new log output
     const running = registry.items().some((i) => !isFinished(i.status));
     if (running && !timer) timer = setInterval(() => tui?.requestRender(), 1000);
     if (!running && timer) {

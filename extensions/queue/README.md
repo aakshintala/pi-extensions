@@ -22,7 +22,8 @@ native queue:
 
 Each group is delivered first in, first out, following Pi's `steeringMode` and
 `followUpMode` (read at session start). Skill commands in a queued message are
-expanded on delivery. Input from RPC drivers and extensions goes straight to Pi.
+expanded on delivery. Input from RPC drivers and extensions goes straight to Pi. While the fleet viewer shows an item, what you type steers that item instead
+(slash commands still queue here).
 
 ## Widget
 

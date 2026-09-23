@@ -4,6 +4,7 @@
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { viewerTakes } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts"; // row text is user input
 
 type Lane = "steer" | "followUp";
@@ -300,6 +301,8 @@ export default function (pi: ExtensionAPI) {
       endEdit(event.text);
       return { action: "handled" };
     }
+    // Steering the item the fleet viewer shows, whichever extension loaded first.
+    if (viewerTakes(event.text)) return { action: "continue" };
     paused = false;
     if (!event.streamingBehavior) return { action: "continue" };
     rows.push({ id: nextId++, lane: event.streamingBehavior, text: event.text, ...(event.images?.length && { images: event.images }) });
