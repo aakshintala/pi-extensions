@@ -2,7 +2,7 @@
 // submissions made while the agent works are held here, shown above Pi's own editor,
 // edited in that editor, and handed to Pi with its own delivery rules.
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { estimateTokens, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { oneLine } from "../../shared/text/index.ts"; // row text is user input
 
@@ -20,15 +20,8 @@ export const commandOf = (row: Pick<Row, "text" | "images">) => {
   return m && { kind: m[0].startsWith("/reload") ? ("reload" as const) : ("compact" as const), instructions: m[1]?.trim() || undefined };
 };
 
-// ponytail: Pi finds nothing to compact when the messages since the last compaction fit
-// in keepRecentTokens. This estimate skips the tail an earlier compaction kept (Pi's
-// projection is not exported); a miss only means Pi reports the failure and the row pauses.
-function nothingToCompact(ctx: ExtensionContext) {
-  const branch = ctx.sessionManager.getBranch() as any[];
-  const since = branch.slice(branch.findLastIndex((e) => e.type === "compaction") + 1);
-  const tokens = since.reduce((n, e) => n + (e.type === "message" ? estimateTokens(e.message) : 0), 0);
-  return tokens < SettingsManager.create(ctx.cwd).getCompactionKeepRecentTokens(ctx.model);
-}
+// Pi's compaction failures that mean there was nothing to do (agent-session.js compact()).
+const NOTHING_TO_COMPACT = /^(Nothing to compact|Already compacted)/;
 
 export default function (pi: ExtensionAPI) {
   let rows: Row[] = [];
@@ -137,24 +130,20 @@ export default function (pi: ExtensionAPI) {
       draw();
     };
     if (command.kind === "compact") {
-      if (nothingToCompact(c)) {
-        rows = rows.filter((r) => r !== row);
-        draw();
-        c.ui.notify("Nothing to compact", "info");
-        return dispatchIdle();
-      }
       running = "compact";
       row.error = undefined;
       draw();
+      const done = (notice?: string) => {
+        running = undefined;
+        rows = rows.filter((r) => r !== row);
+        draw();
+        if (notice) c.ui.notify(notice, "info");
+        dispatchIdle();
+      };
       c.compact({
         customInstructions: command.instructions,
-        onComplete: () => {
-          running = undefined;
-          rows = rows.filter((r) => r !== row);
-          draw();
-          dispatchIdle();
-        },
-        onError: (e) => fail(e.message),
+        onComplete: () => done(),
+        onError: (e) => (NOTHING_TO_COMPACT.test(e.message) ? done("Nothing to compact") : fail(e.message)),
       });
       return;
     }

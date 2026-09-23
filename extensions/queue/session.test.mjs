@@ -269,3 +269,21 @@ test("adds no tools, commands or editor, and leaves nothing behind at shutdown",
   await run;
   assert.deepEqual(transcript(session), ["user: go", "assistant: [ls]", "assistant: ok"]); // the queue died with the session
 });
+
+test("a queued /compact is Pi's call: a large session Pi cannot compact gives the notice and moves on", { timeout: 15_000 }, async (t) => {
+  // One prompt over keepRecentTokens: Pi keeps it whole, so there is nothing to summarise.
+  const g = gate();
+  const next = replyTo("next");
+  const { session, state } = await start(t, [async () => (await g.wait(), say("short")), next.reply]);
+  const run = session.prompt("y".repeat(100_000));
+  await g.waiting;
+  await session.prompt("/compact", { streamingBehavior: "followUp" });
+  await session.prompt("next", { streamingBehavior: "followUp" });
+  g.open();
+  await run;
+  await next.requested;
+  await session.agent.waitForIdle();
+  assert.deepEqual(state.notices, ["info: Nothing to compact"]);
+  assert.deepEqual(transcript(session).slice(-3), ["assistant: short", "user: next", "assistant: re: next"]);
+  assert.deepEqual(state.widget, []);
+});

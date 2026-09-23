@@ -261,9 +261,9 @@ draft
   tui.type("resume");
   tui.keys("Enter");
   await tui.waitForEvent("agent_end", 2);
+  // Pi 0.87.1 prints its own red line for a manual compaction with nothing to do; no
+  // public API can predict or suppress it (see the PR). The queue adds its notice and moves on.
   await tui.waitForScreen(`
- released
-
 
  Error: This operation was aborted
 
@@ -278,6 +278,8 @@ draft
 
 
  Again.
+
+ Error: Compaction failed: Nothing to compact (session too small)
 
  Nothing to compact
 
