@@ -22,20 +22,23 @@ export function normalizePreviewText(text: string): string {
 		.replace(TERMINAL_CONTROL_CHARACTER, "");
 }
 
-/** Remove complete terminal strings without rescanning an unterminated suffix for every start. */
+/**
+ * Remove OSC, DCS, SOS, PM and APC strings. A string with no terminator runs to
+ * the end of the text, as a terminal reads it, so its payload is dropped too
+ * (the same rule as shared/text's `oneLine`; this variant keeps line breaks).
+ */
 function stripTerminalStrings(text: string): string {
 	const parts: string[] = [];
 	let offset = 0;
 	TERMINAL_STRING_START.lastIndex = 0;
 	let start: RegExpExecArray | null;
 	while ((start = TERMINAL_STRING_START.exec(text)) !== null) {
-		TERMINAL_STRING_END.lastIndex = TERMINAL_STRING_START.lastIndex;
-		if (TERMINAL_STRING_END.exec(text) === null) break;
 		parts.push(text.slice(offset, start.index));
+		TERMINAL_STRING_END.lastIndex = TERMINAL_STRING_START.lastIndex;
+		if (TERMINAL_STRING_END.exec(text) === null) return parts.join("");
 		offset = TERMINAL_STRING_END.lastIndex;
 		TERMINAL_STRING_START.lastIndex = offset;
 	}
-	// Preserve an incomplete string for the existing escape/control sanitizers.
 	parts.push(text.slice(offset));
 	return parts.join("");
 }
