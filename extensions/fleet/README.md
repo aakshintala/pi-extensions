@@ -39,7 +39,9 @@ Interactive sessions end their runs as usual: their work keeps running and its n
 
 ## Ctrl+B
 
-Ctrl+B moves every running foreground command, such as a shell command, into the background. While one can be moved, `ctrl+b to run in background` shows under the editor.
+Ctrl+B moves every running foreground command, such as a shell command, into the background. While one can be moved, `ctrl+b to run in background` shows under the editor, as one of FleetView's 6 lines.
+
+Ctrl+B works only while Pi's editor has focus: a picker, dialog or overlay keeps the key. At a stop confirmation it cancels, like any other key.
 
 Pi binds Ctrl+B to cursor left by default. To free it, add this to `keybindings.json` in Pi's agent directory:
 
@@ -47,7 +49,7 @@ Pi binds Ctrl+B to cursor left by default. To free it, add this to `keybindings.
 "tui.editor.cursorLeft": ["left"]
 ```
 
-Until then Ctrl+B keeps moving the cursor, the hint never shows, and a warning at startup names the line to add.
+Until then Ctrl+B keeps moving the cursor, the hint never shows, and a warning names the line to add. It shows at startup, or at the next key once a `/reload` blocks Ctrl+B again, and never twice in a row.
 
 ## Keys
 
@@ -95,8 +97,8 @@ fleet().finish("job-1", "failed", "exit 1\nError: boom",  // the user's summary:
 fleet().finish("job-1", "completed", "done", null);       // no notice: the model already has the result
 fleet().notify("job-1", "build 42 passed");              // a notice while running, such as a monitor line
 
-const end = fleet().foreground(() => moveToBackground()); // Ctrl+B calls this; the hint shows while any is registered
-end();                                                     // once the command ends or is backgrounded
+const end = fleet().foreground(owner, () => moveToBackground()); // Ctrl+B calls this; dropped if it throws
+end(); // once the command ends or is backgrounded; the owner's session shutdown drops it too
 ```
 
 A notice goes to the owner session only. One sent before that session attaches is held until it does, up to the latest 50. Once the session shuts down, or its delivery throws because it was disposed, its notices are dropped.

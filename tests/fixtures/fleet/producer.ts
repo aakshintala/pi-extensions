@@ -16,6 +16,7 @@
 //   {"notify": id, "text"}
 //   {"clock": seconds}                        the registry's clock (starts at 0)
 //   {"fg": id}                                a foreground command: Ctrl+B reports event "bg:<id>" and ends it
+//   {"fg": id, "throws": true}                Ctrl+B reports event "bg:<id>", then throws without ending it
 //   {"fgEnd": id}                             ends that foreground command
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -78,8 +79,9 @@ export default function (pi: ExtensionAPI) {
             { placement: "belowEditor" },
           );
         } else if ("fg" in op) {
-          const end = registry.foreground(() => {
+          const end = registry.foreground(ctx.sessionManager.getSessionId(), () => {
             appendFileSync(process.env.PI_HARNESS_EVENTS!, JSON.stringify({ event: `bg:${op.fg}` }) + "\n");
+            if (op.throws) throw new Error("producer bug");
             end();
           });
           foreground.set(op.fg, end);

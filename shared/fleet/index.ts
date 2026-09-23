@@ -80,12 +80,15 @@ export interface Fleet {
   /** Set while the queue extension edits one of its rows in Pi's editor: typed input then belongs to the queue. */
   editing?: boolean;
   /**
-   * Adds a foreground command that Ctrl+B can move to the background: `background` does that.
-   * Call the returned function once the command ends or is backgrounded.
+   * Adds a foreground command of session `owner` that Ctrl+B can move to the background:
+   * `background` does that. Call the returned function once the command ends or is
+   * backgrounded. The owner's detach drops its commands; a detached owner's are ignored.
    */
-  foreground(background: () => void): () => void;
-  /** The current foreground commands' `background` handlers. Only the fleet extension calls them. */
-  foregrounds(): readonly (() => void)[];
+  foreground(owner: string, background: () => void): () => void;
+  /** How many foreground commands there are. */
+  foregrounds(): number;
+  /** Calls every foreground command's `background`, from one snapshot. One that throws is dropped. Only the fleet extension calls it. */
+  backgroundAll(): void;
 }
 
 /**
@@ -112,7 +115,10 @@ export function createFleet(): Fleet {
   const sinks = new Map<string, (notice: Notice) => void>();
   const held = new Map<string, Notice[]>(); // for owners not attached yet
   const gone = new Set<string>(); // detached owners: their notices are dropped
-  const foregrounds = new Set<{ background: () => void }>();
+  const foregrounds = new Set<{ owner: string; background: () => void }>();
+  const drop = (entry: { owner: string; background: () => void }) => {
+    if (foregrounds.delete(entry)) changed();
+  };
   const send = (owner: string, notice: Notice) => {
     const deliver = sinks.get(owner);
     if (!deliver) {
@@ -168,6 +174,7 @@ export function createFleet(): Fleet {
         if (sinks.get(owner) !== deliver) return;
         sinks.delete(owner);
         gone.add(owner);
+        for (const entry of [...foregrounds]) if (entry.owner === owner) drop(entry);
       };
     },
     get: (id) => items.get(id),
@@ -181,15 +188,23 @@ export function createFleet(): Fleet {
       listeners.add(listener);
       return () => void listeners.delete(listener);
     },
-    foreground(background) {
-      const entry = { background };
+    foreground(owner, background) {
+      if (gone.has(owner)) return () => {};
+      const entry = { owner, background };
       foregrounds.add(entry);
       changed();
-      return () => {
-        if (foregrounds.delete(entry)) changed();
-      };
+      return () => drop(entry);
     },
-    foregrounds: () => [...foregrounds].map((f) => f.background),
+    foregrounds: () => foregrounds.size,
+    backgroundAll() {
+      for (const entry of [...foregrounds]) {
+        try {
+          entry.background();
+        } catch {
+          drop(entry); // a producer bug: stop showing the hint for it and retrying it
+        }
+      }
+    },
   };
   return fleet;
 }
