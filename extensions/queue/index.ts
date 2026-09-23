@@ -226,6 +226,11 @@ export default function (pi: ExtensionAPI) {
     return main;
   };
 
+  const extensionCommand = (text: string) => {
+    const name = /^\/(\S+)/.exec(text)?.[1];
+    return !!name && pi.getCommands().some((c) => c.source === "extension" && c.name === name);
+  };
+
   const onKey = (data: string) => {
     if (!ctx || !rows.length || !editorFocused()) return;
     const handled = (() => {
@@ -233,11 +238,11 @@ export default function (pi: ExtensionAPI) {
       if (edit && matchesKey(data, "alt+down")) return select(1), true;
       if (edit && matchesKey(data, "alt+x")) return remove(), true;
       if (edit && matchesKey(data, "escape")) return endEdit(), true;
-      // Enter on /compact or /reload: Pi would run it directly, even mid-run or mid-edit.
+      // Enter while editing on /compact, /reload or an extension command: Pi would run it
+      // before the input event, so save it in place here instead.
       const text = ctx!.ui.getEditorText().trim();
-      if (!matchesKey(data, "enter") || !commandOf({ text })) return false;
-      if (edit) return endEdit(text), true;
-      return false;
+      if (!edit || !matchesKey(data, "enter") || !(commandOf({ text }) || extensionCommand(text))) return false;
+      return endEdit(text), true;
     })();
     return handled ? { consume: true } : undefined;
   };

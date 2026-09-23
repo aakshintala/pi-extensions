@@ -13,7 +13,11 @@ native queue:
 - `/compact`, `/compact <instructions>` and `/reload` become command rows (⚙).
   They run once the agent is idle, in order, and rows queued after them wait.
   A `/compact` with nothing to compact shows a notice and moves on; a failed one
-  stays queued, paused, with the reason. Rows behind a `/reload` survive it.
+  stays queued, paused, with the reason. Pi 0.87.1 still prints its own red
+  "Compaction failed: Nothing to compact" line, which no public API can
+  prevent. Rows behind a `/reload` survive it, and so does a draft Pi's
+  `/reload` would clear. A queued `/reload` waits while a picker or the label
+  editor has focus.
   Typed while the agent is idle, they run at once as usual.
 
 Each group is delivered first in, first out, following Pi's `steeringMode` and
@@ -38,6 +42,12 @@ Hidden when nothing is queued.
 The keys are read only while Pi's editor has focus. With nothing queued,
 Option+Up keeps Pi's own behaviour.
 
+Known limit: while you edit a row, Enter on `/compact`, `/reload` or an
+extension command saves it in place, and it runs when delivered. Other Pi
+built-in commands (such as `/model` or `/tree`) still run at once, because Pi
+handles them before any extension sees them. The row is left unchanged and the
+edit stays open until Esc.
+
 ## Commands, tools, settings
 
 None. The queue is cleared on session switch.
@@ -46,4 +56,5 @@ None. The queue is cleared on session switch.
 
 Behaviour follows [`@tmustier/pi-queue-steer`](https://github.com/tmustier/pi-queue-steer)
 0.2.0 (MIT, Thomas Mustier). Its reload-survival approach is adapted (rows are
-saved to a `rig.queue` session entry); no code is copied.
+saved to a `rig.queue` session entry, restored only by the reload that wrote
+it); no code is copied.

@@ -13,7 +13,7 @@ function gate() {
   return { open, waiting, wait: () => (reached(), opened) };
 }
 
-const KEYS = { "alt+up": "\x1b[1;3A", "alt+down": "\x1b[1;3B", "alt+x": "\x1bx", escape: "\x1b" };
+const KEYS = { "alt+up": "\x1b[1;3A", "alt+down": "\x1b[1;3B", "alt+x": "\x1bx", escape: "\x1b", enter: "\r" };
 const say = (text) => fauxAssistantMessage(fauxText(text));
 const tool = () => fauxAssistantMessage(fauxToolCall("ls", { path: "." }), { stopReason: "toolUse" });
 
@@ -42,8 +42,15 @@ async function start(t, replies, extensions = []) {
   const { ui, state } = fakeUi(s.session);
   await s.session.bindExtensions({ uiContext: ui, mode: "tui" });
   // Raw terminal input, as Pi hands it to listeners before its editor.
-  const press = (key) => state.keys.forEach((h) => h(KEYS[key]));
-  return { ...s, state, press };
+  const press = (key) => state.keys.map((h) => h(KEYS[key])).some((r) => r?.consume);
+  // Enter while the agent works: listeners first, then Pi's editor submits as steering.
+  const enter = async () => {
+    if (press("enter")) return;
+    const text = state.editor;
+    state.editor = "";
+    await s.session.prompt(text, { streamingBehavior: "steer" });
+  };
+  return { ...s, state, press, enter };
 }
 
 // The saved conversation: user texts, assistant replies and compactions, in order.
@@ -352,4 +359,25 @@ test("a saved queue that no reload in this process wrote is never restored", asy
   assert.deepEqual(state.widget, []);
   assert.equal(state.editor, "");
   assert.deepEqual(transcript(session), []);
+});
+
+test("editing a row into an extension command saves it in place; the command runs once, on delivery", async (t) => {
+  const g = gate();
+  const ran = [];
+  const demo = (pi) => pi.registerCommand("demo", { description: "Test command", handler: async (args) => void ran.push(args) });
+  const { session, state, press, enter } = await start(t, [async () => (await g.wait(), tool()), say("turned")], [demo]);
+  const run = session.prompt("go");
+  await g.waiting;
+  await session.prompt("s1", { streamingBehavior: "steer" });
+  state.editor = "draft";
+  press("alt+up");
+  state.editor = "/demo arg";
+  await enter();
+  assert.deepEqual(ran, []);
+  assert.equal(state.editor, "draft");
+  assert.deepEqual(state.widget, [" Steering (1) · next turn", "   /demo arg"]);
+  g.open();
+  await run;
+  await session.agent.waitForIdle();
+  assert.deepEqual(ran, ["arg"]);
 });
