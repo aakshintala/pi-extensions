@@ -5,7 +5,7 @@
 // checked asynchronously, debounced after tool calls, one git at a time.
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { blankRepoFilters, GIT_LIMITS, runGit } from "../../shared/git/index.ts"; // no repo code runs
-import { oneLine } from "../../shared/text/index.ts"; // cwd, branch, model and provider ids come from outside
+import { formatCount, oneLine } from "../../shared/text/index.ts"; // cwd, branch, model and provider ids come from outside
 import type { Feed } from "./quota.ts";
 
 export const GIT_DEBOUNCE_MS = 300;
@@ -65,9 +65,7 @@ function branchTotals(ctx: ExtensionContext): Totals {
   return t;
 }
 
-// Each unit starts where the rounded text would reach the next one, so 9999 reads 10k, not 10.0k.
-export const tokens = (n: number) =>
-  n < 1e3 ? `${n}` : n < 9950 ? `${(n / 1e3).toFixed(1)}k` : n < 999_500 ? `${Math.round(n / 1e3)}k` : n < 9_950_000 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e6)}M`;
+export const tokens = formatCount;
 
 export interface Snapshot {
   model?: string;

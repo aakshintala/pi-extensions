@@ -8,7 +8,7 @@ import type { ExtensionAPI, ExtensionCommandContext, Theme, ThemeColor } from "@
 import { DynamicBorder, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { CancellableLoader, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
-import { oneLine } from "../../shared/text/index.ts";
+import { formatCount, oneLine } from "../../shared/text/index.ts";
 
 import { collectUsageData, resolveSessionsDir, TAB_ORDER, usageCachePath } from "./data.ts";
 import type { BaseStats, TabName, UsageData } from "./data.ts";
@@ -91,13 +91,7 @@ function formatCost(cost: number): string {
 	return `$${Math.round(cost)}`;
 }
 
-export function formatTokens(count: number): string {
-	if (count === 0) return "-";
-	if (count < 1000) return count.toString();
-	// Units are picked after rounding, so 9,999 is "10k" and 999,999 is "1.0M".
-	const [value, unit] = count < 999_500 ? [count / 1000, "k"] : [count / 1_000_000, "M"];
-	return `${value < 9.95 ? value.toFixed(1) : Math.round(value)}${unit}`;
-}
+export const formatTokens = (count: number): string => formatCount(count, { zero: "-" });
 
 function formatNumber(n: number): string {
 	if (n === 0) return "-";
@@ -112,14 +106,6 @@ function formatAxisCost(v: number): string {
 	if (v < 10_000) return `$${Math.round(v)}`;
 	if (v < 1_000_000) return `$${(v / 1000).toFixed(1)}k`;
 	return `$${(v / 1_000_000).toFixed(2)}M`;
-}
-
-function formatAxisCount(v: number): string {
-	if (v === 0) return "0";
-	if (v < 1000) return String(Math.round(v));
-	if (v < 1_000_000) return `${(v / 1000).toFixed(v < 10_000 ? 1 : 0)}k`;
-	if (v < 1_000_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-	return `${(v / 1_000_000_000).toFixed(1)}B`;
 }
 
 // Graph series colours come from the theme (Total uses index 0).
@@ -358,7 +344,7 @@ export class UsageComponent {
 			return lines;
 		}
 
-		const formatValue = this.graphMetric === "cost" ? formatAxisCost : formatAxisCount;
+		const formatValue = this.graphMetric === "cost" ? formatAxisCost : formatCount;
 		const spanMs = model.domainEndMs - model.domainStartMs;
 		const formatTime = (ms: number): string => {
 			const d = new Date(ms);
@@ -384,7 +370,7 @@ export class UsageComponent {
 			const s = model.series[i]!;
 			const cursor = i === this.graphLegendIndex ? th.fg("accent", "▸ ") : "  ";
 			const marker = s.hidden ? th.fg("dim", "○") : th.fg(seriesColor(i), "●");
-			const value = this.graphMetric === "cost" ? formatAxisCost(s.total) : formatAxisCount(s.total);
+			const value = this.graphMetric === "cost" ? formatAxisCost(s.total) : formatCount(s.total);
 			const pct =
 				s.key !== TOTAL_SERIES_KEY && model.groupedTotal > 0
 					? ` ${th.fg("dim", `${Math.round((s.total / model.groupedTotal) * 100)}%`)}`
