@@ -79,9 +79,10 @@ export function logDir(kind: (typeof KINDS)[number]) {
 export function spawnGroup(o: { command: string; cwd: string; env?: NodeJS.ProcessEnv; dir: ReturnType<typeof logDir>; id: string; stdout?: string; stderr: string; counted: boolean }) {
   const shell = getShellConfig();
   const stdin = shell.commandTransport === "stdin";
-  const fds = [o.stdout, o.stderr].map((f) => (f === undefined ? undefined : openSync(f, "a", 0o600)));
+  const fds: (number | undefined)[] = [];
   let child: ChildProcess;
   try {
+    for (const f of [o.stdout, o.stderr]) fds.push(f === undefined ? undefined : openSync(f, "a", 0o600));
     child = spawn(shell.shell, stdin ? shell.args : [...shell.args, o.command], { cwd: o.cwd, env: o.env, detached: true, stdio: [stdin ? "pipe" : "ignore", fds[0] ?? "pipe", fds[1]!] });
   } finally {
     for (const fd of fds) if (fd !== undefined) closeSync(fd);
@@ -262,7 +263,7 @@ export async function reap() {
       if (!(await ended(r.pi, r.piStart))) continue;
       const leader = await startTime(r.pgid);
       if (leader === r.start) signalGroup(r.pgid, "SIGKILL");
-      else if (leader === undefined && ours(r.pgid)) continue; // alive but unreadable: try again next start
+      else if (leader === undefined && ours(r.pgid)) continue; // alive but unreadable: the next Pi process tries again
       rmSync(file, { force: true });
     }
   }
