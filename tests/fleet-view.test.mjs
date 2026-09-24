@@ -97,6 +97,25 @@ test("running shells share one row; Enter lists only running shells and opens a 
   assert.doesNotMatch(tui.screen(), /shell build · done 0s · esc back/);
 });
 
+test("a log longer than the screen scrolls the header away; FleetView's own line gives the way back once the job is stopped while still viewed (#161)", async (t) => {
+  const tui = await start(t, { args: ["--tui-mode", "fullscreen"] });
+  const log = join(tui.home, "job.log");
+  writeFileSync(log, Array.from({ length: 60 }, (_, i) => `line${i}`).join("\n") + "\n");
+  await tui.fx({ add: "a", kind: "shell", label: "build", log });
+  await waitForText(tui, "1 shell running in background");
+  tui.keys("Down", "Down", "Enter");
+  await waitForText(tui, "Running shells");
+  tui.keys("Enter");
+  await waitForText(tui, "line59"); // the viewer follows the end of a log longer than the screen
+  assert.doesNotMatch(tui.screen(), /esc back/, "the header, at the top of the swapped-in log, has scrolled out of view");
+  tui.keys("x"); // still focused on the shared shells row: stop it while its log is on screen
+  await waitForText(tui, "Stop running shell");
+  tui.keys("Enter");
+  for (let i = 0; i < 100 && /shells? running in background/.test(tui.screen()); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.doesNotMatch(tui.screen(), /shells? running in background/); // the row's gone: only main is left
+  assert.match(tui.screen(), /esc back/, "FleetView's fallback line still says how to get back");
+});
+
 test("the shell picker opens a log in regular mode", async (t) => {
   const tui = await start(t);
   await tui.fx({ add: "a", kind: "shell", label: "build" });
