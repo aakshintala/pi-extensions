@@ -14,7 +14,7 @@ time. Spec: [#36](https://github.com/aakshintala/pi-rig/issues/36).
   usage reported by tools, compactions and branch summaries (shown as
   `Tools / summaries`).
 - Parsed sessions are cached in `<agentDir>/usage-extension-cache.json`
-  (upstream's layout, version 7), so later runs only read changed files. A
+  (cache version 8), so later runs only read changed files. A
   session shutdown aborts a collection in progress.
 - Long tables scroll with the selection. Graph colours come from the theme.
 - Without the TUI, or when reading sessions fails, `/usage` says so.
