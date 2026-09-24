@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import { liveGroup, startTui } from "../../tests/helpers/tui.mjs";
 
 const EXT = new URL("./index.ts", import.meta.url).pathname;
-const CHILD = new URL("../../tests/fixtures/todo/subagent.ts", import.meta.url).pathname;
 const call = (todos) => [{ type: "toolCall", id: "t1", name: "todo_write", arguments: { todos } }];
 
 async function start(t, opts) {
@@ -170,37 +169,6 @@ test("widget: a fully completed list is hidden after the next prompt", async (t)
 ────────────────────────────────────────────────────────────────────────────────
 ~/cwd
 ↑65 ↓38 R60 W66 CH77.0% 0.1%/128k (auto)                               harness-1
-
-
-
-`);
-});
-
-test("widget: a subagent session (rig.subagent entry) draws none", async (t) => {
-  const tui = await start(t, { extensions: [CHILD, EXT], replies: [call([{ text: "child task", status: "in_progress" }]), "Working."] });
-
-  await send(tui, "delegated", 1);
-  await tui.waitForScreen(`
-
- delegated
-
-
- ⏺ TodoWrite
-   ⎿  Todo list saved: 0 pending, 1 in_progress, 0 completed.
-
- Working.
-
-────────────────────────────────────────────────────────────────────────────────
-
-────────────────────────────────────────────────────────────────────────────────
-~/cwd
-↑43 ↓19 R4 W44 CH4.8% 0.1%/128k (auto)                                 harness-1
-
-
-
-
-
-
 
 
 

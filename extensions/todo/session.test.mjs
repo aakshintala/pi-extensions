@@ -169,8 +169,11 @@ test("a subagent session keeps its own list and draws no widget", async (t) => {
     resourceLoader, settingsManager, sessionManager, tools: ["todo_write"],
   });
   t.after(() => child.dispose());
+  // Real subagents always bind at mode "print" (extensions/subagents/index.ts
+  // binds with {}), never "tui" — that mode gate is what keeps a child from
+  // drawing a widget, not a session-entries scan for the rig.subagent marker.
   const childUi = fakeUi();
-  await child.bindExtensions({ uiContext: childUi.ui, mode: "tui" });
+  await child.bindExtensions({ uiContext: childUi.ui, mode: "print" });
   await child.prompt("child plans");
   await child.prompt("child idle");
 

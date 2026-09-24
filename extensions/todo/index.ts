@@ -2,7 +2,6 @@
 // and is rebuilt from the active branch; nothing is written to disk.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { MouseRegion, truncateToWidth } from "@earendil-works/pi-tui";
-import { isChild } from "../../shared/subagent/index.ts";
 import { oneLine } from "../../shared/text/index.ts"; // item text is model input
 import { resultText, toolRenderers } from "../../shared/tool-display/index.ts";
 
@@ -40,7 +39,10 @@ export default function (pi: ExtensionAPI) {
   const allDone = () => todos.length > 0 && todos.every((t) => t.status === "completed");
 
   const draw = (ctx: ExtensionContext) => {
-    if (ctx.mode !== "tui" || isChild(ctx)) return;
+    // Subagents (#26) always bind at mode "print" (extensions/subagents/index.ts
+    // binds with {}), never "tui", so this already excludes them without asking
+    // sessionManager.getEntries() to scan for the rig.subagent marker.
+    if (ctx.mode !== "tui") return;
     const lines = expanded ? widgetLines(todos) : [compactLine(todos)];
     ctx.ui.setWidget(
       "todo",
@@ -80,7 +82,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("todos", {
     description: "Expand or collapse the TODO list above the editor",
     handler: async (_args, ctx) => {
-      if (ctx.mode !== "tui" || isChild(ctx) || !todos.length) return;
+      if (ctx.mode !== "tui" || !todos.length) return;
       expanded = hidden || !expanded;
       hidden = false;
       draw(ctx);
@@ -100,9 +102,10 @@ export default function (pi: ExtensionAPI) {
   // Added to this request only; the returned copy is never saved.
   pi.on("context", (event) => {
     const active = todos.filter((t) => t.status === "in_progress");
+    if (!active.length) return; // cheap before scanning messages below
     const users = event.messages.flatMap((m: any, i) => (m.role === "user" ? [i] : []));
     const end = users.at(-1);
-    if (!active.length || end !== event.messages.length - 1) return;
+    if (end !== event.messages.length - 1) return;
     const reply = event.messages.findLastIndex((m: any) => m.role === "assistant");
     const start = users.filter((i) => i < reply).at(-1);
     if (reply < 0 || start === undefined || event.messages.slice(start + 1, end).some(hasToolCall)) return;
