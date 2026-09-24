@@ -9,7 +9,8 @@
   "scripts": {
     "test": "node --test $(find tests extensions shared -name '*.test.mjs' | sort)",
     "audit": "node audit/index.mjs",
-    "provenance": "node tests/provenance.mjs"
+    "provenance": "node tests/provenance.mjs",
+    "bench:alloc": "timeout 2700 node --max-old-space-size=2048 bench/alloc/run.mjs"
   },
   "pi": {
     "extensions": [
