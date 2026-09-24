@@ -341,8 +341,19 @@ export default function (pi: ExtensionAPI) {
     return session;
   }
 
+  /**
+   * Liveness on the session's bus, in @tintinweb/pi-subagents' vocabulary: pane-pi's card
+   * status holds "Working" from each run's start until its end. Best-effort.
+   */
+  function lane(channel: "subagents:started" | "subagents:completed" | "subagents:failed", a: Agent) {
+    try {
+      pi.events.emit(channel, { id: a.id });
+    } catch {}
+  }
+
   async function run(a: Agent, inherit: Inherit) {
     a.state = "running";
+    lane("subagents:started", a);
     fleet().update(a.id, { status: "running" });
     const began = fleet().now();
     const stats = (a.stats = { turns: 0, tools: 0, tokens: 0, cost: 0 });
@@ -410,6 +421,7 @@ export default function (pi: ExtensionAPI) {
           if (!isFinished(fleet().get(a.id)?.status ?? "completed")) report(a, "failed", `Error: ${(e as Error).message}`, `Subagent ${a.id} failed: ${(e as Error).message}`);
         }
       }
+      lane(fleet().get(a.id)?.status === "failed" ? "subagents:failed" : "subagents:completed", a);
       prune(a);
       // A finished agent anywhere in the tree may free room for the top level's queue.
       a.root.pump();

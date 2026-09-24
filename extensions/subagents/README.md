@@ -176,6 +176,15 @@ Subagent 3fa9c1d2 (review auth) completed. STATUS: DONE
 - A resume turns the finished row back into a running one, with its own
   running time, so each agent keeps one row.
 
+## Events
+
+Each run emits on the spawning session's `pi.events`, in
+`@tintinweb/pi-subagents`' vocabulary, so a card-status consumer such as
+pane-pi needs no fleet internals: `subagents:started` when the run starts,
+then `subagents:failed` if it failed, else `subagents:completed` (stopped
+included). The payload is `{ id }`. A child's run ends only after its own
+children's, and an agent stopped while queued emits nothing.
+
 ## Transcript
 
 Opening an agent in FleetView shows its conversation in the viewer, drawn like
