@@ -206,6 +206,7 @@ test("a selected finished row stays until the selection leaves it, then 10 s mor
     { clockWhen: later, clock: 100 },
   );
   tui.keys("Down", "Down", "Down"); // lint is selected; build, above it, is not
+  await tui.waitForScreen(idle([" ● main", "   agent build · done 0s", "    └─ ok", "›  agent lint · done 0s", "    └─ ok", KEYS]));
   writeFileSync(later, "");
   await tui.waitForEvent("clock");
   const selected = idle([" ● main", "›  agent lint · done 0s", "    └─ ok", KEYS]);
