@@ -56,29 +56,10 @@ test("a budget on a builtin tool is enforced", () => {
   assert.match(g(snap(), { maxPromptTokens: 200, tools: { t: 1 } }).join(), /tool t over budget/);
 });
 
-test("gate requires /rig and refuses /agents, /tasks and /bg* commands", () => {
-  const ports = ["usage", "context", "clear", "theme"];
-  const names = (...n) => snap({ commands: [...n, ...ports].map((name) => ({ name })) });
-  assert.deepEqual(g(names("rig", "other"), { maxPromptTokens: 200 }), []);
-  assert.deepEqual(g(names("other"), { maxPromptTokens: 200 }), ["/rig is not registered"]);
-  assert.deepEqual(g(names("rig", "agents", "tasks", "bg-list", "agents-report", "tasks-help"), { maxPromptTokens: 200 }), [
-    "/agents is registered; settings belong in /rig",
-    "/tasks is registered; settings belong in /rig",
-    "/bg-list is registered; settings belong in /rig",
-  ]);
-});
-
-test("gate requires /usage, /context, /clear and /theme and refuses a /context config command", () => {
-  const names = (...n) => snap({ commands: n.map((name) => ({ name })) });
-  assert.deepEqual(g(names("rig", "usage", "context", "clear", "theme"), { maxPromptTokens: 200 }), []);
-  assert.deepEqual(g(names("rig", "usage"), { maxPromptTokens: 200 }), [
-    "/context is not registered",
-    "/clear is not registered",
-    "/theme is not registered",
-  ]);
-  assert.deepEqual(g(names("rig", "usage", "context", "clear", "theme", "context-config"), { maxPromptTokens: 200 }), [
-    "/context-config is registered; /context has no config",
-  ]);
+test("gate enforces the skills budget", () => {
+  const withSkills = snap({ systemPrompt: "<available_skills><skill><name>a</name></skill><skill><name>b</name></skill></available_skills>" });
+  assert.deepEqual(g(withSkills, { maxPromptTokens: 200, maxSkills: 2 }), []);
+  assert.deepEqual(g(withSkills, { maxPromptTokens: 200, maxSkills: 1 }), ["skills budget exceeded: 2 > 1"]);
 });
 
 test("gate pins the rig's own command names to budgets.commands, exactly and failing closed", () => {

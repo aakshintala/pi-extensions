@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import "./fixtures/tool-display/pi-tui.mjs";
 const ext = await import("../extensions/inline-skills/index.ts");
-const { namedSkills, editorPatch, skillMessage, skillProvider, stripFrontmatter } = ext;
+const { namedSkills, editorPatch, skillMessage, skillProvider } = ext;
 
 const skill = (name) => ({ name, description: `${name} skill`, path: `/s/${name}/SKILL.md` });
 const SKILLS = ["grilling", "grill-with-docs", "setup-grill", "tdd"].map(skill);
@@ -25,12 +25,21 @@ test("a message with no `/` never lists skills", () => {
   assert.deepEqual(namedSkills("an ordinary prompt", skills, new Set()), []);
 });
 
-test("frontmatter is stripped, with or without a newline after it", () => {
-  assert.equal(stripFrontmatter("---\nname: x\n---\nbody"), "body");
-  assert.equal(stripFrontmatter("---\nname: x\n---body"), "body");
-  assert.equal(stripFrontmatter("---\nname: x\n---"), "");
-  assert.equal(stripFrontmatter("no frontmatter"), "no frontmatter");
-  assert.equal(stripFrontmatter("---\nunclosed"), "---\nunclosed");
+// Uses Pi's own stripFrontmatter (imported, not reimplemented): a BOM-prefixed file's
+// "---" would otherwise not be seen as the start of the string, so the old local
+// function (no `stripBom`) left the frontmatter in the body.
+test("a BOM-prefixed SKILL.md has its front matter stripped", async () => {
+  const handlers = {};
+  const pi = {
+    on: (name, h) => (handlers[name] = h),
+    registerMessageRenderer: () => {},
+    getCommands: () => [{ name: "skill:bom", source: "skill", sourceInfo: { path: new URL("./fixtures/inline-skills/bom-skill/SKILL.md", import.meta.url).pathname } }],
+  };
+  ext.default(pi);
+  const ctx = { ui: { notify: assert.fail } };
+  const { message } = await handlers.before_agent_start({ prompt: "use /bom" }, ctx);
+  assert.match(message.content, /Body of bom\./);
+  assert.doesNotMatch(message.content, /name: bom/, "frontmatter leaked into the body");
 });
 
 test("skill message: fenced bodies, names in details", () => {

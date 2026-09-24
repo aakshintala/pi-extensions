@@ -10,12 +10,13 @@ import {
   type ParsedSkillBlock,
   parseSkillBlock,
   SkillInvocationMessageComponent,
+  stripFrontmatter,
   VERSION,
 } from "@earendil-works/pi-coding-agent";
 import { Container } from "@earendil-works/pi-tui";
 
 // Same type as upstream, so skills loaded by it before the port still count as loaded.
-export const MESSAGE_TYPE = "inline-skill";
+const MESSAGE_TYPE = "inline-skill";
 const MAX_ITEMS = 30;
 // A `/name` token starts the text or follows whitespace or one of `([{,`, both when
 // a message is sent and while one is typed; a token with a second `/` never matches.
@@ -29,7 +30,7 @@ export type Skill = { name: string; description?: string; path: string };
 type Item = { value: string; label: string; description?: string };
 type Lines = string[];
 
-export function listSkills(pi: ExtensionAPI): Skill[] {
+function listSkills(pi: ExtensionAPI): Skill[] {
   return pi
     .getCommands()
     .filter((c) => c.source === "skill" && c.name.startsWith("skill:") && c.sourceInfo?.path)
@@ -51,14 +52,6 @@ export function namedSkills(text: string, skills: () => Skill[], loaded: Set<str
   return [...out.values()];
 }
 
-export function stripFrontmatter(content: string): string {
-  if (!content.startsWith("---")) return content;
-  const end = content.indexOf("\n---", 3);
-  if (end === -1) return content;
-  const rest = content.slice(end + 4); // the closing `---` may have the body on its line
-  return rest.startsWith("\n") ? rest.slice(1) : rest;
-}
-
 // Body goes in a backtick fence longer than any backtick run inside it, so no body can close it.
 function fence(body: string): string {
   const longest = Math.max(2, ...(body.match(/`+/g) ?? []).map((r) => r.length));
@@ -66,7 +59,7 @@ function fence(body: string): string {
   return `${f}markdown\n${body}\n${f}`;
 }
 
-export async function readSkill(skill: Skill): Promise<ParsedSkillBlock> {
+async function readSkill(skill: Skill): Promise<ParsedSkillBlock> {
   const body = stripFrontmatter(await readFile(skill.path, "utf8")).trim();
   return { name: skill.name, location: skill.path, content: body, userMessage: undefined };
 }
@@ -95,7 +88,7 @@ export function skillMessage(blocks: ParsedSkillBlock[]) {
  * for `/skill:name`, so they arrive in the same message: queued messages are
  * delivered one per turn by default, so a separate message would arrive a turn early.
  */
-export function withSkills(message: any, blocks: ParsedSkillBlock[]) {
+function withSkills(message: any, blocks: ParsedSkillBlock[]) {
   const block = `<skill name="${blocks.map((b) => b.name).join(", ")}" location="${blocks[0].location}">\n${skillText(blocks)}\n</skill>`;
   const text = textOf(message);
   const rest = typeof message.content === "string" ? [] : message.content.filter((c: any) => c.type !== "text");
@@ -241,8 +234,7 @@ export default function (pi: ExtensionAPI) {
   let unsubscribe: (() => void) | undefined;
   const skills = () => listSkills(pi);
   const commands = () => pi.getCommands().filter((c) => c.source !== "skill").map((c) => c.name.toLowerCase());
-  const toLoad = (text: string) => {
-    const { names, rest } = leadingBlocks(text);
+  const toLoad = (text: string, { names, rest } = leadingBlocks(text)) => {
     // After a leading block the text is no longer the start of the prompt, so commands do not win there.
     return namedSkills(rest, skills, new Set([...loaded, ...starting, ...names]), rest === text ? commands : undefined);
   };
@@ -319,8 +311,9 @@ export default function (pi: ExtensionAPI) {
     }
     if (message.role !== "user") return;
     const text = textOf(message);
-    const named = toLoad(text);
-    for (const name of leadingBlocks(text).names) loaded.add(name);
+    const leading = leadingBlocks(text);
+    for (const name of leading.names) loaded.add(name);
+    const named = toLoad(text, leading);
     if (!named.length) return;
     const blocks = await read(named, ctx);
     if (!blocks.length) return;
