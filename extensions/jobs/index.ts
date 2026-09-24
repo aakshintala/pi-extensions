@@ -247,8 +247,12 @@ export default function (pi: ExtensionAPI) {
         const seconds = autoSeconds();
         const auto = t.setTimeout(() => move(`Still running after ${seconds}s, so it moved to the background`), seconds * 1000);
         const unlist = fleet().foreground(owner, () => move("Moved to the background"));
-        // Its call shows the hint while it can be backgrounded and Ctrl+B does that (#139).
-        const unhint = showHint(owner, call, () => (ctrlBFree() ? "ctrl+b to run in background" : undefined));
+        // Its call shows the hint while it can be backgrounded and Ctrl+B does that (#139);
+        // the elapsed time in it (#162) shows how close it is to moving to the background.
+        const unhint = showHint(owner, call, () => {
+          const elapsed = duration(now() - j.startedAt);
+          return ctrlBFree() ? `${elapsed} · ctrl+b to run in background` : elapsed;
+        });
         const end = () => {
           unlist();
           unhint();
