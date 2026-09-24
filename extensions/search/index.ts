@@ -46,6 +46,11 @@ const FIND_STYLE = searchStyle("Find", /^No files found/, (n) => `Found ${n} ${p
 const SCAN_WAIT_MS = 5_000;
 const GREP_LIMIT = 100;
 const FIND_LIMIT = 1000;
+// ponytail: rerank at most limit*10 glob matches (see the "Rank every match" refetch
+// below) instead of every match FFF found; a huge glob rarely needs more than this
+// many candidates for the right files to reach the top. Raise the multiplier if a
+// dirty/frecent file ever gets pushed out of a result set by this cap.
+const RERANK_MULTIPLIER = 10;
 
 const GREP_PARAMETERS = {
   type: "object",
@@ -290,8 +295,10 @@ export function searchExtension(
           // Like Pi's fd call: the glob may match at any depth under path.
           const g = pattern === "**" || pattern.startsWith("**/") ? pattern : `**/${pattern}`;
           let r = f.glob(`${base}${g}`, { pageSize: limit });
-          // Rank every match, not just the first page, so a changed file can come first.
-          if (r.ok && r.value.totalMatched > r.value.items.length) r = f.glob(`${base}${g}`, { pageSize: r.value.totalMatched });
+          // Rank every match up to the cap, not just the first page, so a changed file can come first.
+          if (r.ok && r.value.totalMatched > r.value.items.length) {
+            r = f.glob(`${base}${g}`, { pageSize: Math.min(r.value.totalMatched, limit * RERANK_MULTIPLIER) });
+          }
           if (!r.ok) throw new Error(r.error);
           const dirty = (s: string) => (s === "clean" ? 0 : 1);
           items = [...r.value.items].sort((a, b) => dirty(b.gitStatus) - dirty(a.gitStatus) || b.totalFrecencyScore - a.totalFrecencyScore);

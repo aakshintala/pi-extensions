@@ -8,7 +8,7 @@ import type { ExtensionCommandContext, Theme, ThemeColor } from "@earendil-works
 import { Key, matchesKey, type TuiMouseEvent, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 import type { ContextUsageSnapshot, UsageCategory, UsagePreviewEntry } from "../model.ts";
-import { oneLine } from "../../../shared/text/index.ts";
+import { formatCount, oneLine } from "../../../shared/text/index.ts";
 import { normalizePreviewText } from "../text.ts";
 import { collectPreviewEntries } from "../composition.ts";
 import { ListNavigator, PreviewScroller } from "./injections-model.ts";
@@ -1121,11 +1121,7 @@ function legendTokens(row: LegendRow): number {
 }
 
 /** Compact token count: 951, 3.7k, 43.8k, 1M. */
-function formatTokens(tokens: number): string {
-	if (tokens < 1_000) return `${tokens}`;
-	if (tokens < 1_000_000) return `${trimTrailingZero((tokens / 1_000).toFixed(1))}k`;
-	return `${trimTrailingZero((tokens / 1_000_000).toFixed(1))}M`;
-}
+const formatTokens = (tokens: number): string => formatCount(tokens, { decimals: "always" });
 
 /** Percentage with one decimal below 10%: 0.4%, 4.2%, 96%. */
 function formatPercent(ratio: number): string {
