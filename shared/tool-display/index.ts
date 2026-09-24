@@ -21,8 +21,18 @@ const BODY = PAD + "     "; // body text lines up under the summary text
 
 export type CallStatus = "pending" | "done" | "error";
 
-/** A component whose lines are computed for the width it is given. */
-export const lines = (render: (width: number) => string[]): Component => ({ render, invalidate() {} });
+/**
+ * A component whose lines are computed for the width it is given, once per width: Pi
+ * rebuilds a tool's components on every change, so the lines only change with the width.
+ */
+export const lines = (render: (width: number) => string[]): Component => {
+  let at = -1;
+  let out: string[] = [];
+  return {
+    render: (width) => (width === at ? out : ((out = render(width)), (at = width), out)),
+    invalidate: () => void (at = -1),
+  };
+};
 
 /** `⏺ Title(arg)` on one line, with the bullet coloured by status. */
 export function callLine(theme: Theme, status: CallStatus, title: string, arg: string, width: number): string {
@@ -86,12 +96,14 @@ export function unifiedDiff(pairs: { oldText: string; newText: string }[]): Diff
   return { lines: out, added, removed, tooLarge: false };
 }
 
-/** Diff lines in the theme's diff colours, hunk breaks as a dim `⋯`. */
+/** Diff lines in the theme's diff colours, hunk breaks as a dim `⋯`. Lines past EXPANDED_LINES are never shown, so stay plain. */
 export const diffBody = (theme: Theme, diff: Diff): string[] =>
-  diff.lines.map((l) =>
-    l === "@@"
-      ? theme.fg("dim", "⋯")
-      : theme.fg(l[0] === "+" ? "toolDiffAdded" : l[0] === "-" ? "toolDiffRemoved" : "toolDiffContext", l),
+  diff.lines.map((l, i) =>
+    i >= EXPANDED_LINES
+      ? l
+      : l === "@@"
+        ? theme.fg("dim", "⋯")
+        : theme.fg(l[0] === "+" ? "toolDiffAdded" : l[0] === "-" ? "toolDiffRemoved" : "toolDiffContext", l),
   );
 
 export const plural = (n: number, one: string, many = `${one}s`) => (n === 1 ? one : many);
@@ -124,19 +136,22 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
   return {
     renderShell: "self" as const,
     renderCall(args: Args, theme: Theme, context: ToolRenderContext): Component {
-      const groups = sessionOf(context.toolCallId, context.args ?? args);
-      const c = groups?.describe(context.toolCallId, style.summary, context.invalidate);
-      const g = c && groups!.group(context.toolCallId);
+      // No closure here may read `context`: it holds Pi's previous component (lastComponent),
+      // whose closures would hold its context, and so on, one link per redraw, never freed.
+      const { toolCallId: id, isError, isPartial, cwd, expanded } = context;
+      const groups = sessionOf(id, context.args ?? args);
+      const c = groups?.describe(id, style.summary, context.invalidate);
+      const g = c && groups!.group(id);
       // A running call with a hint (#139) shows the hint under its call line.
       const hint = c?.hint?.();
       const own = (w: number) => {
-        const state = c ? c.state() : context.isError ? "error" : context.isPartial ? "pending" : "done";
+        const state = c ? c.state() : isError ? "error" : isPartial ? "pending" : "done";
         const status: CallStatus = state === "cancelled" ? "error" : state;
-        const line = callLine(theme, status, style.title, style.arg(args ?? ({} as Args), context.cwd), w);
+        const line = callLine(theme, status, style.title, style.arg(args ?? ({} as Args), cwd), w);
         return hint ? [line, ...resultLines(theme, theme.fg("dim", hint), [], false, w)] : [line];
       };
       if (!g) return lines(own);
-      const open = context.expanded || g.open;
+      const open = expanded || g.open;
       const summary = !open && g.calls[0] === c;
       // Collapsed, a group shows one summary line once it is ready: a call settled,
       // a call runs past the grace period, or a call shows its hint. Fresh pending
@@ -146,6 +161,7 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
       const shown = open || !!hint;
       return clickable(g, lines((w) => [...(summary && ready ? [summaryLine(theme, g, w)] : []), ...(shown ? own(w) : [])]));
     },
+    // Like renderCall, no closure here reads `context`.
     renderResult(result: Result, options: { expanded: boolean; isPartial: boolean }, theme: Theme, context: ToolRenderContext): Component {
       const groups = sessionOf(context.toolCallId, context.args);
       const g = groups?.group(context.toolCallId);
@@ -239,7 +255,6 @@ class Call {
   invalidate?: () => void;
   /** While running: the hint it shows (see `showHint`). */
   hint?: () => string | undefined;
-  result?: unknown;
   id: string;
   run: Run;
   msg: Msg;
@@ -296,7 +311,7 @@ const SPLITS = new Set(["user", "compactionSummary", "branchSummary"]);
 export class ToolGroups {
   private calls = new Map<string, Call>();
   /** Results that arrived before their call was registered. */
-  private early = new Map<string, { outcome: Outcome; result: unknown }>();
+  private early = new Map<string, Outcome>();
   /** The run a next message of calls only continues. */
   private tail?: Run;
   /** The message still streaming: later updates of it are the same message. */
@@ -347,7 +362,8 @@ export class ToolGroups {
     const all = segments.flat().map((b) => b.id as string);
     // A call revised out of the message leaves its group, and an id that an earlier
     // message used belongs to this one now.
-    for (const id of msg.ids) if (!all.includes(id)) this.forget(id);
+    const keep = new Set(all);
+    for (const id of msg.ids) if (!keep.has(id)) this.forget(id);
     for (const id of all) if (this.calls.get(id) && this.calls.get(id)!.msg !== msg) this.forget(id);
     msg.ids = all;
     let changed = msg.thought !== thought;
@@ -364,7 +380,7 @@ export class ToolGroups {
       const run: Run = i === 0 && join ? join : old && !used.has(old) && old.ids.every(mine) ? old : { ids: [] };
       used.add(run);
       const next = [...run.ids.filter((id) => !mine(id)), ...ids];
-      changed ||= next.join() !== run.ids.join() || (!!ended && !run.ended);
+      changed ||= next.length !== run.ids.length || next.some((id, j) => id !== run.ids[j]) || (!!ended && !run.ended);
       run.ids = next;
       run.ended ??= ended;
       for (const b of blocks) {
@@ -374,8 +390,6 @@ export class ToolGroups {
           if (c.run !== run) this.leave(c);
           Object.assign(c, { run, args: b.arguments });
         }
-        // Pi shows an errored message's error on its calls with no result.
-        if (ended === "error") this.calls.get(b.id)!.result ??= { content: [{ type: "text", text: message.errorMessage || "Error" }] };
       }
       if (changed) this.refresh(run);
       this.tail = run;
@@ -395,10 +409,10 @@ export class ToolGroups {
 
   /** Records a call's result (Pi's tool_execution_end, or a saved toolResult message). */
   settle(id: string, isError: boolean, result: unknown): void {
-    const outcome = { outcome: outcomeOf(isError, result), result };
+    const outcome = outcomeOf(isError, result);
     const c = this.calls.get(id);
     if (!c) return void this.early.set(id, outcome);
-    Object.assign(c, { status: outcome.outcome, result });
+    c.status = outcome;
     this.refresh(c.run);
   }
 
@@ -423,11 +437,13 @@ export class ToolGroups {
 
   /** Recheck pending groups after their grace period and hints whose text may change. */
   refreshPending(): void {
-    const redraw = new Set([...this.calls.values()].filter((c) => c.hint));
-    for (const run of new Set([...this.calls.values()].map((c) => c.run))) {
-      for (const id of run.ids) {
-        const g = this.group(id);
-        if (g?.calls[0].id === id && g.calls.some((c) => c.state() === "pending")) redraw.add(g.calls[0]);
+    // Only a pending call's group leader draws the grace-period reveal.
+    const redraw = new Set<Call>();
+    for (const c of this.calls.values()) {
+      if (c.hint) redraw.add(c);
+      else if (c.state() === "pending") {
+        const leader = this.group(c.id)?.calls[0];
+        if (leader) redraw.add(leader);
       }
     }
     for (const c of redraw) {
@@ -503,18 +519,16 @@ export class ToolGroups {
     return (m.thought && (m.shown ?? this.showThinking)) || (m.gap && !(m.hides ?? !this.showThinking));
   }
 
+  /** Seals the open run. Called for every streamed text token, so a no-op once sealed. */
   private close() {
+    if (!this.tail && !this.current && !this.gap) return;
+    const runs = new Set([this.tail, ...(this.current?.ids ?? []).map((id) => this.calls.get(id)?.run)]);
     // Clear first: each invalidate re-renders synchronously and must see the sealed runs.
     this.tail = undefined;
     this.current = undefined;
     this.gap = false;
-    // Sealing a run can change its groups. Each invalidate re-renders synchronously;
-    // one bad component must not prevent the other groups from updating.
-    for (const c of this.calls.values()) {
-      try {
-        c.invalidate?.();
-      } catch {}
-    }
+    // group() never reads the tail, so only the sealed runs' calls redraw.
+    for (const run of runs) if (run) this.refresh(run);
   }
 
   private add(c: Call) {
@@ -524,7 +538,7 @@ export class ToolGroups {
     const early = this.early.get(c.id);
     if (early) {
       this.early.delete(c.id);
-      Object.assign(c, { status: early.outcome, result: early.result });
+      c.status = early;
     }
   }
 

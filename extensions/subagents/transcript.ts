@@ -72,15 +72,6 @@ const BUILT_INS: Record<string, (cwd: string) => unknown> = {
 const userText = (m: any): string =>
   typeof m.content === "string" ? m.content : m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("");
 
-/**
- * The message with its own deep copy of each call's arguments: the renderers find a call's
- * groups by that object, so the child session's own groups never answer for this
- * transcript, and later streaming updates never reach what is drawn.
- */
-const own = (m: any) => ({
-  ...m,
-  content: m.content.map((b: any) => (b?.type === "toolCall" ? { ...b, arguments: structuredClone(b.arguments ?? {}) } : b)),
-});
 
 const isMessage = (e: any) => e?.type === "message" || e?.type === "custom_message";
 
@@ -88,6 +79,7 @@ class Transcript extends Container {
   private readonly saved = new Container();
   private readonly live = new Container();
   private readonly groups = new ToolGroups();
+  private readonly copies = new WeakMap<object, unknown>(); // each call's arguments → this transcript's copy
   private last?: string; // id of the last entry drawn
   private tools: ToolExecutionComponent[] = [];
   private pending = new Map<string, ToolExecutionComponent>(); // saved calls without a result
@@ -114,6 +106,22 @@ class Transcript extends Container {
     this.groups.showThinking = !this.hide;
     this.pad = settings.getOutputPad();
     this.expanded = ui.getToolsExpanded();
+  }
+
+  /**
+   * The message with its own deep copy of each call's arguments: the renderers find a call's
+   * groups by that object, so the child session's own groups never answer for this
+   * transcript, and later streaming updates never reach what is drawn. One copy per
+   * arguments object, so a sync that changed nothing keeps each call's arguments the same.
+   * A saved message copies afresh: Pi normalizes edit arguments in place after streaming.
+   */
+  private own(m: any, fresh = false) {
+    const copy = (a: any) => {
+      if (!a || typeof a !== "object") return structuredClone(a ?? {});
+      if (fresh || !this.copies.has(a)) this.copies.set(a, structuredClone(a));
+      return this.copies.get(a);
+    };
+    return { ...m, content: m.content.map((b: any) => (b?.type === "toolCall" ? { ...b, arguments: copy(b.arguments) } : b)) };
   }
 
   /** The viewer closed it: its calls leave the process-wide group index. */
@@ -144,7 +152,7 @@ class Transcript extends Container {
       if (this.saved.children.length) this.saved.addChild(new Spacer(1));
       this.saved.addChild(new UserMessageComponent(text, getMarkdownTheme(), this.pad));
     } else if (message.role === "assistant") {
-      const m = own(message);
+      const m = this.own(message);
       this.groups.track(m);
       this.saved.addChild(new AssistantMessageComponent(m, this.hide, getMarkdownTheme(), undefined, this.pad));
       for (const call of m.content.filter((b: any) => b?.type === "toolCall")) {
@@ -217,7 +225,7 @@ class Transcript extends Container {
     const session = src.session;
     const message: any = session?.agent.state.streamingMessage;
     if (message?.role === "assistant") {
-      const m = own(message);
+      const m = this.own(message);
       this.groups.track(m, true);
       if (!this.streaming) {
         this.streaming = { component: new AssistantMessageComponent(undefined, this.hide, getMarkdownTheme(), undefined, this.pad), calls: new Map() };

@@ -12,13 +12,22 @@ export function stampRenderer(settings: () => Readonly<StampSettings>): EntryRen
     if (!data || data.version !== 1 || !valid(data.startedAt) || !valid(data.endedAt) || data.endedAt < data.startedAt) return undefined;
     const seconds = Math.round((data.endedAt - data.startedAt) / 1000);
     const duration = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+    // Drawn every frame: redrawn only when the width or the settings snapshot changes.
+    let at = -1;
+    let seen: Readonly<StampSettings> | undefined;
+    let out: string[] = [];
     return {
       render(width) {
         if (width < 1) return [];
-        const line = `✻ Worked for ${duration} · done ${formatStampLabel(data.endedAt, data.startedAt, settings()) ?? ""}`;
-        return [truncateToWidth(theme.fg("dim", line), width)];
+        if (width === at && settings() === seen) return out;
+        seen = settings();
+        at = width;
+        const line = `✻ Worked for ${duration} · done ${formatStampLabel(data.endedAt, data.startedAt, seen) ?? ""}`;
+        return (out = [truncateToWidth(theme.fg("dim", line), width)]);
       },
-      invalidate() {},
+      invalidate() {
+        at = -1;
+      },
     } satisfies Component;
   };
 }

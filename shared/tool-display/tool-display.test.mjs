@@ -470,3 +470,46 @@ test("hints: a hinted call shows at once, inside the grace period", (t) => {
   td.showHint("s", "g2", HINT);
   assert.deepEqual(draw(["g1", "g2"]), [" ⏺ Read 2 files", " ⏺ Read(g2)", "   ⎿  ctrl+b to run in background"]);
 });
+
+test("streamed text seals the open run once and redraws only its calls", (t) => {
+  const g = groups(t);
+  const ids = [];
+  for (let m = 0; m < 10; m++) {
+    const calls = [toolCall(`s${m}a`), toolCall(`s${m}b`)];
+    g.track(said({ type: "text", text: `step ${m}` }, ...calls));
+    ids.push(...calls.map((c) => c.id));
+  }
+  const counts = Object.fromEntries(ids.map((id) => [id, 0]));
+  for (const id of ids) GROUPED.renderCall({ path: id }, recordingTheme(), { toolCallId: id, args: {}, cwd: "/w", expanded: false, invalidate: () => counts[id]++ });
+  for (const id of ids) counts[id] = 0; // a call joining its group redraws the one before
+  let text = "";
+  for (let i = 0; i < 20; i++) g.track({ role: "assistant", content: [{ type: "text", text: (text += `t${i} `) }] }, true);
+  // The last message's run is sealed by the first token; earlier runs were sealed already.
+  assert.deepEqual(counts, { ...Object.fromEntries(ids.map((id) => [id, 0])), s9a: 1, s9b: 1 });
+});
+
+test("a redrawn call's components never keep earlier render contexts alive", async (t) => {
+  const { setFlagsFromString } = await import("node:v8");
+  const { runInNewContext } = await import("node:vm");
+  setFlagsFromString("--expose-gc");
+  const gc = runInNewContext("gc");
+  const g = groups(t);
+  g.track(said(toolCall("lk1"), toolCall("lk2")));
+  g.settle("lk1", true, { content: [{ type: "text", text: "boom" }] });
+  // Pi hands each redraw the previous component as `lastComponent`.
+  const redraw = (id, n) => {
+    let last, first;
+    for (let i = 0; i < n; i++) {
+      const context = { toolCallId: id, args: {}, cwd: "/w", expanded: false, isError: false, invalidate() {}, lastComponent: last };
+      first ??= new WeakRef(context);
+      last = GROUPED.renderCall({ path: id }, recordingTheme(), context);
+      last = { call: last, result: GROUPED.renderResult({ content: [] }, { expanded: true, isPartial: false }, recordingTheme(), { ...context, expanded: true }) };
+    }
+    return { first, last };
+  };
+  const held = ["lk1", "lk2"].map((id) => redraw(id, 5));
+  await new Promise((r) => setImmediate(r)); // WeakRefs clear only after the current job
+  gc();
+  assert.deepEqual(held.map(({ first }) => first.deref()), [undefined, undefined]);
+  assert.ok(held.every(({ last }) => last.call.render(80)));
+});

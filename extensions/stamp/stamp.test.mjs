@@ -7,7 +7,8 @@ import "../../tests/fixtures/tool-display/pi-tui.mjs";
 const { stampRenderer, STAMP_ENTRY_TYPE } = await import("./render.ts");
 const { visibleWidth } = await import("@earendil-works/pi-tui");
 const { SETTINGS } = await import("./settings.ts");
-const values = { ...Object.fromEntries(SETTINGS.map(({ key, default: value }) => [key, value])), timeZone: "UTC" };
+// Settings are snapshots: a change swaps in a new object (see settings.ts).
+let values = { ...Object.fromEntries(SETTINGS.map(({ key, default: value }) => [key, value])), timeZone: "UTC" };
 const renderer = stampRenderer(() => values);
 let color = "A";
 const theme = { fg: (_color, text) => `${color}${text}` };
@@ -18,18 +19,18 @@ const runData = () => ({ version: 1, startedAt: Date.UTC(2026, 8, 23, 16, 54, 11
 test("renders one compact, left-aligned settled-run line with a 12-hour clock", () => {
   const t = Date.UTC(2026, 8, 23, 16, 55);
   assert.deepEqual(entry({ version: 1, startedAt: t - 49_000, endedAt: t }, plainTheme).render(80), ["✻ Worked for 49s · done 4:55 PM"]);
-  values.hourCycle = "24h";
+  values = { ...values, hourCycle: "24h" };
   assert.match(entry({ version: 1, startedAt: t - 49_000, endedAt: t }).render(80)[0], /done 16:55$/);
-  values.hourCycle = "12h";
+  values = { ...values, hourCycle: "12h" };
 });
 
 test("existing component reflects settings changes and truncates to the requested width", () => {
   const component = entry(runData(), plainTheme);
   assert.match(component.render(80)[0], /4:55 PM$/);
-  values.hourCycle = "24h";
+  values = { ...values, hourCycle: "24h" };
   assert.match(component.render(80)[0], /16:55$/);
   assert.ok(visibleWidth(component.render(8)[0]) <= 8);
-  values.hourCycle = "12h";
+  values = { ...values, hourCycle: "12h" };
 });
 
 test("theme changes are picked up when the component is invalidated", () => {
