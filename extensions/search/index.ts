@@ -1,5 +1,6 @@
 // FFF-backed grep and find under the built-in names (spec #35, ticket #60).
-// One FileFinder per session, scanned in the background; each search waits up to
+// One FileFinder per root per process, shared by the sessions there (subagent children
+// in their parent's tree) and scanned in the background; each search waits up to
 // 5 s for the scan, else that call runs Pi's built-in tool. So does every call
 // when FFF cannot load or the session cwd is $HOME or /.
 import { mkdirSync, realpathSync, statSync } from "node:fs";
@@ -97,6 +98,11 @@ const realpath = (p: string) => {
   }
 };
 
+// Finders by realpath root, on globalThis because Pi loads each session's extensions afresh.
+// The last session on a root to close destroys its finder.
+const SHARED = Symbol.for("pi-rig.search.finders");
+const shared = () => ((globalThis as any)[SHARED] ??= new Map()) as Map<string, { finder: Promise<Finder | null>; refs: number }>;
+
 // Resolves after ms, or quietly once stop aborts. Tests inject their own.
 const sleep = (ms: number, stop: AbortSignal) => delay(ms, undefined, { signal: stop }).catch(() => {});
 
@@ -105,8 +111,8 @@ export function searchExtension(
   { wait = sleep }: { wait?: (ms: number, stop: AbortSignal) => Promise<unknown> } = {},
 ) {
   return (pi: ExtensionAPI) => {
-    // One index per session; closed flips synchronously on shutdown or session switch.
-    type Index = { finder: Promise<Finder | null>; closed: boolean };
+    // This session's hold on its root's finder; closed flips synchronously on shutdown or session switch.
+    type Index = { finder: Promise<Finder | null>; root: string; closed: boolean };
     let index: Index | undefined;
     let root = "";
     let noticed = false;
@@ -128,6 +134,9 @@ export function searchExtension(
       index = undefined;
       if (!i) return;
       i.closed = true;
+      const s = shared().get(i.root);
+      if (s && --s.refs > 0) return;
+      shared().delete(i.root);
       void i.finder.then((f) => f && !f.isDestroyed && f.destroy());
     }
 
@@ -182,7 +191,10 @@ export function searchExtension(
       close();
       noticed = false;
       root = realpath(ctx.cwd);
-      index = { finder: open(root).catch(() => null), closed: false };
+      const s = shared().get(root) ?? { finder: open(root).catch(() => null), refs: 0 };
+      s.refs++;
+      shared().set(root, s);
+      index = { finder: s.finder, root, closed: false };
     });
     pi.on("session_shutdown", close);
 

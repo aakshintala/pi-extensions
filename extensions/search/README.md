@@ -20,12 +20,14 @@
 
 ## Index
 
-One index per session, for the session's working directory, built in the
-background from `session_start` and kept current by FFF's file watcher. A
+One index per working directory per process, built in the background from
+the first `session_start` there and kept current by FFF's file watcher.
+Sessions on the same directory, such as subagents without a worktree, share
+it; the last one to close destroys it. A
 search waits up to 5 s for the binding to load and the first scan to finish;
 cancelling the call ends the wait. Frecency lives in
-`<agent dir>/fff/frecency`. The index is destroyed on shutdown, `/reload` and
-session switch; a search still waiting for it then falls back.
+`<agent dir>/fff/frecency`. A session lets go of the index on shutdown,
+`/reload` and session switch; a search still waiting for it then falls back.
 
 ## Fallback
 
