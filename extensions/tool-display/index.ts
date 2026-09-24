@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   diffBody,
+  EXPANDED_LINES,
   plural,
   resultText,
   shortPath,
@@ -21,7 +22,21 @@ import { releaseHiddenThinking, useHiddenThinking } from "./thinking.ts";
 
 const textLines = (text: string) => (text === "" ? [] : text.replace(/\n$/, "").split("\n"));
 
-const contentLines = (a: any) => textLines(typeof a?.content === "string" ? a.content : "");
+/** `f(key)`, computed once per key object: Pi rebuilds a call's rows on every change, and its args and result content stay the same objects. */
+const once = <V>(f: (key: any) => V) => {
+  const seen = new WeakMap<object, V>();
+  return (key: any): V => {
+    if (!key || typeof key !== "object") return f(key);
+    if (!seen.has(key)) seen.set(key, f(key));
+    return seen.get(key)!;
+  };
+};
+
+const contentLines = once((a: any) => textLines(typeof a?.content === "string" ? a.content : ""));
+const resultLinesOf = once((content: unknown) => textLines(resultText({ content })));
+const diffOf = once((a: any) => unifiedDiff(editPairs(a)));
+/** Only the lines an expanded result can show are styled; the rest only count. */
+const styled = (lines: string[], style: (l: string) => string) => lines.map((l, i) => (i < EXPANDED_LINES ? style(l) : l));
 
 const editPairs = (args: any): { oldText: string; newText: string }[] =>
   Array.isArray(args?.edits)
@@ -37,18 +52,18 @@ export const RENDERERS: Record<string, ReturnType<typeof toolRenderers>> = {
     summary: { verb: "read", one: "file" },
     result: (r: any, _a, expanded, theme) => {
       if (Array.isArray(r?.content) && r.content.some((c: any) => c?.type === "image")) return { summary: "Read image", body: [] };
-      const body = textLines(resultText(r));
-      return { summary: `Read ${body.length} ${plural(body.length, "line")}`, body: expanded ? body.map((l) => theme.fg("toolOutput", l)) : [] };
+      const body = resultLinesOf(r?.content);
+      return { summary: `Read ${body.length} ${plural(body.length, "line")}`, body: expanded ? styled(body, (l) => theme.fg("toolOutput", l)) : [] };
     },
   }),
   edit: toolRenderers({
     title: "Edit",
     arg: (a: any, cwd) => shortPath(a.path ?? a.file_path, cwd),
-    summary: { verb: "edited", one: "file", lines: (a) => { const d = unifiedDiff(editPairs(a)); return d.tooLarge ? undefined : d; } },
+    summary: { verb: "edited", one: "file", lines: (a) => { const d = diffOf(a); return d.tooLarge ? undefined : d; } },
     result: (r, a, _e, theme) => {
       const pairs = editPairs(a);
       if (pairs.length === 0) return { summary: resultText(r).split("\n")[0] || "Edited", body: [] }; // arguments of an unknown shape
-      const diff = unifiedDiff(pairs);
+      const diff = diffOf(a);
       if (diff.tooLarge) return { summary: "Edited (diff too large to show)", body: [] };
       const summary = `Added ${diff.added} ${plural(diff.added, "line")}, removed ${diff.removed} ${plural(diff.removed, "line")}`;
       return { summary, body: diffBody(theme, diff) };
@@ -60,7 +75,7 @@ export const RENDERERS: Record<string, ReturnType<typeof toolRenderers>> = {
     summary: { verb: "wrote", one: "file", lines: (a) => ({ added: contentLines(a).length, removed: 0 }) },
     result: (_r, a: any, _e, theme) => {
       const body = contentLines(a);
-      return { summary: `Wrote ${body.length} ${plural(body.length, "line")}`, body: body.map((l) => theme.fg("toolOutput", l)) };
+      return { summary: `Wrote ${body.length} ${plural(body.length, "line")}`, body: styled(body, (l) => theme.fg("toolOutput", l)) };
     },
   }),
 };
@@ -78,8 +93,9 @@ export default function (pi: ExtensionAPI, piVersion: string = VERSION) {
   }
 
   // Groups (#56, #133) come from the messages in order: live from message events, and
-  // from the saved branch at session start and after /tree, so a resumed transcript
-  // groups the same way. Each session (each instance of this extension) has its own groups.
+  // from the entries Pi draws (its context entries) at session start, after /tree and
+  // after a compaction, so a resumed transcript groups the same way, and calls Pi no
+  // longer draws are dropped with the components they hold. Each session (each instance of this extension) has its own groups.
   const groups = new ToolGroups();
   let refresh: ReturnType<typeof setInterval> | undefined;
   const stopRefresh = () => {
@@ -99,9 +115,11 @@ export default function (pi: ExtensionAPI, piVersion: string = VERSION) {
   pi.on("session_start", (_e, ctx) => {
     groups.owner = ctx.sessionManager.getSessionId(); // how showHint names the session
     useHiddenThinking(groups, piVersion);
-    load(ctx.sessionManager.getBranch());
+    load(ctx.sessionManager.buildContextEntries());
   });
-  pi.on("session_tree", (_e, ctx) => load(ctx.sessionManager.getBranch()));
+  pi.on("session_tree", (_e, ctx) => load(ctx.sessionManager.buildContextEntries()));
+  // Pi emits this before it redraws the chat from its context entries.
+  pi.on("session_compact", (_e, ctx) => load(ctx.sessionManager.buildContextEntries()));
   pi.on("message_update", (e) => groups.track(e.message, true));
   pi.on("message_end", (e) => groups.track(e.message));
   pi.on("tool_execution_end", (e) => groups.settle(e.toolCallId, e.isError, e.result));
