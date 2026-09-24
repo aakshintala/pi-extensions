@@ -33,14 +33,16 @@ function checkCtrlB(ctx: ExtensionContext) {
   g[BLOCKED] = blocked;
 }
 
-type Row = { item?: Item; depth: number };
+type Row = { item?: Item; shells?: Item[]; depth: number };
 
 /** Main session first, then every item with children under their parent. */
 function rows(items: readonly Item[]): Row[] {
-  const ids = new Set(items.map((i) => i.id));
+  const shells = items.filter((i) => i.kind === "shell" && i.status === "running");
+  const visible = items.filter((i) => i.kind !== "shell");
+  const ids = new Set(visible.map((i) => i.id));
   const out: Row[] = [{ depth: 0 }];
   const add = (parent: string | undefined, depth: number) => {
-    for (const item of items) {
+    for (const item of visible) {
       const p = item.parentId && ids.has(item.parentId) && item.parentId !== item.id ? item.parentId : undefined;
       if (p !== parent) continue;
       out.push({ item, depth });
@@ -49,7 +51,8 @@ function rows(items: readonly Item[]): Row[] {
   };
   add(undefined, 0);
   // Items in a parent cycle have no root; show them at the top level.
-  for (const item of items) if (!out.some((r) => r.item === item)) out.push({ item, depth: 0 });
+  for (const item of visible) if (!out.some((r) => r.item === item)) out.push({ item, depth: 0 });
+  if (shells.length) out.push({ shells, depth: 0 });
   return out;
 }
 
@@ -78,7 +81,10 @@ const renderNotice: MessageRenderer = (message, { outputPad }, theme) => {
   if (!item) return new Text(theme.fg("muted", content.split("\n").map(oneLine).join("\n")), outputPad, 0);
   const [color, icon] = isFinished(item.status) ? ICON[item.status as keyof typeof ICON] : (["accent", "●"] as const);
   const state = isFinished(item.status) ? (item.status === "completed" ? "done " : `${item.status} `) : "";
-  const head = `${theme.fg(color, icon)} ${oneLine(item.kind)} ${oneLine(item.label)} · ${state}${duration(item.ms)}`;
+  // The same fields FleetView rows show (model, tokens, cost...), so a finished notice
+  // carries what the row did (#5); a producer that throws keeps only its row broken.
+  const fields = safeDetail(item).map(oneLine).filter(Boolean).map((f) => ` · ${f}`).join("");
+  const head = `${theme.fg(color, icon)} ${oneLine(item.kind)} ${oneLine(item.label)} · ${state}${duration(item.ms)}${fields}`;
   const body = isFinished(item.status) ? item.result ?? "" : content;
   if (item.status === "failed" || item.status === "stopped") {
     const lines = body.split("\n").map(oneLine).filter(Boolean);
@@ -137,8 +143,13 @@ export default function (pi: ExtensionAPI) {
       cleanup = mounted.cleanup;
     }
     // Idle: starts a turn. Mid-turn (and at settle): steers into it, so notices arriving together share one turn.
+    // A completed shell job or monitor folds into the tool groups around it: it is still
+    // delivered (the model reports it in text), but draws no rows. Agent completions,
+    // failures, stops and running warnings stay visible.
     detach = fleet().attach(ctx.sessionManager.getSessionId(), (notice) => {
-      pi.sendMessage({ customType: NOTICE, content: notice.text, display: true, details: notice.item }, { triggerTurn: true, deliverAs: "steer" });
+      const item = notice.item;
+      const display = !item || item.kind === "agent" || item.status !== "completed";
+      pi.sendMessage({ customType: NOTICE, content: notice.text, display, details: item }, { triggerTurn: true, deliverAs: "steer" });
       wake?.();
     });
   });
@@ -192,7 +203,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   let focused = false;
   let chord = false; // Ctrl+X was pressed in FleetView: Ctrl+K next stops every agent
   let selected = 0;
-  let top = 0; // first row shown
+  let top = 0; // first item shown
   let timer: ReturnType<typeof setInterval> | undefined;
   const viewer = createViewer(ctx, () => tui);
   const active = () => viewer.active() ?? MAIN; // the item in the chat area
@@ -202,20 +213,32 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   // Ctrl+B can move a foreground command to the background. Its hint is on the running call (#139).
   const canBackground = () => registry.foregrounds() > 0 && ctrlBFree();
 
-  // Rows shown, as indices into current(), plus the hidden count. The keys line takes one line of the budget.
+  const activityOf = (item: Item) => oneLine(isFinished(item.status) && item.result !== undefined ? item.result : safeActivity(item));
+  const height = (row: Row) => row.item?.kind === "agent" && activityOf(row.item) ? 2 : 1;
+
+  // Fit whole items into six lines. Reserve one line for the hidden count when any item is offscreen.
   function window(all: Row[]) {
     selected = Math.min(selected, all.length - 1);
     const budget = MAX_LINES - (focused ? 1 : 0);
-    if (all.length <= budget) return { start: 0, end: all.length, hidden: 0 };
-    const size = budget - 1;
-    top = Math.max(0, Math.min(Math.max(top, selected - size + 1), selected, all.length - size));
-    return { start: top, end: top + size, hidden: all.length - size };
+    if (all.reduce((n, row) => n + height(row), 0) <= budget) return { start: 0, end: all.length, hidden: 0 };
+    const endAt = (start: number) => {
+      let used = 0;
+      let end = start;
+      while (end < all.length && used + height(all[end]) <= budget - 1) used += height(all[end++]);
+      return end;
+    };
+    top = Math.min(top, selected);
+    while (selected >= endAt(top) && top < selected) top++;
+    const end = endAt(top);
+    return { start: top, end, hidden: all.length - (end - top) };
   }
 
-  function line(row: Row, index: number, theme: Theme, width: number) {
+  function lines(row: Row, index: number, theme: Theme, width: number): string[] {
     const id = row.item?.id ?? MAIN;
-    const mark = (focused && index === selected ? "›" : " ") + (id === active() ? "●" : " ");
-    if (!row.item) return theme.fg("accent", mark) + " main";
+    const onScreen = row.shells ? row.shells.some((i) => i.id === viewer.active()) : id === active();
+    const mark = (focused && index === selected ? "›" : " ") + (onScreen ? "●" : " ");
+    if (row.shells) return [theme.fg("accent", mark) + ` ${row.shells.length} ${row.shells.length === 1 ? "shell" : "shells"} running in background`];
+    if (!row.item) return [theme.fg("accent", mark) + " main"];
     const item = row.item;
     const done = isFinished(item.status);
     const state =
@@ -223,14 +246,14 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
         ? "queued"
         : (done ? (item.status === "completed" ? "done " : `${item.status} `) : "") +
           duration((item.endedAt ?? registry.now()) - item.startedAt);
-    const activity = oneLine(done && item.result !== undefined ? item.result : safeActivity(item));
+    const activity = activityOf(item);
     // The label and status always stay: the label is shortened to leave room for the status (#138).
+    const name = oneLine(item.label);
     const head = `${"  ".repeat(row.depth)}${oneLine(item.kind)} `;
     const tail = ` · ${state}`;
     const room = Math.max(1, width - 3 - visibleWidth(head + tail));
-    let text = head + truncateToWidth(oneLine(item.label), room, "…") + tail;
-    // Then detail fields while they fit. Once one does not, it and everything to its right is
-    // dropped, the activity too; the activity alone may be cut if a few columns are left.
+    let text = head + truncateToWidth(name, room, "…") + tail;
+    // Detail fields drop from the right when narrow. Agent activity has its own linked line.
     const fits = (more: string) => 3 + visibleWidth(`${text} · ${more}`) <= width;
     let dropped = false;
     for (const field of safeDetail(item).map(oneLine).filter(Boolean)) {
@@ -240,9 +263,11 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
       }
       text += ` · ${field}`;
     }
-    if (activity && !dropped && fits(activity.slice(0, 6))) text += ` · ${activity}`;
+    if (item.kind !== "agent" && activity && !dropped && fits(activity.slice(0, 6))) text += ` · ${activity}`;
     const color = item.status === "failed" ? "error" : done ? "muted" : "text";
-    return theme.fg("accent", mark) + " " + theme.fg(color, text);
+    const out = [theme.fg("accent", mark) + " " + theme.fg(color, text)];
+    if (item.kind === "agent" && activity) out.push(theme.fg("muted", `${"  ".repeat(row.depth + 2)}└─ ${activity}`));
+    return out;
   }
 
   const view = {
@@ -252,7 +277,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
       const out: string[] = [];
       if (all.length > 1) {
         const { start, end, hidden } = window(all);
-        out.push(...all.slice(start, end).map((row, i) => line(row, start + i, theme, width)));
+        out.push(...all.slice(start, end).flatMap((row, i) => lines(row, start + i, theme, width)));
         if (hidden) out.push(theme.fg("dim", `   … ${hidden} more`));
         if (focused) out.push(theme.fg("dim", KEYS));
       }
@@ -265,7 +290,9 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     const all = current();
     if (all.length === 1) return undefined; // nothing is drawn
     const { start, end } = window(all);
-    const index = start + event.y;
+    let y = 0;
+    let index = start;
+    while (index < end && y + height(all[index]) <= event.y) y += height(all[index++]);
     if (index >= end) return undefined;
     selected = index;
     choose(all[index]);
@@ -273,10 +300,20 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     return { handled: true, render: true };
   });
 
+  const pickShell = (row: Row, title: string, action: (item: Item) => void) => {
+    const options = row.shells!.map((i) => `${oneLine(i.label)} · ${oneLine(i.id)}`);
+    void ctx.ui.select(title, options).then((choice) => {
+      const id = row.shells?.[options.indexOf(choice ?? "")]?.id;
+      const item = id && registry.get(id);
+      if (!done && item?.kind === "shell" && item.status === "running") action(item);
+    }, () => {});
+  };
+
   // Opens a row in the viewer, or goes back to the chat for the main row. Focus stays on the row (#136).
   const choose = (row: Row) => {
     focused = true;
-    if (row.item) viewer.open(row.item);
+    if (row.shells) pickShell(row, "Running shells", (item) => viewer.open(item));
+    else if (row.item) viewer.open(row.item);
     else viewer.close();
   };
 
@@ -336,10 +373,12 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
       registry.backgroundAll();
       return { consume: true };
     }
-    // The overlay covers FleetView and takes every other key.
-    if (current().length === 1 || viewer.overlay()) return undefined;
+    // Pickers and dialogs take their own keys, even when FleetView was focused before they opened.
+    if (current().length === 1 || viewer.overlay() || !editorFocused(tui)) return undefined;
     if (!focused) {
-      if (!(matchesKey(data, "down") || matchesKey(data, "left")) || ctx.ui.getEditorText() !== "") return undefined;
+      // No hijack: when a picker, panel or overlay owns the keys the editor is not
+      // focused, so Down/Left stay theirs (ask_user's panel keeps its arrows).
+      if (!(matchesKey(data, "down") || matchesKey(data, "left")) || ctx.ui.getEditorText() !== "" || !editorFocused(tui)) return undefined;
       focused = true;
       // The item open in the viewer, or main when none is.
       selected = Math.max(0, current().findIndex((r) => r.item && r.item.id === viewer.active()));
@@ -347,9 +386,18 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     else if (matchesKey(data, "ctrl+x")) {
       chord = true;
       return { consume: true };
-    } else if (matchesKey(data, "x")) stop(current()[selected]?.item);
-    else if (matchesKey(data, "up")) selected = Math.max(0, selected - 1);
-    else if (matchesKey(data, "down")) selected = Math.min(current().length - 1, selected + 1);
+    } else if (matchesKey(data, "x")) {
+      const row = current()[selected];
+      if (row.shells) pickShell(row, "Stop running shell", stop);
+      else stop(row.item);
+    }
+    else if (matchesKey(data, "up")) {
+      if (selected === 0) focused = false; // past the first row: back to the editor
+      else selected -= 1;
+    } else if (matchesKey(data, "down")) {
+      if (selected === current().length - 1) focused = false; // past the last row: back to the editor
+      else selected += 1;
+    }
     else if (matchesKey(data, "escape")) focused = false;
     else if (matchesKey(data, "enter")) choose(current()[selected]);
     else {

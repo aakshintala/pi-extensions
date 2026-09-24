@@ -70,15 +70,14 @@ pi.registerTool({
 ```
 
 - `toolRenderers` sets `renderShell: "self"`; partial results draw nothing and
-  errors always show as `⎿ Error: …`.
+  expanded errors show as `⎿ Error: …`.
 - Pieces for other layouts: `callLine`, `resultLines` (collapsed to 4 body
   lines, expanded capped at 200), `errorLines`, `unifiedDiff` (from old/new
   text, no file reads, skipped over 100,000 characters) and `diffBody`.
 - Colours come only from theme keys; every line fits the width it is given.
 
 **Groups** (#56, #133). Give a tool a `summary` and consecutive calls to such
-tools collapse into one live line, e.g. "Read 3 files, edited 2 files +442 −12
-· 1 failed". A run continues into the next assistant message when nothing is
+tools collapse into one live line, e.g. "Read 3 files, edited 2 files +442 −12". A run continues into the next assistant message when nothing is
 drawn between them:
 
 ```ts
@@ -86,12 +85,11 @@ summary: { verb: "edited", one: "file", lines: (args) => ({ added, removed }) } 
 summary: { verb: "updated", many: "todos" }                                     // no `one`: "updated todos"
 ```
 
-- The first call draws the summary; the others draw nothing. Failed calls always
-  show, drawn by the first call right under the summary, so a group has no blank
-  rows. Calls with images show themselves. Ctrl+O (`context.expanded`) or a click
-  on the group shows every call.
+- The first call draws the summary; the others draw nothing. Failed, cancelled
+  and image calls stay folded without extra text rows; Pi can still draw the image
+  itself. Ctrl+O (`context.expanded`) or a click shows every call and its errors.
 - `showHint(owner, toolCallId, hint)` (#139) shows session `owner`'s running call
-  outside its group, with a spinner and a dim `⎿ hint()` line, until the function
+  outside its group, with a static mark and a dim `⎿ hint()` line, until the function
   it returns is called; the call then folds back in. `hint()` is read on every
   draw, and while it returns nothing the call stays folded. The hint lives on the
   session's call, so sessions that reuse an id never share one; `ToolGroups.owner`
@@ -111,7 +109,7 @@ summary: { verb: "updated", many: "todos" }                                     
   a group is worked out from the calls already drawn. There is no registry of
   tools.
 - Groups belong to a `ToolGroups`, one per session. `extensions/tool-display`
-  creates it, feeds it from Pi's events and owns its spinner timer. Feed it every
+  creates it and feeds it from Pi's events. Feed it every
   message in order with `track(message)`, and each result with
   `settle(toolCallId, isError, result)`, then call `endRun()` when the agent run
   ends. While a message streams, pass `track(message, true)` for each update and
@@ -151,9 +149,9 @@ default line; a `null` notice sends nothing. An item's optional `detail()`
 returns fields FleetView shows after its status, such as an agent's model and
 tokens. See `extensions/fleet/README.md`.
 
-A finished item leaves `DECAY_MS` (30 s) after it finishes (#137). While it is
+A finished item leaves `DECAY_MS` (10 seconds) after it finishes (#137). While it is
 viewed (`fleet().viewing`), selected in FleetView (`fleet().selected`) or above a
-running item, it stays, and the 30 s count from when that ends. The clock
+running item, it stays. The 10 seconds start when that ends. The clock
 (`now`) and the timers (`timers`) are seams tests replace; a timer runs only
 while a finished item waits to leave.
 

@@ -104,14 +104,18 @@ export async function startTui(t, { replies = [], extensions = [], args = [], co
         () => readEvents().filter((e) => e === name).length >= n,
         () => `event ${name} x${n}; got [${readEvents()}]\n${screen()}`,
       ),
-    async waitForScreen(expected) {
+    // #104: a timeout names the step and the caller, and the assert below prints the
+    // final screen against the expected one, so the next flake arrives with data.
+    async waitForScreen(expected, step = "") {
       const lines = expected.replace(/^\n/, "").split("\n").map((l) => l.trimEnd());
       if (lines.length !== rows) throw new Error(`expected screen has ${lines.length} rows, pane has ${rows}`);
       const want = lines.join("\n");
+      const caller = (new Error().stack ?? "").split("\n").find((l) => l.includes(".test.mjs"))?.trim() ?? "";
+      const label = [step, caller].filter(Boolean).join(" ");
       try {
-        await until(() => screen() === want, () => "screen");
+        await until(() => screen() === want, () => `screen${label ? ` ${label}` : ""}`);
       } catch {
-        assert.equal(screen(), want);
+        assert.equal(screen(), want, `timed out waiting for screen${label ? ` ${label}` : ""}`);
       }
     },
   };

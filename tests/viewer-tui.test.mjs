@@ -23,15 +23,19 @@ const screen = (chat, fleet, { editor = "", footer = FOOTER, above = [], border 
 };
 // Under the rows while FleetView has focus (#141).
 const KEYS = " Enter to view · x to stop · ctrl+x ctrl+k to stop all agents";
-// FleetView rows for items a (shell build) and b (agent scout); `on` is the row on screen,
+// FleetView rows for items a (monitor build) and b (agent scout); `on` is the row on screen,
 // `sel` the row FleetView's focus is on (#136), which adds the keys line.
-const rows = (on, extra = {}, sel) => [
-  `${sel === "main" ? "›" : " "}${on === "main" ? "●" : " "} main`,
-  `${sel === "a" ? "›" : " "}${on === "a" ? "●" : " "} shell build · ${extra.a ?? "0s"}`,
-  `${sel === "b" ? "›" : " "}${on === "b" ? "●" : " "} agent scout · ${extra.b ?? "0s"}`,
-  ...(sel ? [KEYS] : []),
-];
-const logView = (lines) => [" shell build · 0s · esc back", ...lines.map((l) => ` ${l}`)];
+const rows = (on, extra = {}, sel) => {
+  const [state, activity] = (extra.b ?? "0s").split(" · ", 2);
+  return [
+    `${sel === "main" ? "›" : " "}${on === "main" ? "●" : " "} main`,
+    `${sel === "a" ? "›" : " "}${on === "a" ? "●" : " "} monitor build · ${extra.a ?? "0s"}`,
+    `${sel === "b" ? "›" : " "}${on === "b" ? "●" : " "} agent scout · ${state}`,
+    ...(activity ? [`    └─ ${activity}`] : []),
+    ...(sel ? [KEYS] : []),
+  ];
+};
+const logView = (lines) => [" monitor build · 0s · esc back", ...lines.map((l) => ` ${l}`)];
 const agentView = (lines, state = "0s") => [` agent scout · ${state} · esc back · enter steers`, " agent transcript", ...lines];
 
 async function start(t, { lines = ["one", "two", "three"], fullscreen = true, extensions = EXTENSIONS, before, ...options } = {}) {
@@ -51,7 +55,7 @@ async function start(t, { lines = ["one", "two", "three"], fullscreen = true, ex
   };
   await before?.(tui);
   await tui.fx(
-    { add: "a", kind: "shell", label: "build", log: tui.log },
+    { add: "a", kind: "monitor", label: "build", log: tui.log },
     { add: "b", kind: "agent", label: "scout", transcript: "agent transcript", steer: true },
   );
   return tui;
@@ -128,7 +132,7 @@ test("main-session output while a viewer is open lands in the main chat", async 
   await tui.waitForScreen(viewing(footer));
 
   tui.keys("Escape");
-  await tui.waitForScreen(screen(["", " ● shell build · 0s · build 42 passed", "", " noted"], rows("main"), { footer }));
+  await tui.waitForScreen(screen(["", " ● monitor build · 0s · build 42 passed", "", " noted"], rows("main"), { footer }));
 });
 
 test("a log viewer follows new output, pauses when scrolled up, and End jumps back", async (t) => {
@@ -136,10 +140,10 @@ test("a log viewer follows new output, pauses when scrolled up, and End jumps ba
   const tui = await start(t, { lines });
   // Finished items: no running-time timer redraws the screen, so only the log watcher does.
   await tui.fx({ finish: "a", status: "completed", result: "ok" }, { finish: "b", status: "completed", result: "ok" });
-  const done = [" ● main", "   shell build · done 0s · ok", "   agent scout · done 0s · ok"];
+  const done = [" ● main", "   monitor build · done 0s · ok", "   agent scout · done 0s", "    └─ ok"];
   await tui.waitForScreen(screen([], done));
   tui.keys("Down", "Down", "Enter");
-  const fleet = [...done.map((r) => r.replace(" ●", "  ")).slice(0, 1), " ● shell build · done 0s · ok", done[2]];
+  const fleet = [done[0].replace(" ●", "  "), " ● monitor build · done 0s · ok", ...done.slice(2)];
   const focused = [...fleet.map((r, i) => (i === 1 ? "›" + r.slice(1) : r)), KEYS]; // FleetView keeps focus on the opened row
   // The rows above the dock, the last one blank: the header and the first lines scrolled away.
   const tail = (all, rows = fleet) => screen([...all.slice(-(ROWS - 6 - rows.length)).map((l) => ` ${l}`), ""], rows);
@@ -152,27 +156,35 @@ test("a log viewer follows new output, pauses when scrolled up, and End jumps ba
 
   // Pi's transcript scroll view: scrolled up, the view stays put while output arrives.
   tui.keys("PageUp");
-  const top = [" shell build · done 0s · esc back", ...lines.slice(0, 13).map((l) => ` ${l}`)];
-  const paused = screen([...top.slice(0, -1), " line 13                 ↓ Jump to latest message · End", ""], focused);
+  const top = [" monitor build · done 0s · esc back", ...lines.slice(0, 12).map((l) => ` ${l}`)];
+  const paused = screen([...top.slice(0, -1), " line 12                 ↓ Jump to latest message · End", ""], focused);
   await tui.waitForScreen(paused);
   appendFileSync(tui.log, "line 22\n");
   // A new row redraws the screen, and each redraw reads the log first. Typing the command leaves FleetView.
   await tui.fx({ add: "c", kind: "monitor", label: "tick", status: "queued" });
   const withC = [...fleet, "   monitor tick · queued"];
-  // FleetView traded the keys line for a row, so the view keeps its height; it still starts at the top.
-  await tui.waitForScreen(screen([...top.slice(0, -1), " line 13                 ↓ Jump to latest message · End", ""], withC));
+  // The resized chat may preserve the header or scroll it off by one line.
+  const shifted = [...lines.slice(0, 12).map((l) => ` ${l}`), " line 13                 ↓ Jump to latest message · End", ""];
+  const pausedWithC = screen([...top.slice(0, -1), " line 12                 ↓ Jump to latest message · End", ""], withC);
+  const shiftedWithC = screen(shifted, withC);
+  const waitPaused = async () => {
+    const expected = [pausedWithC, shiftedWithC].map((s) => s.replace(/^\n/, ""));
+    for (let i = 0; i < 100 && !expected.includes(tui.screen()); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(expected.includes(tui.screen()), `unexpected paused screen:\n${tui.screen()}`);
+  };
+  await waitPaused();
 
   tui.keys("End");
   await tui.waitForScreen(tail([...followed, "line 22"], withC));
 
   // Reopened after leaving it scrolled up, the viewer follows the end again.
   tui.keys("PageUp");
-  await tui.waitForScreen(screen([...top.slice(0, -1), " line 13                 ↓ Jump to latest message · End", ""], withC));
+  await waitPaused();
   tui.keys("Escape", "Down", "Down", "Enter");
   await tui.waitForScreen(tail([...followed, "line 22"], [...focused.slice(0, -1), "   monitor tick · queued", KEYS]));
 });
 
-test("typing while an agent is open steers it and echoes in the viewer; a shell takes no steering", async (t) => {
+test("typing while an agent is open steers it and echoes in the viewer; a monitor takes no steering", async (t) => {
   const tui = await start(t);
   tui.keys("Down", "Down", "Down", "Enter");
   await tui.waitForScreen(screen(agentView([]), rows("b", {}, "b")));
@@ -189,7 +201,7 @@ test("typing while an agent is open steers it and echoes in the viewer; a shell 
   tui.keys("Enter");
   await tui.waitForScreen(
     screen(
-      [...logView(["one", "two", "three"]), " shell build takes no steering. Esc returns to the main chat."],
+      [...logView(["one", "two", "three"]), " monitor build takes no steering. Esc returns to the main chat."],
       rows("a", { b: "0s · steered: go left" }),
     ),
   );
@@ -202,29 +214,29 @@ test("typing while an agent is open steers it and echoes in the viewer; a shell 
 
 test("file watchers are released when the viewer closes, switches or the session ends", async (t) => {
   const tui = await start(t);
-  await tui.fx({ add: "c", kind: "shell", label: "lint", log: tui.log });
+  await tui.fx({ add: "c", kind: "monitor", label: "lint", log: tui.log });
   await tui.watchers(0);
   tui.keys("Down", "Down", "Enter");
-  await tui.waitForScreen(screen(logView(["one", "two", "three"]), [...rows("a", {}, "a").slice(0, -1), "   shell lint · 0s", KEYS]));
+  await tui.waitForScreen(screen(logView(["one", "two", "three"]), [...rows("a", {}, "a").slice(0, -1), "   monitor lint · 0s", KEYS]));
   await tui.watchers(1);
   tui.keys("Down", "Down", "Down", "Enter"); // back into FleetView on build, then switch to lint
-  await tui.waitForScreen(screen([" shell lint · 0s · esc back", " one", " two", " three"], [...rows(), "›● shell lint · 0s", KEYS]));
+  await tui.waitForScreen(screen([" monitor lint · 0s · esc back", " one", " two", " three"], [...rows(), "›● monitor lint · 0s", KEYS]));
   await tui.watchers(1);
   tui.keys("Escape");
-  await tui.waitForScreen(screen([], [...rows("main"), "   shell lint · 0s"]));
+  await tui.waitForScreen(screen([], [...rows("main"), "   monitor lint · 0s"]));
   await tui.watchers(0);
 
   tui.keys("Down", "Down", "Enter");
-  await tui.waitForScreen(screen(logView(["one", "two", "three"]), [...rows("a", {}, "a").slice(0, -1), "   shell lint · 0s", KEYS]));
+  await tui.waitForScreen(screen(logView(["one", "two", "three"]), [...rows("a", {}, "a").slice(0, -1), "   monitor lint · 0s", KEYS]));
   tui.type("/new");
   tui.keys("Enter");
   await tui.waitForEvent("session_start", 2);
-  await tui.waitForScreen(screen([], [...rows("main"), "   shell lint · 0s"]));
+  await tui.waitForScreen(screen([], [...rows("main"), "   monitor lint · 0s"]));
   await tui.watchers(0);
 });
 
 // The overlay: the header, 22 log rows and the steer line fill all 24 rows.
-const overlay = (shown, { bottom = "›", below = 0, head = " shell build · 0s · esc back" } = {}) =>
+const overlay = (shown, { bottom = "›", below = 0, head = " monitor build · 0s · esc back" } = {}) =>
   "\n" + [head + (below ? `  ↓ ${below} below · End` : ""), ...shown.map((l) => ` ${l}`), bottom].join("\n");
 
 test("when the chat lookup fails, the viewer opens as a full-size overlay", async (t) => {
@@ -250,7 +262,7 @@ test("when the chat lookup fails, the viewer opens as a full-size overlay", asyn
   tui.type("hi");
   await tui.waitForScreen(overlay(all.slice(0, 22), { bottom: "› hi", below: 10 }));
   tui.keys("Enter");
-  const echo = "shell build takes no steering. Esc returns to the main chat.";
+  const echo = "monitor build takes no steering. Esc returns to the main chat.";
   await tui.waitForScreen(overlay(all.slice(0, 22), { below: 11 }));
 
   tui.keys("End");
@@ -365,7 +377,7 @@ for (const [order, extensions] of [
   ["fleet first", [...EXTENSIONS, QUEUE, GATE]],
   ["queue first", [QUEUE, ...EXTENSIONS, GATE]],
 ]) {
-  test(`editing a queued row while viewing an agent saves the row (${order})`, async (t) => {
+  test(`retrieving a queued row while viewing an agent resubmits only the edit (${order})`, async (t) => {
     const gate = [{ type: "toolCall", id: "g1", name: "gate", arguments: {} }];
     const tui = await start(t, {
       extensions,
@@ -386,9 +398,9 @@ for (const [order, extensions] of [
     tui.keys("Escape"); // back to the editor
     await tui.waitForScreen(screen(agentView([]), rows("b"), opts([" Steering (1) · next turn", "   first"])));
     tui.keys("M-Up"); // edit the row there
-    await tui.waitForScreen(screen(agentView([]), rows("b"), opts([" Steering (1) · next turn", " › first"], "first")));
+    await tui.waitForScreen(screen(agentView([]), rows("b"), opts([], "first")));
     tui.type(" two");
-    tui.keys("Enter"); // saves the row; the agent gets nothing
+    tui.keys("Enter"); // submits the edited text once; the agent gets nothing yet
     await tui.waitForScreen(screen(agentView([]), rows("b"), opts([" Steering (1) · next turn", "   first two"])));
   });
 }

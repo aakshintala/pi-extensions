@@ -20,7 +20,8 @@ function fakeUi(scripts, frames, onOpen) {
   const theme = { fg: (_c, s) => s, bg: (_c, s) => s, bold: (s) => s };
   const custom = (factory) =>
     new Promise((resolve) => {
-      const component = factory({ requestRender() {} }, theme, undefined, resolve);
+      // The panel embeds Pi's editor, which reads the terminal height on render.
+      const component = factory({ requestRender() {}, terminal: { rows: 24 } }, theme, undefined, resolve);
       const renders = [component.render(WIDTH)];
       for (const key of scripts.shift()) component.handleInput(key), renders.push(component.render(WIDTH));
       frames.push(renders.flat());
@@ -57,10 +58,10 @@ test("result lines for chosen, typed, multi-select with text, skipped, note and 
       [
         K.down, K.down, K.down, ..."not A", K.enter, // typed on the free-text row
         K.space, K.down, K.down, K.space, K.down, ..."and more", K.enter, // A, C + text
-        K.tab, // skip "three" into review
+        K.tab, K.up, // review opens on Submit; up to the note
         ..."be quick", K.enter, K.enter, // note, then Submit
       ],
-      [K.tab, K.tab, K.tab, K.down, K.enter], // skip everything; review Submit
+      [K.tab, K.tab, K.tab, K.enter], // skip everything; review opens on Submit
       [K.esc],
     ],
   );
@@ -73,7 +74,7 @@ test("result lines for chosen, typed, multi-select with text, skipped, note and 
 });
 
 test("review jumps back to a question to change its answer", async (t) => {
-  const session = await ask(t, [[Q("one"), Q("two")]], [[K.enter, K.enter, K.up, K.up, K.enter, K.down, K.enter, K.enter, K.enter, K.enter]]);
+  const session = await ask(t, [[Q("one"), Q("two")]], [[K.enter, K.enter, K.up, K.up, K.up, K.enter, K.down, K.enter, K.enter, K.enter]]);
   // A, A, then from review up to "one", Enter jumps back; B, "two" again, note row, Submit.
   assert.deepEqual(results(session), [[false, "one: B\ntwo: A"]]);
 });

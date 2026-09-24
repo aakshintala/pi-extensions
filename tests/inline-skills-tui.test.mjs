@@ -145,21 +145,25 @@ test("an editor swapped in after start gets the wrap", async (t) => {
 });
 
 test("the ask_user panel in the editor slot is left alone", async (t) => {
+  const RULE = "─".repeat(80);
   const questions = [{ question: "Which db?", header: "db", options: [{ label: "Alpha" }, { label: "Beta" }] }];
   const call = [{ type: "toolCall", id: "c1", name: "ask_user", arguments: { questions } }];
   const tui = await start(t, { extensions: [ASK_USER, EXT], replies: [call, "done"] });
   tui.type("ask");
   tui.keys("Enter");
-  const above = ["", " ask", "", "", "", " ask_user", "", ""];
-  const panel = (first, last) =>
-    "\n" + [...above, "Which db?", "", first, "  2. Beta", last, "", "  ↑↓ move · Enter choose · Esc cancel", "(footer)", ...Array(8).fill("")].join("\n");
-  await tui.waitForScreen(panel("→ 1. Alpha", "  3. Type your own answer"));
+  const above = ["", " ask", "", "", " ⏺ Ask User(db)", "", RULE];
+  const panel = (body) =>
+    "\n" +
+    [...above, "Which db?", "", ...body, "", "  ↑↓ move · Enter choose · Esc cancel", RULE, "(footer)", ...Array(24 - (above.length + 2 + body.length + 4)).fill("")].join(
+      "\n",
+    );
+  await tui.waitForScreen(panel(["→ 1. Alpha", "  2. Beta", "  3. Type your own answer"]));
   tui.keys("Up");
   tui.type("x /ab");
-  await tui.waitForScreen(panel("  1. Alpha", "→ 3. x /ab"));
+  await tui.waitForScreen(panel(["  1. Alpha", "  2. Beta", "→ 3. x /ab"]));
   tui.keys("Enter");
   await tui.waitForEvent("agent_end");
-  const done = ["", " ask", "", "", "", " ask_user", ' db: "x /ab"', "", "", " done", ""];
+  const done = ["", " ask", "", "", " ⏺ Ask User(db)", '   ⎿  db: "x /ab"', "", " done", ""];
   await tui.waitForScreen(screen(done, ""));
   tui.type("please /gr");
   await tui.waitForScreen(screen(done, "please /gr", GRI));

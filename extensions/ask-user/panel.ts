@@ -1,7 +1,17 @@
-// The ask_user bottom panel: one option list per question, the last row an
-// inline free-text field; a review tab (answers + note) when there are 2+ questions.
-import type { Theme } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, Input, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
+// The ask_user bottom panel: one option list per question, the last row a free-text
+// field; a review tab (answers + note) when there are 2+ questions.
+import { DynamicBorder, type Theme } from "@earendil-works/pi-coding-agent";
+import {
+  Editor,
+  getKeybindings,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+  type Component,
+  type TUI,
+} from "@earendil-works/pi-tui";
+import { oneLine } from "../../shared/text/index.ts";
 
 export type Question = { question: string; header: string; options?: { label: string; description?: string }[]; multiSelect?: boolean };
 export type Answer = { labels: string[]; text?: string };
@@ -9,17 +19,36 @@ export type Outcome = { cancelled: true } | { cancelled: false; answers: (Answer
 
 const TEXT_ROW = "Type your own answer";
 
-export function panel(questions: Question[], theme: Theme, render: () => void, done: (o: Outcome) => void): Component {
+export function panel(tui: TUI, questions: Question[], theme: Theme, render: () => void, done: (o: Outcome) => void): Component {
   const n = questions.length;
   const tabs = n > 1 ? n + 1 : 1; // the last tab is review
-  const input = (placeholder: string) => new Input({ prompt: "", placeholder, placeholderStyle: (s) => theme.fg("dim", s) });
-  const state = questions.map(() => ({ cursor: 0, picked: new Set<number>(), chosen: null as Answer | null, input: input(TEXT_ROW) }));
-  const note = input("Add a note to the agent (optional)");
+  // The free-text fields are Pi's own editor: long answers wrap and the box grows,
+  // just like the regular editor. No autocomplete provider, so no completions fire.
+  // Enter never reaches the editor (the panel confirms first) and with disableSubmit
+  // it could not submit anyway, so answers stay one line (see `text`).
+  const editorTheme = {
+    borderColor: (s: string) => theme.fg("border", s),
+    selectList: {
+      selectedPrefix: (s: string) => theme.fg("accent", s),
+      selectedText: (s: string) => theme.fg("accent", s),
+      description: (s: string) => theme.fg("muted", s),
+      scrollInfo: (s: string) => theme.fg("dim", s),
+      noMatch: (s: string) => theme.fg("muted", s),
+    },
+  };
+  const input = () => {
+    const editor = new Editor(tui, editorTheme);
+    editor.disableSubmit = true;
+    return editor;
+  };
+  const state = questions.map(() => ({ cursor: 0, picked: new Set<number>(), chosen: null as Answer | null, editor: input() }));
+  const note = input();
+  const border = new DynamicBorder((s: string) => theme.fg("border", s));
   let tab = 0;
-  let row = n; // review cursor: 0..n-1 answers, n note, n+1 submit
+  let row = n + 1; // review cursor: 0..n-1 answers, n note, n+1 submit; review opens on Submit
 
   const opts = (i: number) => questions[i].options ?? [];
-  const text = (i: number) => state[i].input.getValue().trim();
+  const text = (i: number) => oneLine(state[i].editor.getText());
   const answer = (i: number): Answer | null => {
     if (!questions[i].multiSelect) return state[i].chosen;
     const labels = opts(i).filter((_, k) => state[i].picked.has(k)).map((o) => o.label);
@@ -27,12 +56,12 @@ export function panel(questions: Question[], theme: Theme, render: () => void, d
   };
   const show = (a: Answer | null) => (a ? [...a.labels, ...(a.text ? [`"${a.text}"`] : [])].join(", ") : "skipped");
   const finish = () => {
-    const t = note.getValue().trim();
+    const t = oneLine(note.getText());
     done({ cancelled: false, answers: questions.map((_, i) => answer(i)), ...(t ? { note: t } : {}) });
   };
   const go = (to: number) => {
     tab = (to + tabs) % tabs;
-    if (tab === n) row = n;
+    if (tab === n) row = n + 1;
   };
   const advance = () => (n === 1 ? finish() : go(tab + 1));
 
@@ -49,7 +78,7 @@ export function panel(questions: Question[], theme: Theme, render: () => void, d
       else if (text(tab)) s.chosen = { labels: [], text: text(tab) };
       else if (n > 1) return; // with one question, Enter on the empty row skips it
       advance();
-    } else if (onText) s.input.handleInput(data);
+    } else if (onText) s.editor.handleInput(data);
     else if (questions[tab].multiSelect && matchesKey(data, "space")) {
       s.picked.has(s.cursor) ? s.picked.delete(s.cursor) : s.picked.add(s.cursor);
     }
@@ -64,12 +93,21 @@ export function panel(questions: Question[], theme: Theme, render: () => void, d
   }
 
   // Left/Right move the caret while the focused text field holds text.
-  const editing = () => (tab === n ? row === n && note.getValue() : state[tab].cursor === opts(tab).length && state[tab].input.getValue());
+  const editing = () => (tab === n ? row === n && note.getText() : state[tab].cursor === opts(tab).length && state[tab].editor.getText());
 
-  const field = (inp: Input, focused: boolean, width: number, placeholder: string) => {
-    inp.focused = focused;
-    if (focused) return inp.render(width)[0];
-    return inp.getValue() || theme.fg("dim", placeholder);
+  // A text field: the editor's wrapped lines inline with the lead, so the text
+  // starts on the option's own row and the box grows below it. Pi's Editor always
+  // draws its top/bottom borders; the panel uses none, so they are dropped here.
+  // Unfocused, a field with text is one truncated line; empty, a dim hint.
+  const field = (editor: Editor, focused: boolean, lead: string, width: number) => {
+    editor.focused = focused;
+    const v = oneLine(editor.getText());
+    if (!focused) return [lead + (v ? truncateToWidth(v, width - visibleWidth(lead)) : theme.fg("dim", TEXT_ROW))];
+    const indent = visibleWidth(lead);
+    const rendered = editor.render(Math.max(1, width - indent));
+    const body = (rendered.length >= 2 ? rendered.slice(1, -1) : rendered).map((l) => l.trimEnd());
+    const pad = " ".repeat(indent);
+    return body.map((l, i) => (i === 0 ? lead + l : pad + l));
   };
   const pointer = (on: boolean) => (on ? theme.fg("accent", "→ ") : "  ");
 
@@ -88,7 +126,12 @@ export function panel(questions: Question[], theme: Theme, render: () => void, d
     const k = opts(tab).length;
     const lead = pointer(s.cursor === k) + (q.multiSelect ? "    " : `${k + 1}. `);
     const tick = !q.multiSelect && s.chosen?.text ? theme.fg("success", " ✓") : "";
-    lines.push(lead + field(s.input, s.cursor === k, width - visibleWidth(lead), TEXT_ROW) + tick);
+    if (s.cursor === k) {
+      for (const l of field(s.editor, true, lead, width)) lines.push(l);
+    } else {
+      const v = text(tab);
+      lines.push(lead + (v ? truncateToWidth(v, width - visibleWidth(lead)) : theme.fg("dim", TEXT_ROW)) + tick);
+    }
     const choose = q.multiSelect ? "Space toggle · Enter confirm" : "Enter choose";
     lines.push("", theme.fg("dim", `  ↑↓ move · ${choose}${n > 1 ? " · Tab/←→ switch" : ""} · Esc cancel`));
     return lines;
@@ -97,7 +140,13 @@ export function panel(questions: Question[], theme: Theme, render: () => void, d
   function reviewLines(width: number): string[] {
     const lines = [theme.bold("Review your answers"), ""];
     questions.forEach((q, i) => lines.push(`${pointer(row === i)}${theme.fg("muted", `${q.header}:`)} ${show(answer(i))}`));
-    lines.push("", pointer(row === n) + field(note, row === n, width - 2, "Add a note to the agent (optional)"));
+    lines.push("");
+    if (row === n) {
+      for (const l of field(note, true, pointer(true), width)) lines.push(l);
+    } else {
+      const v = oneLine(note.getText());
+      lines.push(pointer(false) + (v || theme.fg("dim", "Add a note to the agent (optional)")));
+    }
     lines.push(pointer(row === n + 1) + theme.fg(row === n + 1 ? "accent" : "text", "Submit answers"));
     lines.push("", theme.fg("dim", "  Enter on an answer to change it · Tab/←→ switch · Esc cancel"));
     return lines;
@@ -109,9 +158,13 @@ export function panel(questions: Question[], theme: Theme, render: () => void, d
         i === tab ? theme.fg("accent", theme.bold(`[${label}]`)) : theme.fg("muted", ` ${label} `),
       );
       const body = tab === n ? reviewLines(width) : questionLines(width);
-      return [...(n > 1 ? [` ${bar.join(" ")}`, ""] : []), ...body].map((l) => truncateToWidth(l, width));
+      // The panel draws its own border: bare custom components render borderless.
+      const framed = [...border.render(width), ...(n > 1 ? [` ${bar.join(" ")}`, ""] : []), ...body, theme.fg("border", "─".repeat(width))];
+      return framed.map((l) => truncateToWidth(l, width));
     },
-    invalidate() {},
+    invalidate() {
+      border.invalidate();
+    },
     handleInput(data) {
       if (getKeybindings().matches(data, "tui.select.cancel")) return done({ cancelled: true });
       const tabKey = matchesKey(data, "tab") || matchesKey(data, "shift+tab");

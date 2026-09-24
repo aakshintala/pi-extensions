@@ -12,13 +12,16 @@ follows the branch you are on. Nothing is written to the repository.
 
 ## Widget
 
-Above the editor: ✔ completed, ◼ in progress, ◻ pending. Completed items
-collapse into one "✔ N done" line; more than 7 open items end in "… N more".
-Each item is one row: newlines become spaces, control characters are dropped
-and long text is truncated.
-Hidden when the list is empty, and a fully completed list is hidden once you
-send your next prompt. Subagent sessions (those holding the `rig.subagent`
-entry) keep their own list and draw no widget.
+When the list has items, one row above the editor shows the current step and
+counts (`◼ Running tests · 2 pending · 1 done`). Click it in fullscreen mode or
+use `/todos` to expand or collapse the list inline. Expanded items use ✔ done,
+◼ in progress and ◻ pending; more than 7 open items end in `… N more`.
+Newlines become spaces and long text is truncated. Updates keep the widget to
+one row while collapsed.
+
+The widget is hidden when the list is empty. A fully completed list is hidden
+after your next prompt; `/todos` can show it again. Subagent sessions (those
+holding the `rig.subagent` entry) keep their own list and draw no widget.
 
 ## Reminder
 
@@ -28,4 +31,5 @@ session.
 
 ## Commands, keys, settings
 
-None.
+- `/todos`: expand or collapse the widget (also works without mouse support).
+- No keys or settings.

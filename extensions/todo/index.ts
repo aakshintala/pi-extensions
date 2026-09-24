@@ -1,7 +1,7 @@
 // todo_write and its widget (spec #28). The list lives in todo_write result details
 // and is rebuilt from the active branch; nothing is written to disk.
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { MouseRegion, truncateToWidth } from "@earendil-works/pi-tui";
 import { isChild } from "../../shared/subagent/index.ts";
 import { oneLine } from "../../shared/text/index.ts"; // item text is model input
 import { resultText, toolRenderers } from "../../shared/tool-display/index.ts";
@@ -13,6 +13,13 @@ const STATUSES: Status[] = ["pending", "in_progress", "completed"];
 const MARK = { completed: "✔", in_progress: "◼", pending: "◻" };
 const MAX_OPEN_ROWS = 7; // open items shown before "… N more"
 
+export const compactLine = (todos: Todo[]): string => {
+  const current = todos.find((t) => t.status === "in_progress") ?? todos.find((t) => t.status === "pending");
+  const pending = todos.filter((t) => t.status === "pending").length;
+  const done = todos.filter((t) => t.status === "completed").length;
+  const label = current ? `${MARK[current.status]} ${truncateToWidth(oneLine(current.text), 32)}` : `${MARK.completed} ${done} done`;
+  return [label, pending ? `${pending} pending` : "", current && done ? `${done} done` : ""].filter(Boolean).join(" · ");
+};
 
 export const widgetLines = (todos: Todo[]): string[] => {
   const done = todos.filter((t) => t.status === "completed").length;
@@ -28,16 +35,25 @@ const hasToolCall = (m: any) => Array.isArray(m?.content) && m.content.some((b: 
 export default function (pi: ExtensionAPI) {
   let todos: Todo[] = [];
   let hidden = false; // a fully completed list, hidden once the next prompt is sent
+  let expanded = false;
 
   const allDone = () => todos.length > 0 && todos.every((t) => t.status === "completed");
 
   const draw = (ctx: ExtensionContext) => {
     if (ctx.mode !== "tui" || isChild(ctx)) return;
-    const lines = widgetLines(todos);
+    const lines = expanded ? widgetLines(todos) : [compactLine(todos)];
     ctx.ui.setWidget(
       "todo",
       todos.length && !hidden
-        ? () => ({ render: (width: number) => lines.map((l) => ` ${truncateToWidth(l, width - 2)}`), invalidate() {} })
+        ? (tui) => new MouseRegion(
+            { render: (width: number) => width < 1 ? [] : lines.map((l) => truncateToWidth(` ${l}`, width)), invalidate() {} },
+            (event) => {
+              if (event.type !== "click" || event.button !== "left") return undefined;
+              expanded = !expanded;
+              draw(ctx);
+              return { handled: true, render: true };
+            },
+          )
         : undefined,
     );
   };
@@ -55,10 +71,21 @@ export default function (pi: ExtensionAPI) {
       }
     }
     hidden = allDone() && promptedSince;
+    expanded = false;
     draw(ctx);
   };
   pi.on("session_start", rebuild);
   pi.on("session_tree", rebuild);
+
+  pi.registerCommand("todos", {
+    description: "Expand or collapse the TODO list above the editor",
+    handler: async (_args, ctx) => {
+      if (ctx.mode !== "tui" || isChild(ctx) || !todos.length) return;
+      expanded = hidden || !expanded;
+      hidden = false;
+      draw(ctx);
+    },
+  });
 
   pi.on("before_agent_start", (_event, ctx) => {
     if (allDone() && !hidden) {

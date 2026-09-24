@@ -1,5 +1,5 @@
 // Tool display (#55) in a real pi: the built-in read, edit and write calls are
-// grouped into one summary with the failed call's error visible, and Ctrl+O shows
+// grouped into one summary with failures folded, and Ctrl+O shows
 // each call in the shared style with the edit diff taken from the call's arguments.
 // After /new the new session is decorated exactly once.
 import { test } from "node:test";
@@ -24,7 +24,8 @@ const REPLIES = [
   "Done.",
 ];
 
-// Collapsed, failed calls sit right under the summary, with no blank rows (#133).
+// Collapsed, failures stay folded without a failure alert.
+// Expanded (Ctrl+O), each failed call draws its own error rows.
 const A_FAILED = ` ⏺ Edit(a.txt)
    ⎿  Error: Could not find the exact text in a.txt. The old text must match
       exactly including all whitespace and newlines.`;
@@ -34,8 +35,7 @@ const calls = (prompt, summary, failures) => `
  ${prompt}
 
 
- ⏺ ${summary}
-${failures}
+ ⏺ ${summary}${failures}
 
  Done.
 `;
@@ -43,7 +43,7 @@ ${failures}
 const fill = (s) => s + "\n".repeat(41 - s.split("\n").length);
 const RULE = "─".repeat(80);
 
-test("tool display: decorated built-ins grouped, visible error, Ctrl+O shows each call and the edit diff from arguments", async (t) => {
+test("tool display: decorated built-ins grouped, errors folded, Ctrl+O shows each call and the edit diff from arguments", async (t) => {
   const tui = await startTui(t, { extensions: [EXTENSION], args: ["--tools", "read,edit,write"], rows: 40, replies: REPLIES });
   t.after(() => assert.deepEqual(liveGroup(tui.pid), []));
   cpSync(WORKSPACE, tui.cwd, { recursive: true });
@@ -51,7 +51,7 @@ test("tool display: decorated built-ins grouped, visible error, Ctrl+O shows eac
   tui.type("go");
   tui.keys("Enter");
   await tui.waitForEvent("agent_end");
-  await tui.waitForScreen(fill(`${calls("go", "Read 1 file, edited 2 files +3 −2, wrote 1 file +6 · 1 failed", A_FAILED)}
+  await tui.waitForScreen(fill(`${calls("go", "Read 1 file, edited 2 files +3 −2, wrote 1 file +6", "")}
 ${RULE}
 
 ${RULE}
@@ -105,14 +105,7 @@ ${RULE}
   tui.type("again");
   tui.keys("Enter");
   await tui.waitForEvent("agent_end", 2);
-  await tui.waitForScreen(fill(`${calls(
-    "again",
-    "Read 1 file, edited 2 files, wrote 1 file +6 · 2 failed",
-    ` ⏺ Edit(b.txt)
-   ⎿  Error: Could not find the exact text in b.txt. The old text must match
-      exactly including all whitespace and newlines.
-${A_FAILED}`,
-  )}
+  await tui.waitForScreen(fill(`${calls("again", "Read 1 file, edited 2 files, wrote 1 file +6", "")}
 
  ✓ New session started
 

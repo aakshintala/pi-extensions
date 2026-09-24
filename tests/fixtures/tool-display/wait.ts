@@ -7,7 +7,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { toolRenderers } from "../../../shared/tool-display/index.ts";
 
 export default function (pi: ExtensionAPI) {
-  // A still working indicator, so a running screen differs only in the group spinner.
+  // A still working indicator, so a running screen differs only in the group's ⏺ line.
   pi.on("session_start", (_e, ctx) => ctx.ui.setWorkingIndicator({ frames: ["~"] }));
   pi.registerTool({
     name: "wait",

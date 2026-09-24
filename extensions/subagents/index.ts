@@ -615,6 +615,7 @@ export default function (pi: ExtensionAPI) {
     ...toolRenderers({
       title: "Agent",
       arg: (args: any) => oneLine(args?.description ?? ""),
+      summary: { verb: "started", one: "subagent" },
       result: (r: any) => ({ summary: oneLine(resultText(r)), body: [] }),
     }),
   });
@@ -636,6 +637,7 @@ export default function (pi: ExtensionAPI) {
     ...toolRenderers({
       title: "Message",
       arg: (args: any) => oneLine(args?.id ?? ""),
+      summary: { verb: "messaged", one: "subagent" },
       result: (r: any) => ({ summary: oneLine(resultText(r)), body: [] }),
     }),
   } as any);
@@ -663,6 +665,7 @@ export default function (pi: ExtensionAPI) {
     ...toolRenderers({
       title: "Stop",
       arg: (args: any) => oneLine(args?.id ?? ""),
+      summary: { verb: "stopped", one: "subagent" },
       result: (r: any) => ({ summary: oneLine(resultText(r)), body: [] }),
     }),
   } as any);

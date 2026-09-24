@@ -57,6 +57,8 @@ test("a saved transcript groups the same way as the live session", async (t) => 
   });
   writeFileSync(join(cwd, "a.txt"), "one\ntwo");
   await session.prompt("go");
+  // Scripted turns emit no agent_end, so end the run as Pi would: summaries rest on dots.
+  await session.extensionRunner.emit({ type: "agent_end", messages: [] });
   const results = new Map(session.messages.filter((m) => m.role === "toolResult").map((m) => [m.toolCallId, m]));
   const calls = session.messages.find((m) => m.role === "assistant").content.filter((b) => b.type === "toolCall");
   // Pi's chat builds one component per call, in order, and gives it the saved result.
@@ -72,8 +74,8 @@ test("a saved transcript groups the same way as the live session", async (t) => 
 
   const live = transcript();
   // The failed call is drawn by the group's first call, with no blank row (#133).
-  assert.deepEqual(live.slice(0, 4), ["", " ⏺ Read 2 files · 1 failed", " ⏺ Read(missing.txt)", `   ⎿  Error: ENOENT: no such file or directory, access 'missing.txt'`]);
-  assert.deepEqual(live.slice(4, 6), ["", " ⏺ Read 1 file"]);
+  assert.deepEqual(live.slice(0, 3), ["", " ⏺ Read 2 files", ""]);
+  assert.deepEqual(live.slice(3, 5), [" ⏺ Read 1 file", ""]);
   assert.deepEqual(live.slice(-2), ["", " ⏺ Read 1 file"]); // ls, not grouped, splits the run
   // As on /resume: groups are forgotten, then registered again from the saved branch.
   await session.extensionRunner.emit({ type: "session_shutdown", reason: "resume" });
@@ -95,6 +97,8 @@ test("a run spans tool-only responses until the next prompt, the same live and a
   writeFileSync(join(cwd, "a.txt"), "one");
   await session.prompt("first");
   await session.prompt("second");
+  // Scripted turns emit no agent_end, so end the runs as Pi would: summaries rest on dots.
+  await session.extensionRunner.emit({ type: "agent_end", messages: [] });
   const results = new Map(session.messages.filter((m) => m.role === "toolResult").map((m) => [m.toolCallId, m]));
   const calls = session.messages.filter((m) => m.role === "assistant").flatMap((m) => m.content.filter((b) => b.type === "toolCall"));
   // Pi's chat builds every component, then draws them.
@@ -126,6 +130,7 @@ test("rig tools count in a group summary with their own verbs", async (t) => {
   ].map(([name, args], i) => ({ type: "toolCall", id: `r${i}`, name, arguments: args }));
   groups.track({ role: "assistant", content: calls });
   for (const c of calls) groups.settle(c.id, false, { content: [] });
+  groups.endRun(); // the turn is over: the summary rests on the dot
   const components = calls.map((c) => new ToolExecutionComponent(c.name, c.id, c.arguments, {}, session.getToolDefinition(c.name), { requestRender() {} }, cwd));
   assert.deepEqual(components.flatMap((c) => c.render(80)).map(plain), ["", " ⏺ Searched 2 patterns, found files, updated todos, checked quotas"]);
 });
@@ -162,7 +167,7 @@ test("an aborted turn reads the same live and after the session is reopened", as
     return components.flatMap((c) => c.render(80)).map(plain);
   };
   const live = transcript();
-  assert.deepEqual(live, ["", " ⏺ Read 1 file, waited on 2 files · 2 cancelled"]);
+  assert.deepEqual(live, ["", " ⏺ Read 1 file, waited on 2 files"]);
   await session.extensionRunner.emit({ type: "session_shutdown", reason: "resume" });
   await session.extensionRunner.emit({ type: "session_start", reason: "resume" });
   assert.deepEqual(transcript(), live);
@@ -195,7 +200,7 @@ test("Esc during a shell command reads as cancelled, live and after the session 
     return c.render(80).map(plain);
   };
   const live = transcript();
-  assert.deepEqual(live, ["", " ⏺ Ran 1 shell command · 1 cancelled"]);
+  assert.deepEqual(live, ["", " ⏺ Ran 1 shell command"]);
   await session.extensionRunner.emit({ type: "session_shutdown", reason: "resume" });
   await session.extensionRunner.emit({ type: "session_start", reason: "resume" });
   assert.deepEqual(transcript(), live);

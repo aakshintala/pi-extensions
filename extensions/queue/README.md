@@ -22,25 +22,20 @@ native queue:
   editor has focus.
   Typed while the agent is idle, they run at once as usual.
 
-Each group is delivered first in, first out, following Pi's `steeringMode` and
-`followUpMode` (read at session start). Skill commands in a queued message are
+Each group is delivered first in, first out, draining every ready row at the
+boundary at once. Skill commands in a queued message are
 expanded on delivery. Input from RPC drivers and extensions goes straight to Pi. While the fleet viewer shows an item, what you type steers that item instead
 (slash commands still queue here).
 
 ## Widget
 
-Above the editor: "Steering" and "Follow-ups" groups, each row on one line.
-Hidden when nothing is queued.
+Above the editor and above TODOs and other widgets: "Steering" and "Follow-ups" groups, each row on one line. Hidden when nothing is queued.
 
 ## Keys
 
-- Option+Up: load the most recent row into the editor; again to move up.
-- Option+Down: move down.
-- Enter: save the edit in place. Esc: cancel it. Option+X: delete the row.
-- Your draft comes back when the edit ends. A row delivered while you edit it
-  ends the edit with a notice.
-- Esc while the agent works aborts as usual and pauses the queue with its rows
-  intact. Your next submission, or Option+Up, resumes it.
+- Option+Up: take the newest queued row out of the queue and load it into the editor. The original cannot be sent while you edit it. Press it again to put the current edit back and take the previous row. Option+Down moves the other way.
+- Enter: submit the edited row once, in its original steering or follow-up lane. Your previous draft returns to the editor. Option+X deletes the retrieved row.
+- Esc: abort the current turn. If you were editing, it puts the edited row back first. Queued steering starts a new turn as soon as the abort settles, or immediately if already idle; follow-ups run afterward.
 
 The keys are read only while Pi's editor has focus. With nothing queued,
 Option+Up keeps Pi's own behaviour.
@@ -48,8 +43,8 @@ Option+Up keeps Pi's own behaviour.
 Known limit: while you edit a row, Enter on `/compact`, `/reload` or an
 extension command saves it in place, and it runs when delivered. Other Pi
 built-in commands (such as `/model` or `/tree`) still run at once, because Pi
-handles them before any extension sees them. The row is left unchanged and the
-edit stays open until Esc.
+handles them before any extension sees them. The retrieved row stays in the editor
+until you submit it or press Esc. Reloading while you edit saves the current text as a queued row and restores your earlier draft.
 
 ## Commands, tools, settings
 

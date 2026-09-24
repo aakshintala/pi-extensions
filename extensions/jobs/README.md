@@ -50,8 +50,7 @@ Only the session that started a job can see, wait on or stop it.
 - A job ends when its shell exits, so a daemon that keeps the log open cannot
   hold it. If the shell left processes running in its group, the notice, `wait`
   and `list` say so.
-- Each job is a `shell` row in FleetView. Opening it shows the live log, and
-  `x` on its row in FleetView stops it.
+- Running jobs share one FleetView row. Enter or click it to choose a running job and view its live log. Press `x` on the row to choose a job to stop.
 - Each job ends with exactly one notice: status, exit code, running time and
   log path. A failed job's notice carries its last 20 lines, cut to 2,000
   characters. A `wait` or `stop` that returned the final state replaces the
@@ -114,5 +113,4 @@ No commands. Ctrl+B is bound by the fleet extension.
 - The log size is checked once a second, so a very fast writer can pass
   5 GB by up to a second's output.
 - A `sleep` inside `bash -c "..."` or `eval` is not seen.
-- A command's running time on its FleetView row counts from when it became a
-  job; its notice counts from when it started.
+- A job's log header shows the time since it became a job. Its notice counts from when the command started.

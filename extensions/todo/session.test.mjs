@@ -62,7 +62,7 @@ test("todo_write replaces the list, clears it, and rejects invalid input", async
 
   assert.deepEqual(widgets, [
     ["todo", undefined], // session start, no list
-    ["todo", [" ✔ 1 done", " ◼ build", " ◻ ship"]],
+    ["todo", [" ◼ build · 1 pending · 1 done"]],
     ["todo", [" ◼ ship"]],
     ["todo", undefined],
   ]);
@@ -184,27 +184,27 @@ test("a subagent session keeps its own list and draws no widget", async (t) => {
   assert.deepEqual(widgets.at(-1), ["todo", [" ◼ parent task"]]);
 });
 
-// The widget row for one item, rendered 20 columns wide.
-async function row(t, text) {
-  const { session, widgets } = await start(t, [write([{ text, status: "pending" }]), say()], 20);
+// The widget row for one pending item.
+async function row(t, text, width = 80) {
+  const { session, widgets } = await start(t, [write([{ text, status: "pending" }]), say()], width);
   await session.prompt("go");
   return widgets.at(-1)[1][0];
 }
 
 test("widget row: newlines in item text collapse to one space", async (t) => {
-  assert.equal(await row(t, "one\n  two"), " ◻ one two");
+  assert.equal(await row(t, "one\n  two"), " ◻ one two · 1 pending");
 });
 
 test("widget row: terminal control sequences are stripped", async (t) => {
-  assert.equal(await row(t, "clear\x1b[2J it\x07"), " ◻ clear it");
+  assert.equal(await row(t, "clear\x1b[2J it\x07"), " ◻ clear it · 1 pending");
 });
 
 test("widget row: long text is truncated to the width", async (t) => {
-  assert.equal((await row(t, "a very long item that cannot fit")).replace(/\x1b\[0m/g, ""), " ◻ a very long i...");
+  assert.equal((await row(t, "a very long item that cannot fit", 20)).replace(/\x1b\[0m/g, ""), " ◻ a very long it...");
 });
 
 test("widget row: OSC and 8-bit sequences leave no payload", async (t) => {
-  assert.equal(await row(t, "\x1b]0;spoofed\x07title \x9d0;x\x9c8bit"), " ◻ title 8bit");
+  assert.equal(await row(t, "\x1b]0;spoofed\x07title \x9d0;x\x9c8bit"), " ◻ title 8bit · 1 pending");
 });
 
 // Pi can drain several queued prompts into one request: the turn before them still counts.
@@ -212,7 +212,7 @@ test("reminder still rides a request that carries two queued prompts", async () 
   await import("../../tests/fixtures/tool-display/pi-tui.mjs");
   const { default: ext } = await import(EXT);
   const on = {};
-  ext({ on: (name, f) => (on[name] = f), registerTool() {} });
+  ext({ on: (name, f) => (on[name] = f), registerTool() {}, registerCommand() {} });
   const entry = { type: "message", message: { role: "toolResult", toolName: "todo_write", details: { todos: [{ text: "build", status: "in_progress" }] } } };
   on.session_start({}, { mode: "print", sessionManager: { getBranch: () => [entry], getEntries: () => [] }, ui: {} });
   const user = (text) => ({ role: "user", content: text });

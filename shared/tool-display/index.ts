@@ -10,6 +10,9 @@ export const COLLAPSED_LINES = 4;
 export const EXPANDED_LINES = 200;
 /** Edits larger than this (old + new characters) are not diffed. */
 export const DIFF_MAX_CHARS = 100_000;
+/** A pending grouped call draws nothing until it settles or runs this long, so fast
+ * calls (a read) never flash on screen. */
+export const SHOW_AFTER_MS = 1000;
 
 const CALL = "⏺";
 const RESULT = "⎿";
@@ -21,10 +24,9 @@ export type CallStatus = "pending" | "done" | "error";
 /** A component whose lines are computed for the width it is given. */
 export const lines = (render: (width: number) => string[]): Component => ({ render, invalidate() {} });
 
-/** `⏺ Title(arg)` on one line, the bullet coloured by status, or a spinner frame when `frame` is given. */
-export function callLine(theme: Theme, status: CallStatus, title: string, arg: string, width: number, frame?: number): string {
-  const mark = frame === undefined ? CALL : SPINNER[frame % SPINNER.length];
-  const bullet = theme.fg(status === "error" ? "error" : status === "done" ? "success" : "muted", mark);
+/** `⏺ Title(arg)` on one line, with the bullet coloured by status. */
+export function callLine(theme: Theme, status: CallStatus, title: string, arg: string, width: number): string {
+  const bullet = theme.fg(status === "error" ? "error" : status === "done" ? "success" : "muted", CALL);
   const text = `${PAD}${bullet} ${theme.fg("toolTitle", theme.bold(title))}${arg ? theme.fg("muted", `(${arg})`) : ""}`;
   return truncateToWidth(text, width);
 }
@@ -123,38 +125,32 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
     renderShell: "self" as const,
     renderCall(args: Args, theme: Theme, context: ToolRenderContext): Component {
       const groups = sessionOf(context.toolCallId, context.args ?? args);
-      // How the group's first call draws this call when it failed (see `folded`).
-      const failure = (c: Call) => (w: number) => [
-        callLine(theme, "error", style.title, style.arg((c.args ?? args ?? {}) as Args, context.cwd), w),
-        ...errorLines(theme, resultText(c.result).replaceAll(`${context.cwd}/`, ""), false, w),
-      ];
-      const c = groups?.describe(context.toolCallId, style.summary, context.invalidate, failure);
+      const c = groups?.describe(context.toolCallId, style.summary, context.invalidate);
       const g = c && groups!.group(context.toolCallId);
-      // A running call with a hint (#139) spins and shows the hint under its call line.
+      // A running call with a hint (#139) shows the hint under its call line.
       const hint = c?.hint?.();
       const own = (w: number) => {
         const state = c ? c.state() : context.isError ? "error" : context.isPartial ? "pending" : "done";
         const status: CallStatus = state === "cancelled" ? "error" : state;
-        const line = callLine(theme, status, style.title, style.arg(args ?? ({} as Args), context.cwd), w, hint ? groups?.frame : undefined);
+        const line = callLine(theme, status, style.title, style.arg(args ?? ({} as Args), context.cwd), w);
         return hint ? [line, ...resultLines(theme, theme.fg("dim", hint), [], false, w)] : [line];
       };
       if (!g) return lines(own);
       const open = context.expanded || g.open;
       const summary = !open && g.calls[0] === c;
-      const shown = open || shownAlone(g, c!) || !!hint;
-      // A hinted call has no result yet to draw the folded failures after.
-      return clickable(g, lines((w) => [
-        ...(summary ? [summaryLine(theme, g, w)] : []),
-        ...(shown ? own(w) : []),
-        ...(summary && (!shown || hint) ? foldedLines(g, w) : []),
-      ]));
+      // Collapsed, a group shows one summary line once it is ready: a call settled,
+      // a call runs past the grace period, or a call shows its hint. Fresh pending
+      // groups (fast calls) draw nothing, so they never flash on screen.
+      const now = Date.now();
+      const ready = open || g.calls.some((m) => m.state() !== "pending" || m.hint?.() || now - m.startedAt >= g.session.graceMs);
+      const shown = open || !!hint;
+      return clickable(g, lines((w) => [...(summary && ready ? [summaryLine(theme, g, w)] : []), ...(shown ? own(w) : [])]));
     },
     renderResult(result: Result, options: { expanded: boolean; isPartial: boolean }, theme: Theme, context: ToolRenderContext): Component {
       const groups = sessionOf(context.toolCallId, context.args);
       const g = groups?.group(context.toolCallId);
-      const c = g?.calls.find((m) => m.id === context.toolCallId);
       const collapsed = g && !context.expanded && !g.open;
-      if (options.isPartial || (collapsed && !shownAlone(g, c!))) return lines(() => []);
+      if (options.isPartial || collapsed) return lines(() => []);
       let out: Component;
       if (context.isError) {
         const message = resultText(result).replaceAll(`${context.cwd}/`, "");
@@ -163,35 +159,29 @@ export function toolRenderers<Args, Result>(style: ToolStyle<Args, Result>) {
         const { summary, body } = style.result(result, context.args ?? {}, options.expanded, theme);
         out = lines((w) => resultLines(theme, summary, body, options.expanded, w));
       }
-      if (collapsed && g.calls[0] === c) {
-        const own = out;
-        out = lines((w) => [...own.render(w), ...foldedLines(g, w)]);
-      }
       return g ? clickable(g, out) : out;
     },
   };
 }
 
 /**
- * A collapsed group's failed calls after its first are drawn by the first call, under
- * the summary, and draw nothing themselves: Pi puts a blank row above every tool that
- * draws a line, so this keeps a group free of blank rows (#133).
+ * A collapsed group is one summary line: failed calls stay folded, image calls stay folded (their text rows draw
+ * nothing; Pi still draws the image itself), and Ctrl+O (or a click) shows every call.
+ * Pi puts a blank row above every tool that draws a line, so drawing nothing keeps a
+ * group free of blank rows (#133).
  */
-const folded = (g: Group, c: Call) => c !== g.calls[0] && c.state() === "error" && !c.image;
-/** A collapsed group's call draws its own rows: its first call when it failed, and calls with images. */
-const shownAlone = (g: Group, c: Call) => c.alwaysShown() && !folded(g, c);
-const foldedLines = (g: Group, w: number) => g.calls.filter((m) => folded(g, m)).flatMap((m) => m.failure?.(w) ?? []);
 
 // ---- Groups (#56, #133) ----
 // Consecutive calls to tools with a summary form a group, across assistant messages
-// with nothing drawn between them.
+// with nothing drawn between them; shell executions fold in too. Only user and
+// assistant text, shown thinking, agent completion notices and tools without a summary
+// split a group.
 // Its first call draws one summary line and the others draw nothing, until Ctrl+O
-// (context.expanded) or a click on the group opens it. Failed calls and calls with
-// images always show. Groups come from the messages alone, so a transcript rebuilt
-// from saved messages groups the same way as the live chat.
+// (context.expanded) or a click on the group opens it. Groups come from the messages
+// alone, so a transcript rebuilt from saved messages groups the same way as the live chat.
 //
 // Each session owns one ToolGroups (its extension creates it and drives it from Pi's
-// events and its own spinner timer). Renderers find a call's session through a
+// events). Renderers find a call's session through a
 // process-wide index of call ids, which each session adds to and removes from.
 
 /** How a tool counts in a group summary: `verb N one|many`, or `verb many` without `one`. */
@@ -215,9 +205,6 @@ const ABORT_TEXTS = ["Operation aborted", "Command aborted"];
  */
 export const outcomeOf = (isError: boolean, result: unknown): Outcome =>
   !isError ? "done" : ABORT_TEXTS.includes(resultText(result).trim().split("\n").at(-1)!.trim()) ? "cancelled" : "error";
-
-const hasImage = (result: unknown) =>
-  Array.isArray((result as any)?.content) && (result as any).content.some((c: any) => c?.type === "image");
 
 /** Consecutive calls across assistant messages with no text or message between them. */
 interface Run {
@@ -245,14 +232,13 @@ interface Msg {
 
 class Call {
   status: CallState = "pending";
-  image = false;
+  /** When the call was registered: pending calls older than the grace period show. */
+  startedAt = Date.now();
   open = false;
   summary?: Summary;
   invalidate?: () => void;
   /** While running: the hint it shows (see `showHint`). */
   hint?: () => string | undefined;
-  /** Its rows when it failed, drawn by its group's first call. */
-  failure?: (width: number) => string[];
   result?: unknown;
   id: string;
   run: Run;
@@ -266,10 +252,6 @@ class Call {
   }
   state(): CallState {
     return this.status === "pending" && this.run.ended ? this.run.ended : this.status;
-  }
-  /** Failures show under the summary; so do images, which Pi draws outside the renderers. */
-  alwaysShown() {
-    return this.state() === "error" || this.image;
   }
 }
 
@@ -294,7 +276,7 @@ const unindex = (id: string, groups: ToolGroups) => {
 };
 
 /**
- * Shows running call `id` of session `owner` outside its group, with a spinner and a dim
+ * Shows running call `id` of session `owner` outside its group, with a dim
  * line of `hint()` under its call line, until the returned function is called; it then
  * folds back in. `hint` is read on every draw; while it returns nothing the call stays
  * folded. Needs the session's groups (extensions/tool-display).
@@ -305,16 +287,16 @@ export function showHint(owner: string, id: string, hint: () => string | undefin
   return () => void (c && groups!.hinted(id, undefined, c));
 }
 
-/** Messages Pi draws in the chat, besides assistant messages (a custom one when `display` is set). */
-const SPLITS = new Set(["user", "bashExecution", "compactionSummary", "branchSummary"]);
-
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/** Messages Pi draws in the chat, besides assistant messages (a custom one when `display` is set).
+ * Shell executions fold into the groups around them; user prompts, compaction and
+ * branch summaries, and drawn custom messages (agent completion notices) split them. */
+const SPLITS = new Set(["user", "compactionSummary", "branchSummary"]);
 
 /** One session's tool groups. */
 export class ToolGroups {
   private calls = new Map<string, Call>();
   /** Results that arrived before their call was registered. */
-  private early = new Map<string, { outcome: Outcome; image: boolean; result: unknown }>();
+  private early = new Map<string, { outcome: Outcome; result: unknown }>();
   /** The run a next message of calls only continues. */
   private tail?: Run;
   /** The message still streaming: later updates of it are the same message. */
@@ -323,7 +305,10 @@ export class ToolGroups {
   private gap = false;
   /** Whether Pi draws thinking, for messages whose renderer has not reported (Pi's default: yes). */
   showThinking = true;
-  frame = 0;
+  /** Pending grouped calls show once settled or older than this. Tests set it to 0. */
+  graceMs = ToolGroups.defaultGraceMs;
+  /** Process-wide default grace period (see SHOW_AFTER_MS): tests set it to 0 and restore it after. */
+  static defaultGraceMs = SHOW_AFTER_MS;
   /** The session's id, which `showHint` names it by. Its extension sets it. */
   owner?: string;
 
@@ -410,10 +395,10 @@ export class ToolGroups {
 
   /** Records a call's result (Pi's tool_execution_end, or a saved toolResult message). */
   settle(id: string, isError: boolean, result: unknown): void {
-    const outcome = { outcome: outcomeOf(isError, result), image: hasImage(result), result };
+    const outcome = { outcome: outcomeOf(isError, result), result };
     const c = this.calls.get(id);
     if (!c) return void this.early.set(id, outcome);
-    Object.assign(c, { status: outcome.outcome, image: outcome.image, result });
+    Object.assign(c, { status: outcome.outcome, result });
     this.refresh(c.run);
   }
 
@@ -436,19 +421,20 @@ export class ToolGroups {
     this.close();
   }
 
-  /** Advances the spinner and redraws the summary line of each running group. */
-  tick(): void {
-    this.frame++;
-    // Each running group's first call, and each call with a hint, once.
+  /** Recheck pending groups after their grace period and hints whose text may change. */
+  refreshPending(): void {
     const redraw = new Set([...this.calls.values()].filter((c) => c.hint));
     for (const run of new Set([...this.calls.values()].map((c) => c.run))) {
-      if (run.ended || !run.ids.some((id) => this.calls.get(id)?.status === "pending")) continue;
       for (const id of run.ids) {
         const g = this.group(id);
-        if (g && g.calls[0].id === id && g.calls.some((c) => c.state() === "pending")) redraw.add(g.calls[0]);
+        if (g?.calls[0].id === id && g.calls.some((c) => c.state() === "pending")) redraw.add(g.calls[0]);
       }
     }
-    for (const c of redraw) c.invalidate?.();
+    for (const c of redraw) {
+      try {
+        c.invalidate?.();
+      } catch {}
+    }
   }
 
   /**
@@ -463,12 +449,11 @@ export class ToolGroups {
     return c;
   }
 
-  /** Called by a renderer: records the call's summary, redraw hook and failure rows. */
-  describe(id: string, summary: Summary | undefined, invalidate: () => void, failure?: (c: Call) => (width: number) => string[]): Call | undefined {
+  /** Called by a renderer: records the call's summary and redraw hook. */
+  describe(id: string, summary: Summary | undefined, invalidate: () => void): Call | undefined {
     const c = this.calls.get(id);
     if (!c) return undefined;
     c.invalidate = invalidate;
-    c.failure = failure?.(c);
     if (summary && !c.summary) {
       c.summary = summary;
       // The call may join the group before it: redraw the others (not itself, mid-render).
@@ -519,9 +504,17 @@ export class ToolGroups {
   }
 
   private close() {
+    // Clear first: each invalidate re-renders synchronously and must see the sealed runs.
     this.tail = undefined;
     this.current = undefined;
     this.gap = false;
+    // Sealing a run can change its groups. Each invalidate re-renders synchronously;
+    // one bad component must not prevent the other groups from updating.
+    for (const c of this.calls.values()) {
+      try {
+        c.invalidate?.();
+      } catch {}
+    }
   }
 
   private add(c: Call) {
@@ -531,7 +524,7 @@ export class ToolGroups {
     const early = this.early.get(c.id);
     if (early) {
       this.early.delete(c.id);
-      Object.assign(c, { status: early.outcome, image: early.image, result: early.result });
+      Object.assign(c, { status: early.outcome, result: early.result });
     }
   }
 
@@ -549,7 +542,11 @@ export class ToolGroups {
   }
 
   private refresh(run: Run) {
-    for (const id of run.ids) this.calls.get(id)?.invalidate?.();
+    for (const id of run.ids) {
+      try {
+        this.calls.get(id)?.invalidate?.();
+      } catch {}
+    }
   }
 }
 
@@ -573,28 +570,19 @@ const clickable = (g: Group, child: Component): Component =>
 
 function summaryLine(theme: Theme, g: Group, width: number): string {
   const calls = g.calls.map((c) => ({ summary: c.summary!, status: c.state(), args: c.args }));
-  const live = calls.some((c) => c.status === "pending");
-  const bad = calls.some((c) => c.status === "error" || c.status === "cancelled");
-  const frame = SPINNER[g.session.frame % SPINNER.length];
-  const bullet = live ? theme.fg("muted", frame) : theme.fg(bad ? "error" : "success", CALL);
-  return truncateToWidth(`${PAD}${bullet} ${summaryText(theme, calls, g.calls.some((c) => c.msg.thought || c.msg.gap || c.msg.after))}`, width);
+  return truncateToWidth(`${PAD}${theme.fg("muted", CALL)} ${summaryText(theme, calls, g.calls.some((c) => c.msg.thought || c.msg.gap || c.msg.after))}`, width);
 }
 
 const lineTotals = new WeakMap<object, { added: number; removed: number } | undefined>();
 
 /**
- * A group's summary: "Read 3 files, edited 2 files +442 −12 · 1 failed", counts in the
- * dim colour and "N failed" / "N cancelled" in the error colour. Every call counts
+ * A group's summary: "Read 3 files, edited 2 files +442 −12". Every call counts
  * under its verb; line totals come from finished calls only. `thought` starts it
- * with "thought ·".
+ * with "thought ·". Failures and cancellations remain in expanded call results.
  */
 export function summaryText(theme: Theme, calls: { summary: Summary; status: CallState; args?: any }[], thought = false): string {
   const kinds = new Map<string, { s: Summary; n: number; added: number; removed: number }>();
-  let failed = 0;
-  let cancelled = 0;
   for (const { summary: s, status, args } of calls) {
-    if (status === "error") failed++;
-    if (status === "cancelled") cancelled++;
     const key = `${s.verb}|${s.one}|${s.many}`;
     const k = kinds.get(key) ?? kinds.set(key, { s, n: 0, added: 0, removed: 0 }).get(key)!;
     k.n++;
@@ -614,8 +602,6 @@ export function summaryText(theme: Theme, calls: { summary: Summary; status: Cal
   if (!thought) text = text.charAt(0).toUpperCase() + text.slice(1);
   const sep = theme.fg("dim", " · ");
   const parts = [thought ? theme.fg("dim", "thought") : "", text ? theme.fg("dim", text) : ""];
-  if (failed) parts.push(theme.fg("error", `${failed} failed`));
-  if (cancelled) parts.push(theme.fg("error", `${cancelled} cancelled`));
   return parts.filter(Boolean).join(sep);
 }
 
