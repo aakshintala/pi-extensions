@@ -278,6 +278,12 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
         out.push(...all.slice(start, end).flatMap((row, i) => lines(row, start + i, theme, width)));
         if (hidden) out.push(theme.fg("dim", `   … ${hidden} more`));
         if (focused) out.push(theme.fg("dim", KEYS));
+      } else if (viewer.active() && !viewer.overlay()) {
+        // Fullscreen only (#161): a log taller than the screen scrolls the viewer's own
+        // header, which carries "esc back", off the top; this row is what's left once
+        // nothing else is running to give FleetView its own rows.
+        const item = registry.get(viewer.active()!);
+        if (item) out.push(theme.fg("dim", ` viewing ${oneLine(item.kind)} ${oneLine(item.label)} · esc back`));
       }
       return out.map((l) => truncateToWidth(l, width));
     },
