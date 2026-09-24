@@ -47,7 +47,12 @@ function gate() {
 async function start(t, replies, kid, { tools, before } = {}) {
   globalThis[KID] = kid;
   let ctx;
-  const capture = (pi) => pi.on("session_start", (_event, c) => (ctx = c));
+  // Liveness events on the parent's bus (children load EXTENSIONS only, so theirs are not here).
+  const lanes = [];
+  const capture = (pi) => {
+    pi.on("session_start", (_event, c) => (ctx = c));
+    for (const kind of ["started", "completed", "failed"]) pi.events.on(`subagents:${kind}`, (d) => lanes.push([kind, d.id]));
+  };
   const s = await scriptedSession(t, { replies, extensions: [...EXTENSIONS, capture], tools });
   globalThis[RUNTIME] = s.session.modelRuntime; // children share it, so none writes auth.json (#120)
   // Children discover their extensions from the agent dir, like a real install.
@@ -69,7 +74,7 @@ async function start(t, replies, kid, { tools, before } = {}) {
   });
   const results = () => s.session.messages.filter((m) => m.role === "toolResult").map((m) => [m.isError, textOf(m)]);
   const notices = () => s.session.messages.filter((m) => m.customType === "rig.notice").map(textOf);
-  return { ...s, ctx, results, notices };
+  return { ...s, ctx, results, notices, lanes };
 }
 
 /** A second, fresh instance of the subagents extension, as after a restart; `tools` maps names to definitions. */
@@ -176,7 +181,7 @@ test("spawn rejects an unknown model or thinking level and requires model, think
 });
 
 test("a parent without the UI that spawns and ends its turn gets every full result before its run ends", { timeout: 20_000 }, async (t) => {
-  const { session, agentDir, results, notices } = await start(
+  const { session, agentDir, results, notices, lanes } = await start(
     t,
     [calls(spawn("alpha"), spawn("beta")), says("waiting"), says("still waiting"), says("got one"), says("got both")],
     (context) => fauxAssistantMessage(fauxText(`result of ${taskOf(context)}\nline two\nSTATUS: DONE`)),
@@ -195,6 +200,8 @@ test("a parent without the UI that spawns and ends its turn gets every full resu
     assert.deepEqual(rest, [`result of ${name}`, "line two", "STATUS: DONE"]);
   }
   assert.equal(session.messages.at(-1).role, "assistant");
+  // Each run is started, then completed, on the parent's bus.
+  for (const id of ids) assert.deepEqual(lanes.filter(([, i]) => i === id).map(([k]) => k), ["started", "completed"]);
 
   // Each child is a saved Pi session whose first entry marks it as a child.
   const dir = join(agentDir, "sessions", session.sessionId);
@@ -368,7 +375,7 @@ test("stop works on a queued child and on one mid-reply; a failed child reports 
   const held = gate();
   const release = gate();
   const ids = {};
-  const { session, results, notices } = await start(
+  const { session, results, notices, lanes } = await start(
     t,
     [
       calls(spawn("broken"), ...Array.from({ length: 10 }, (_, i) => spawn(`slow${i}`))),
@@ -404,6 +411,9 @@ test("stop works on a queued child and on one mid-reply; a failed child reports 
   assert.match(byId(ids.queued), /^Subagent \w+ \(do slow\d\) stopped before it started\.$/);
   assert.match(byId(ids.slow), /^Subagent \w+ \(do slow0\) stopped\. STATUS: STOPPED\n.+\n\nNo output\.$/);
   assert.deepEqual(results().slice(11).map(([, text]) => text), [`Subagent ${ids.slow} stopped.`, `Subagent ${ids.queued} stopped.`]);
+  // A failed run ends with "failed", a stopped one with "completed"; one stopped while queued never ran.
+  const lane = (id) => lanes.filter(([, i]) => i === id).map(([k]) => k);
+  assert.deepEqual([lane(ids.broken), lane(ids.slow), lane(ids.queued)], [["started", "failed"], ["started", "completed"], []]);
 });
 
 test("with maxDepth 1, a child gets none of the subagent tools", { timeout: 20_000 }, async (t) => {
@@ -601,7 +611,7 @@ test("a child ending with a grandchild running is woken once, and its notice, co
     return says("waiting")();
   };
   globalThis[PRICE] = 1e-6;
-  const { session, agentDir, notices } = await start(t, Array(6).fill(root), async (context, options) => {
+  const { session, agentDir, notices, lanes } = await start(t, Array(6).fill(root), async (context, options) => {
     const task = taskOf(context);
     tools[task] = getCurrentTools(context.messages).map((tool) => tool.name).filter((name) => name.startsWith("subagent_"));
     if (task === "G") {
@@ -630,6 +640,8 @@ test("a child ending with a grandchild running is woken once, and its notice, co
   assert.equal(users.filter((u) => u.startsWith("Your run is ending")).length, 1);
   assert.ok(noticed(child.context, "G"));
   assert.equal(grandDoneAtNotice, "completed");
+  // The parent's bus carries its child only; the child's run, so its "completed", ends after the grandchild's.
+  assert.deepEqual(lanes, [["started", child.id], ["completed", child.id]]);
   const notice = notices().find((n) => n.startsWith(`Subagent ${child.id} `));
   assert.match(notice, /\n\nC done\nSTATUS: DONE$/);
 
