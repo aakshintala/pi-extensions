@@ -37,12 +37,12 @@ export const GROUP_LABELS: Record<GraphGroupBy, string> = {
 };
 
 /** Series beyond this cap are merged into a single "other" series. */
-export const MAX_GROUP_SERIES = 6;
+const MAX_GROUP_SERIES = 6;
 
 export const TOTAL_SERIES_KEY = "\u0000total";
-export const OTHER_SERIES_KEY = "\u0000other";
+const OTHER_SERIES_KEY = "\u0000other";
 
-export interface GraphOptions {
+interface GraphOptions {
 	period: TabName;
 	metric: GraphMetric;
 	groupBy: GraphGroupBy;
@@ -52,7 +52,7 @@ export interface GraphOptions {
 	bounds: PeriodBounds;
 }
 
-export interface GraphSeries {
+interface GraphSeries {
 	key: string;
 	label: string;
 	/** One value per bucket. Cumulative when options.cumulative. */
@@ -292,9 +292,9 @@ export function buildGraphModel(
  * Style callback: seriesIndex is the index into model.series, or -1 for
  * chart furniture (axes). Return the text styled for the terminal.
  */
-export type ChartColorize = (seriesIndex: number, text: string) => string;
+type ChartColorize = (seriesIndex: number, text: string) => string;
 
-export interface ChartRenderOptions {
+interface ChartRenderOptions {
 	width: number;
 	/** Text rows for the plot area (each row is 4 braille dots tall). */
 	height: number;
@@ -316,9 +316,9 @@ const DOT_BITS = [
  */
 export function renderChart(model: GraphModel, options: ChartRenderOptions): string[] {
 	const colorize: ChartColorize = options.colorize ?? ((_i, text) => text);
-	const plotHeightForLabels = Math.max(options.height, 4);
-	const midRowForLabels = Math.floor((plotHeightForLabels - 1) / 2);
-	const midValue = (model.yMax * (plotHeightForLabels - 1 - midRowForLabels)) / (plotHeightForLabels - 1);
+	const plotHeight = Math.max(options.height, 4);
+	const midRow = Math.floor((plotHeight - 1) / 2);
+	const midValue = (model.yMax * (plotHeight - 1 - midRow)) / (plotHeight - 1);
 	const yLabelWidth = Math.max(
 		options.formatValue(model.yMax).length,
 		options.formatValue(midValue).length,
@@ -326,7 +326,6 @@ export function renderChart(model: GraphModel, options: ChartRenderOptions): str
 	);
 	const axisWidth = yLabelWidth + 2; // label + " ┤" / " │"
 	const plotWidth = Math.max(options.width - axisWidth, 10);
-	const plotHeight = Math.max(options.height, 4);
 	const dotW = plotWidth * 2;
 	const dotH = plotHeight * 4;
 
@@ -382,11 +381,10 @@ export function renderChart(model: GraphModel, options: ChartRenderOptions): str
 
 	// Compose text rows.
 	const lines: string[] = [];
-	const midRow = Math.floor((plotHeight - 1) / 2);
 	for (let row = 0; row < plotHeight; row++) {
 		let label = "";
 		if (row === 0) label = options.formatValue(model.yMax);
-		else if (row === midRow && plotHeight > 2) label = options.formatValue(midValue);
+		else if (row === midRow) label = options.formatValue(midValue);
 		else if (row === plotHeight - 1) label = options.formatValue(0);
 		const axisChar = label ? "┤" : "│";
 		let line = colorize(-1, label.padStart(yLabelWidth) + " " + axisChar);

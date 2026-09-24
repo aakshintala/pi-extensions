@@ -11,7 +11,7 @@ import { CancellableLoader, matchesKey, truncateToWidth, visibleWidth, wrapTextW
 import { oneLine } from "../../shared/text/index.ts";
 
 import { collectUsageData, resolveSessionsDir, TAB_ORDER, usageCachePath } from "./data.ts";
-import type { BaseStats, CollectProgress, TabName, UsageData } from "./data.ts";
+import type { BaseStats, TabName, UsageData } from "./data.ts";
 import { buildGraphModel, GROUP_LABELS, GROUP_ORDER, METRIC_LABELS, METRIC_ORDER, renderChart, TOTAL_SERIES_KEY } from "./graph.ts";
 import type { GraphGroupBy, GraphMetric, GraphModel } from "./graph.ts";
 
@@ -91,13 +91,12 @@ function formatCost(cost: number): string {
 	return `$${Math.round(cost)}`;
 }
 
-function formatTokens(count: number): string {
+export function formatTokens(count: number): string {
 	if (count === 0) return "-";
 	if (count < 1000) return count.toString();
-	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
-	return `${Math.round(count / 1000000)}M`;
+	// Units are picked after rounding, so 9,999 is "10k" and 999,999 is "1.0M".
+	const [value, unit] = count < 999_500 ? [count / 1000, "k"] : [count / 1_000_000, "M"];
+	return `${value < 9.95 ? value.toFixed(1) : Math.round(value)}${unit}`;
 }
 
 function formatNumber(n: number): string {
@@ -128,18 +127,6 @@ const SERIES_COLORS: ThemeColor[] = ["text", "accent", "success", "warning", "md
 
 function seriesColor(index: number): ThemeColor {
 	return SERIES_COLORS[index % SERIES_COLORS.length]!;
-}
-
-/** "14:32" if the timestamp is today, otherwise "16 Jul" (with year if not this year). */
-function formatSinceDate(ms: number): string {
-	const d = new Date(ms);
-	const now = new Date();
-	if (d.toDateString() === now.toDateString()) {
-		return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-	}
-	const opts: Intl.DateTimeFormatOptions = { day: "numeric", month: "short" };
-	if (d.getFullYear() !== now.getFullYear()) opts.year = "numeric";
-	return d.toLocaleDateString(undefined, opts);
 }
 
 function padLeft(s: string, len: number): string {
@@ -581,21 +568,8 @@ export default function (pi: ExtensionAPI) {
 					finish(null);
 				};
 
-				const onProgress = (p: CollectProgress): void => {
-					if (finished || p.filesToParse === 0) return;
-					const files = `${p.filesParsed.toLocaleString()}/${p.filesToParse.toLocaleString()} files`;
-					if (p.mode === "update") {
-						const since = p.sinceMs !== null ? ` since ${formatSinceDate(p.sinceMs)}` : "";
-						loader.setMessage(`Updating your usage history${since}… (${files})`);
-					} else if (p.mode === "rebuild") {
-						loader.setMessage(`Rebuilding your usage history — the cache format changed… (${files})`);
-					} else {
-						loader.setMessage(`Building your usage history for the first time… (${files})`);
-					}
-				};
-
 				const signal = AbortSignal.any([loader.signal, shutdown.signal]);
-				collection = collectUsageData({ signal, onProgress, sessionsDir, cachePath: usageCachePath(agentDir) })
+				collection = collectUsageData({ signal, sessionsDir, cachePath: usageCachePath(agentDir) })
 					.then(finish)
 					.catch((error: unknown) => {
 						failure = error;

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { collectUsageData } from "../extensions/usage/data.ts";
 
-const { UsageComponent } = await import("../extensions/usage/index.ts");
+const { formatTokens, UsageComponent } = await import("../extensions/usage/index.ts");
 const plain = { fg: (_k, t) => t, bold: (t) => t };
 const EVIL = fileURLToPath(new URL("./fixtures/usage/evil", import.meta.url));
 
@@ -27,4 +27,8 @@ test("provider, model and thinking-level names are drawn without terminal sequen
   const text = screens.flat().join("\n");
   assert.doesNotMatch(text, /[\x1b\x07]/);
   for (const name of ["provider", "model", "high"]) assert.match(text, new RegExp(name));
+});
+
+test("token counts pick their unit after rounding", () => {
+  assert.deepEqual([999, 9949, 9999, 12_345, 999_499, 999_999, 12_345_678].map(formatTokens), ["999", "9.9k", "10k", "12k", "999k", "1.0M", "12M"]);
 });
