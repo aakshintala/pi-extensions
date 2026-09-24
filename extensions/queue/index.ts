@@ -40,6 +40,8 @@ export default function (pi: ExtensionAPI) {
   };
   let ctx: ExtensionContext | undefined;
   let tui: any; // from the widget factory
+  let widgetComponent: object | undefined;
+  let pinTimer: ReturnType<typeof setInterval> | undefined;
   let reloadRow: Row | undefined; // a /reload row waiting for Pi's main editor
   let reloadDraft: string | undefined; // editor text saved while a queued /reload runs
   let unsubscribeKeys: (() => void) | undefined;
@@ -76,6 +78,13 @@ export default function (pi: ExtensionAPI) {
   // Always set, even empty (it then renders no lines), so `tui` is known before the first row.
   const draw = () => {
     if (!ctx?.hasUI) return;
+    // Pi rebuilds its widget container when any extension sets a widget. A cached
+    // queue component may not render again, so keep its placement while rows exist.
+    if (rows.length && !pinTimer) pinTimer = setInterval(() => widgetComponent && tui && pinAbove(widgetComponent), 150);
+    if (!rows.length && pinTimer) {
+      clearInterval(pinTimer);
+      pinTimer = undefined;
+    }
     ctx.ui.setWidget(
       WIDGET,
       (t, theme) => {
@@ -83,8 +92,6 @@ export default function (pi: ExtensionAPI) {
             const component = {
               invalidate() {},
               render(width: number) {
-                // Fullscreen layout can still be rendering here; move after its render completes.
-                setTimeout(() => tui && pinAbove(component), 0);
                 const lines: string[] = [];
                 for (const [lane, name, when] of [
                   ["steer", "Steering", "next turn"],
@@ -110,6 +117,7 @@ export default function (pi: ExtensionAPI) {
                 return lines;
               },
             };
+            widgetComponent = component;
             return component;
           },
     );
@@ -318,6 +326,9 @@ export default function (pi: ExtensionAPI) {
     }
     for (const t of timers) clearTimeout(t);
     timers.clear();
+    clearInterval(pinTimer);
+    pinTimer = undefined;
+    widgetComponent = undefined;
     unsubscribeKeys?.();
     if (ctx?.hasUI) ctx.ui.setWidget(WIDGET, undefined);
     rows = [];
