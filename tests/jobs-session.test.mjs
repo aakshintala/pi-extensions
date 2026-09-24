@@ -62,13 +62,19 @@ function fakeTimers(t) {
   const has = (ms) => [...pending].some((h) => h.ms === ms);
   return {
     has,
-    /** Fires every pending `ms` timer until `p` settles: for kill graces that may or may not start. */
+    /**
+     * Fires every pending `ms` timer until `p` settles and none is left: for kill graces that
+     * may or may not start. `p` can settle first (the shell exited, but its group lingers), and
+     * a grace left pending would hang that kill once this test's fake timers are gone.
+     */
     async pumping(ms, p) {
       const timer = setInterval(() => {
         for (const h of [...pending]) if (h.ms === ms) (pending.delete(h), h.fn());
       }, 10);
       try {
-        return await settles(p, "the kill to finish");
+        const result = await settles(p, "the kill to finish");
+        await until(() => !has(ms), `the ${ms} ms timers to fire`);
+        return result;
       } finally {
         clearInterval(timer);
       }
