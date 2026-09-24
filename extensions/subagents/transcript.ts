@@ -113,11 +113,12 @@ class Transcript extends Container {
    * groups by that object, so the child session's own groups never answer for this
    * transcript, and later streaming updates never reach what is drawn. One copy per
    * arguments object, so a sync that changed nothing keeps each call's arguments the same.
+   * A saved message copies afresh: Pi normalizes edit arguments in place after streaming.
    */
-  private own(m: any) {
+  private own(m: any, fresh = false) {
     const copy = (a: any) => {
       if (!a || typeof a !== "object") return structuredClone(a ?? {});
-      if (!this.copies.has(a)) this.copies.set(a, structuredClone(a));
+      if (fresh || !this.copies.has(a)) this.copies.set(a, structuredClone(a));
       return this.copies.get(a);
     };
     return { ...m, content: m.content.map((b: any) => (b?.type === "toolCall" ? { ...b, arguments: copy(b.arguments) } : b)) };
