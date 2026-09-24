@@ -40,8 +40,6 @@ export default function (pi: ExtensionAPI) {
   };
   let ctx: ExtensionContext | undefined;
   let tui: any; // from the widget factory
-  let widgetComponent: object | undefined;
-  let pinTimer: ReturnType<typeof setInterval> | undefined;
   let reloadRow: Row | undefined; // a /reload row waiting for Pi's main editor
   let reloadDraft: string | undefined; // editor text saved while a queued /reload runs
   let unsubscribeKeys: (() => void) | undefined;
@@ -53,75 +51,66 @@ export default function (pi: ExtensionAPI) {
 
   const ordered = () => [...rows.filter((r) => r.lane === "steer"), ...rows.filter((r) => r.lane === "followUp")];
 
-  // Pi orders above-editor widgets by their most recent setWidget call, with no order option.
-  // Keep this component first even when another extension redraws its widget later.
+  // Pi orders above-editor widgets by their most recent setWidget call and rebuilds its
+  // widget container from that order whenever any extension sets one. The queue sets its
+  // widget once; each render moves it back first when another widget landed above it.
+  // Container.render renders every child each frame, so this runs on every frame.
+  let parent: any; // Pi's above-editor widget container, found once
   const pinAbove = (component: object) => {
-    const visit = (node: any): boolean => {
+    const find = (node: any): any => {
       const children = node?.children;
-      if (!Array.isArray(children)) return false;
-      const i = children.indexOf(component);
-      if (i >= 0) {
-        // Keep Pi's leading spacer before the widgets; only reorder widget siblings.
-        const firstWidget = children[0] instanceof Spacer ? 1 : 0;
-        if (i !== firstWidget) {
-          children.splice(i, 1);
-          children.splice(firstWidget, 0, component);
-          tui.requestRender();
-        }
-        return true;
-      }
-      return children.some(visit);
+      if (!Array.isArray(children)) return;
+      return children.includes(component) ? node : children.reduce((hit: any, c: any) => hit ?? find(c), undefined);
     };
-    visit(tui);
+    if (!parent?.children.includes(component)) parent = find(tui);
+    const children = parent?.children;
+    if (!children) return;
+    // Keep Pi's leading spacer before the widgets; only reorder widget siblings.
+    const i = children.indexOf(component);
+    const first = children[0] instanceof Spacer ? 1 : 0;
+    if (i === first) return;
+    children.splice(i, 1);
+    children.splice(first, 0, component);
+    tui.requestRender(); // this frame already placed the rows; the next one has them first
   };
 
-  // Always set, even empty (it then renders no lines), so `tui` is known before the first row.
-  const draw = () => {
-    if (!ctx?.hasUI) return;
-    // Pi rebuilds its widget container when any extension sets a widget. A cached
-    // queue component may not render again, so keep its placement while rows exist.
-    if (rows.length && !pinTimer) pinTimer = setInterval(() => widgetComponent && tui && pinAbove(widgetComponent), 150);
-    if (!rows.length && pinTimer) {
-      clearInterval(pinTimer);
-      pinTimer = undefined;
-    }
-    ctx.ui.setWidget(
-      WIDGET,
-      (t, theme) => {
-            tui = t;
-            const component = {
-              invalidate() {},
-              render(width: number) {
-                const lines: string[] = [];
-                for (const [lane, name, when] of [
-                  ["steer", "Steering", "next turn"],
-                  ["followUp", "Follow-ups", "after the run"],
-                ] as const) {
-                  const group = rows.filter((r) => r.lane === lane);
-                  if (!group.length) continue;
-                  const color = lane === "steer" ? "accent" : "warning";
-                  lines.push(` ${theme.fg(color, `${name} (${group.length})`)}${theme.fg("dim", ` · ${paused ? "paused" : when}`)}`);
-                  for (const r of group) {
-                    const command = commandOf(r);
-                    const images = r.images?.length ? ` [${r.images.length} image${r.images.length > 1 ? "s" : ""}]` : "";
-                    const note = r.error
-                      ? theme.fg("error", ` · failed: ${oneLine(r.error)}`)
-                      : command
-                        ? theme.fg("dim", " · runs when idle")
-                        : "";
-                    const mark = command ? "⚙" : " ";
-                    const text = theme.fg("muted", oneLine(r.text));
-                    lines.push(truncateToWidth(` ${mark} ${text}${images}${note}`, width));
-                  }
-                }
-                return lines;
-              },
-            };
-            widgetComponent = component;
-            return component;
-          },
-    );
-  };
+  const draw = () => tui?.requestRender();
+
+  // Set once per session; render reads `rows` live, so a change only needs a render.
+  const setWidget = (c: ExtensionContext) =>
+    c.ui.setWidget(WIDGET, (t, theme) => {
+      tui = t;
+      const component = {
+        invalidate() {},
+        render(width: number) {
+          pinAbove(component);
+          const lines: string[] = [];
+          for (const [lane, name, when] of [
+            ["steer", "Steering", "next turn"],
+            ["followUp", "Follow-ups", "after the run"],
+          ] as const) {
+            const group = rows.filter((r) => r.lane === lane);
+            if (!group.length) continue;
+            const color = lane === "steer" ? "accent" : "warning";
+            lines.push(` ${theme.fg(color, `${name} (${group.length})`)}${theme.fg("dim", ` · ${paused ? "paused" : when}`)}`);
+            for (const r of group) {
+              const command = commandOf(r);
+              const images = r.images?.length ? ` [${r.images.length} image${r.images.length > 1 ? "s" : ""}]` : "";
+              const note = r.error
+                ? theme.fg("error", ` · failed: ${oneLine(r.error)}`)
+                : command
+                  ? theme.fg("dim", " · runs when idle")
+                  : "";
+              const mark = command ? "⚙" : " ";
+              const text = theme.fg("muted", oneLine(r.text));
+              lines.push(truncateToWidth(` ${mark} ${text}${images}${note}`, width));
+            }
+          }
+          return lines;
+        },
+      };
+      return component;
+    });
 
   const endEdit = (text?: string) => {
     if (!edit || !ctx) return;
@@ -308,12 +297,12 @@ export default function (pi: ExtensionAPI) {
       if (saved.draft) c.ui.setEditorText(saved.draft);
       later(dispatchIdle);
     }
-    if (c.hasUI)
-      unsubscribeKeys = c.ui.onTerminalInput((data) => {
-        if (reloadRow) replayReload(); // focus may be back on the editor
-        return onKey(data) ?? onCommandKey(data);
-      });
-    draw();
+    if (!c.hasUI) return;
+    unsubscribeKeys = c.ui.onTerminalInput((data) => {
+      if (reloadRow) replayReload(); // focus may be back on the editor
+      return onKey(data) ?? onCommandKey(data);
+    });
+    setWidget(c); // set even with no rows, so `tui` is known before the first
   });
 
   pi.on("session_shutdown", (event) => {
@@ -326,16 +315,13 @@ export default function (pi: ExtensionAPI) {
     }
     for (const t of timers) clearTimeout(t);
     timers.clear();
-    clearInterval(pinTimer);
-    pinTimer = undefined;
-    widgetComponent = undefined;
     unsubscribeKeys?.();
     if (ctx?.hasUI) ctx.ui.setWidget(WIDGET, undefined);
     rows = [];
     setEdit(undefined);
     paused = false;
     running = undefined;
-    ctx = tui = reloadRow = reloadDraft = unsubscribeKeys = undefined;
+    ctx = tui = parent = reloadRow = reloadDraft = unsubscribeKeys = undefined;
   });
 
   pi.on("input", (event, c) => {

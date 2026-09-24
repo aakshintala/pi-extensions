@@ -26,13 +26,14 @@ function fakeUi(session) {
     handleInput() {},
     onSubmit: (text) => text === "/reload" && ((state.editor = ""), session.reload()),
   };
-  const state = { editor: "", pastes: [], notices: [], widget: [], keys: [], focus: editor, mounted: editor };
+  // `widget` is the queue's rows as the next frame would render them.
+  const state = { editor: "", pastes: [], notices: [], keys: [], focus: editor, mounted: editor, get widget() { return this.component?.render(80) ?? []; } };
   // Pi 0.87's layout: the editor container is the root's fifth child.
   const container = { get children() { return [state.mounted]; } };
-  const tui = { children: [{}, {}, {}, {}, container], getFocusedComponent: () => state.focus };
+  const tui = { children: [{}, {}, {}, {}, container], getFocusedComponent: () => state.focus, requestRender() {} };
   const theme = { fg: (_c, s) => s };
   const target = {
-    setWidget: (_k, w) => (state.widget = w ? w(tui, theme).render(80) : []),
+    setWidget: (_k, w) => (state.component = w?.(tui, theme)),
     getEditorText: () => state.editor,
     setEditorText: (t) => ((state.editor = t), (state.pastes = [])),
     notify: (m, type = "info") => state.notices.push(`${type}: ${m}`),
