@@ -3,5 +3,4 @@ version 0.51.0, commit 1e53eb239a0ca105928605d6e78b2dbd96a0d5fb (npm gitHead)
 Local fork: pi-stamp-fork 0.51.0-fork.1 (~/.pi/agent/local/pi-stamp; FORK.md is its README)
 License: MIT (LICENSE)
 
-Kept for reference:
-- upstream/pi-stamp/src/: the fork's source, ported to extensions/stamp/
+The source snapshot was removed; it is in git history at 6aeb512.

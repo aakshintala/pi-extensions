@@ -3,5 +3,4 @@ version 0.6.0, npm tarball https://registry.npmjs.org/pi-context-view/-/pi-conte
 integrity sha512-Ngo1m+3lzyi4AE1WxYW2MRKOAYdzvL3XcZSmJg27fqAlJPuDM3Rnp+rqheFBe3ElX+wsK4xZuv1CaZb+FrFKRA==
 License: MIT (LICENSE)
 
-Kept for reference:
-- upstream/pi-context-view/src/: the package's source, ported to extensions/context/
+The source snapshot was removed; it is in git history at 6aeb512.
