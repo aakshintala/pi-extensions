@@ -204,35 +204,36 @@ Process groups of background work (#49), shared by `extensions/jobs` and
 `extensions/monitor`. State is one per process on a `globalThis` symbol.
 
 ```ts
-import { track, groupOf, signalGroup, tooManyJobs, pastOutputCap, reap } from "../../shared/process-groups/index.ts";
+import { logDir, spawnGroup, tooManyJobs, MAX_OUTPUT, reap } from "../../shared/process-groups/index.ts";
 
+const dir = logDir("jobs");                     // pi-jobs-* under tmpdir(), made on first use
 const refusal = tooManyJobs();                 // a message once the cap's groups are alive
-const child = spawn(shell, args, { detached: true, ... });
-const g = track({ child, pgid: child.pid, record: join(dir, `${id}.pid`), counted: true });
-signalGroup(groupOf(g), "SIGTERM");            // groupOf: the live pgid, or undefined once empty
-if (pastOutputCap(log)) { /* stop it */ }
+const g = spawnGroup({ command, cwd, dir, id, stdout: dir.path(`${id}.log`), stderr: dir.path(`${id}.log`), counted: true });
+const code = await g.exited;                   // 128 + signal when killed, 127 when the shell could not start
+await g.kill();                                // SIGTERM, then SIGKILL until the group is empty
+dir.remove();                                  // on shutdown; a directory with logs left in it stays
 ```
 
-- `track(g)` adds the group to the process set, which one `exit` handler
-  SIGKILLs, and writes its crash record synchronously: the group, its
-  leader's `ps` start time, and Pi's pid and start time. `record` must sit
-  in a `pi-jobs-*` or `pi-monitor-*` directory made by `mkdtempSync` under
-  `tmpdir()`.
-- `groupOf(g)` returns the pgid while the group may hold processes. Once it
-  is seen empty, or its id was reused after the leader was reaped, it
-  forgets the group and deletes the record; the id is never signalled again.
-- `counted` groups count toward the cap while alive, leftover processes
-  included. `setGroupLimit(n)` sets the cap (`maxJobs`, set by jobs; default
-  `MAX_GROUPS`, 16).
-- `signalGroup(pgid, signal)` ignores undefined, 1 or less, and gone groups.
-- `MAX_OUTPUT_BYTES` (5 GB) and `pastOutputCap(file)` are the output cap.
+- `spawnGroup(o)` runs `command` in Pi's shell as its own process group and
+  tracks it until the group is empty: one `exit` handler SIGKILLs every
+  tracked group, and a crash record is written to `dir` synchronously (the
+  group, its leader's `ps` start time, and Pi's pid and start time). It
+  returns `{ child, exited, closed, alive, count, kill }`; `closed` resolves
+  when stdio has closed, `alive()` is true while the group may hold
+  processes, leftovers included.
+- `counted` groups count toward the cap while alive; `count()` counts one
+  from then on. `setGroupLimit(n)` sets the cap (`maxJobs`, set by jobs;
+  default `MAX_GROUPS`, 16).
+- `MAX_OUTPUT_BYTES` (5 GB) is the output cap, and `MAX_OUTPUT` its text.
+- `timers()` is the one timer seam: `globalThis[Symbol.for("pi-rig.timers")]`
+  when a test sets it, else the real timers.
 - `reap()` kills the groups of Pis that have ended, reading only this user's
   0700 directories and 0600 records, and only while the leader's start time
   still matches. Malformed records are deleted. Jobs call it on
-  `session_start`.
-- `startTime(pid)` and `startTimeSync(pid)` give `ps -o lstart=` in UTC, or
+  `session_start`; it runs once per process.
+- `startTimeSync(pid)` gives `ps -o lstart=` in UTC, or
   undefined when `ps` fails or takes over 1 s. An unknown start time never
-  kills: `track` writes no record, and `reap` keeps a record whose
+  kills: `spawnGroup` writes no record, and `reap` keeps a record whose
   process still runs.
 
 ### `subagent/`

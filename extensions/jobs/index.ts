@@ -5,43 +5,33 @@
 // `run_in_background`, becomes a job: a fleet `shell` row whose end is one notice.
 // Guards and crash clean-up are #49 (guards.ts), monitor is #50. A foreground
 // command is a fleet foreground: Ctrl+B and a queued steer background it (#51).
-import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, fstatSync, mkdtempSync, openSync, readSync, rmdirSync, rmSync, statSync } from "node:fs";
-import { constants, tmpdir } from "node:os";
-import { join } from "node:path";
-import { createBashToolDefinition, getAgentDir, getShellConfig, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { closeSync, fstatSync, openSync, readSync, rmSync, statSync } from "node:fs";
+import { createBashToolDefinition, getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { duration, fleet, type FinalStatus } from "../../shared/fleet/index.ts";
 import { rigSettings } from "../../shared/settings/index.ts";
 import { keepSgr, oneLine } from "../../shared/text/index.ts";
 import { resultText, showHint, toolRenderers } from "../../shared/tool-display/index.ts";
 import { ctrlBFree } from "../../shared/tui/index.ts";
-import { groupOf, MAX_GROUPS, pastOutputCap, reap, setGroupLimit, signalGroup, tooManyJobs, track, type Group } from "../../shared/process-groups/index.ts";
+import { logDir, MAX_GROUPS, MAX_OUTPUT, MAX_OUTPUT_BYTES, reap, setGroupLimit, spawnGroup, timers, tooManyJobs } from "../../shared/process-groups/index.ts";
 import { blockingSleep, PROMPT } from "./guards.ts";
 
-/** Grace between SIGTERM and SIGKILL to a job's process group. */
-const KILL_MS = 800;
 /** A failure notice carries this many last lines, cut to this many characters. */
 const TAIL_LINES = 20;
 const TAIL_CHARS = 2000;
 /** How often a foreground command's log is read for live output. */
 const POLL_MS = 100;
 const MAX_TIMER_MS = 2 ** 31 - 1;
-/** How often a killed group is checked until its zombies are reaped. */
-const ZOMBIE_MS = 10;
 /** How often a job's log size and group are checked. */
 const TICK_MS = 1000;
 /** Ticks of unchanged output before a prompt-shaped last line warns the agent. */
 const QUIET_TICKS = 10;
+/** Finished jobs `jobs list` keeps; older ones are forgotten when a new one starts. */
+const KEEP_FINISHED = 20;
 
-type Timers = Pick<typeof globalThis, "setTimeout" | "clearTimeout">;
-/** The auto-background, wait and kill timers. Tests replace them through this symbol. */
-const timers = (): Timers => (globalThis as any)[Symbol.for("pi-rig.jobs.timers")] ?? globalThis;
-// Referenced: a headless Pi must not exit before a pending SIGKILL fires.
-const delay = (ms: number) => new Promise<void>((r) => timers().setTimeout(r, Math.min(ms, MAX_TIMER_MS)));
-
-type Job = Group & {
+type Job = {
   id: string;
+  g: ReturnType<typeof spawnGroup>;
   owner: string;
   command: string;
   log: string;
@@ -111,43 +101,28 @@ export default function (pi: ExtensionAPI) {
   const autoSeconds = () => section.get("autoBackgroundSeconds") as number;
 
   const jobs = new Map<string, Job>();
-  let dir: string | undefined; // this session's log directory, left for the OS to clean
+  const dir = logDir("jobs");
   let closing = false;
 
   const now = () => fleet().now();
   /** A finished job whose shell left processes behind in its group. */
-  const lingers = (j: Job) => !!j.status && !!groupOf(j);
+  const lingers = (j: Job) => !!j.status && j.g.alive();
   const state = (j: Job) =>
     `Job ${j.id} ${j.status ?? "running"}${j.code === undefined ? "" : ` (exit ${j.code})`}${j.timedOut ? `, timed out after ${j.timedOut}s` : ""} after ${duration((j.endedAt ?? now()) - j.startedAt)}` +
     `${j.reason ? ` because ${j.reason}` : ""}. Log: ${j.log}` +
     (lingers(j) && !j.killing ? "\nIts shell exited, but processes it started are still running; stop ends them." : "");
 
   function start(command: string, cwd: string, env: NodeJS.ProcessEnv | undefined, owner: string): Job {
-    dir ??= mkdtempSync(join(tmpdir(), "pi-jobs-"));
+    const done = [...jobs.values()].filter((j) => j.status && !lingers(j));
+    for (const j of done.slice(0, -KEEP_FINISHED)) jobs.delete(j.id);
     const id = randomUUID().slice(0, 8);
-    const log = join(dir, `${id}.log`);
-    const out = openSync(log, "a", 0o600);
-    const shell = getShellConfig();
-    const stdin = shell.commandTransport === "stdin";
-    let child: ChildProcess;
-    try {
-      // Output goes straight to the file and the job ends on `exit`, so a daemon holding it cannot hang the job.
-      child = spawn(shell.shell, stdin ? shell.args : [...shell.args, command], { cwd, env, detached: true, stdio: [stdin ? "pipe" : "ignore", out, out] });
-    } finally {
-      closeSync(out);
-    }
-    if (stdin) {
-      child.stdin?.on("error", () => {});
-      child.stdin?.end(command);
-    }
-    const exited = new Promise<number>((resolve) => {
-      child.once("exit", (code, signal) => resolve(code ?? 128 + (signal ? constants.signals[signal] ?? 0 : 0)));
-      child.once("error", () => resolve(127));
-    });
-    const job: Job = { id, owner, command, log, child, pgid: child.pid, record: join(dir, `${id}.pid`), counted: false, startedAt: now(), bg: false, waiters: 0, done: undefined as any };
-    job.done = exited.then((code) => settle(job, code));
+    const log = dir.path(`${id}.log`);
+    // Output goes straight to the file and the job ends on `exit`, so a daemon holding it cannot hang the job.
+    const g = spawnGroup({ command, cwd, env, dir, id, stdout: log, stderr: log, counted: false });
+    const job: Job = { id, g, owner, command, log, startedAt: now(), bg: false, waiters: 0, done: undefined as any };
+    job.done = g.exited.then((code) => settle(job, code));
     jobs.set(id, job);
-    if (track(job).pgid) tick(job);
+    if (g.alive()) tick(job);
     return job;
   }
 
@@ -159,20 +134,20 @@ export default function (pi: ExtensionAPI) {
    */
   function tick(j: Job, size = 0, quiet = 0) {
     const h: any = (j.tick = timers().setTimeout(() => {
-      if (!groupOf(j)) return;
+      if (!j.g.alive()) return;
       let now = size;
       try {
         now = statSync(j.log).size;
       } catch {}
-      if (pastOutputCap(j.log)) {
-        if (!j.status) j.reason = "its output passed 5 GB";
-        else if (!j.killing) fleet().notify(j.id, `Job ${j.id}: the processes its shell left running were stopped because its output passed 5 GB. Log: ${j.log}`);
+      if (now > MAX_OUTPUT_BYTES) {
+        if (!j.status) j.reason = `its output passed ${MAX_OUTPUT}`;
+        else if (!j.killing) fleet().notify(j.id, `Job ${j.id}: the processes its shell left running were stopped because its output passed ${MAX_OUTPUT}. Log: ${j.log}`);
         void stop(j);
         return;
       }
       quiet = now === size ? quiet + 1 : 0;
-      const prompt = openLine(j.log);
-      if (j.bg && !j.status && !j.warned && quiet >= QUIET_TICKS && PROMPT.test(prompt)) {
+      const prompt = j.bg && !j.status && !j.warned && quiet >= QUIET_TICKS ? openLine(j.log) : "";
+      if (PROMPT.test(prompt)) {
         j.warned = true;
         fleet().notify(j.id, `Job ${j.id} may be waiting for input: its output stopped at "${oneLine(prompt).trim().slice(-200)}". It gets no input; stop it and rerun it non-interactively.`);
       }
@@ -194,7 +169,7 @@ export default function (pi: ExtensionAPI) {
 
   function background(j: Job) {
     j.bg = true;
-    j.counted = true;
+    j.g.count();
     j.fg = undefined;
     fleet().register({
       id: j.id,
@@ -207,24 +182,12 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  /**
-   * SIGTERM to the process group, SIGKILL after KILL_MS if any of it is still alive. The
-   * group, not the shell: processes the shell left behind are signalled after it exits.
-   * A process that calls setsid leaves the group, and nothing here reaches it.
-   */
+  /** Ends the job's process group, then its tick once the group is gone. */
   async function kill(j: Job) {
     j.killing = true;
-    signalGroup(groupOf(j), "SIGTERM");
-    const grace = delay(KILL_MS);
-    await Promise.race([j.done, grace]);
-    if (groupOf(j)) {
-      await grace;
-      signalGroup(groupOf(j), "SIGKILL");
-      // Killed processes linger briefly as zombies until init reaps them; the group is gone after.
-      for (let i = 0; i < 100 && groupOf(j); i++) await delay(ZOMBIE_MS);
-    }
+    await j.g.kill();
     await j.done;
-    if (!groupOf(j)) timers().clearTimeout(j.tick as any);
+    if (!j.g.alive()) timers().clearTimeout(j.tick as any);
   }
 
   /** Stops a running job, or what a finished one left running in its group. */
@@ -264,8 +227,8 @@ export default function (pi: ExtensionAPI) {
           return reject(handle);
         }
         let offset = 0;
+        const buf = Buffer.alloc(64 * 1024);
         const drain = () => {
-          const buf = Buffer.alloc(64 * 1024);
           for (let n; (n = readSync(fd, buf, 0, buf.length, offset)) > 0; offset += n) o.onData(Buffer.from(buf.subarray(0, n)));
         };
         const poll = setInterval(drain, POLL_MS);
@@ -274,7 +237,7 @@ export default function (pi: ExtensionAPI) {
         // The auto-background timer, Ctrl+B and a steer submitted meanwhile (through fleet) all move it here.
         // A child that has exited but not settled yet (its exit event before settle's microtask) finishes inline.
         const move = (head: string) => {
-          if (j.status || !j.fg || j.child.exitCode !== null || j.child.signalCode !== null) return;
+          if (j.status || !j.fg || j.g.child.exitCode !== null || j.g.child.signalCode !== null) return;
           handle.head = head;
           drain();
           end();
@@ -450,8 +413,6 @@ export default function (pi: ExtensionAPI) {
     closing = true;
     await Promise.all([...jobs.values()].map(stop));
     jobs.clear();
-    try {
-      if (dir) rmdirSync(dir); // only when no job left a log
-    } catch {}
+    dir.remove();
   });
 }

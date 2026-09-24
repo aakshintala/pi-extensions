@@ -1,15 +1,12 @@
 // The monitor tool (spec #30, ticket #50), with Claude Code's rules: each batch of
 // lines a watch command prints on stdout becomes one notice to the agent, cut and
 // rate-limited; a flood, the deadline or 5 GB of output stops it as failed. Stdout goes to a log the
-// FleetView row shows, stderr to a separate log. Every timer runs on the seam below.
-import { spawn, type ChildProcess } from "node:child_process";
+// FleetView row shows, stderr to a separate log. Every timer runs on process-groups' seam.
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdtempSync, openSync, rmdirSync, writeSync } from "node:fs";
-import { constants, tmpdir } from "node:os";
-import { join } from "node:path";
-import { getShellConfig, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { closeSync, fstatSync, openSync, writeSync } from "node:fs";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { fleet } from "../../shared/fleet/index.ts";
-import { groupOf, pastOutputCap, signalGroup, tooManyJobs, track, type Group } from "../../shared/process-groups/index.ts";
+import { logDir, MAX_OUTPUT, MAX_OUTPUT_BYTES, spawnGroup, timers, tooManyJobs } from "../../shared/process-groups/index.ts";
 import { oneLine, unfinished } from "../../shared/text/index.ts";
 import { resultText, toolRenderers } from "../../shared/tool-display/index.ts";
 
@@ -30,23 +27,14 @@ const FLOOD_MS = 30_000;
 const DEFAULT_S = 300;
 const MAX_S = 1800;
 const MAX_HEADLESS_S = 600;
-/** Grace between SIGTERM and SIGKILL to the monitor's process group. */
-const KILL_MS = 800;
-/** How often a killed group is checked until its zombies are reaped. */
-const ZOMBIE_MS = 10;
-
-type Timers = Pick<typeof globalThis, "setTimeout" | "clearTimeout">;
-/** Refill, flood, deadline and kill timers. Tests replace them through this symbol. */
-const timers = (): Timers => (globalThis as any)[Symbol.for("pi-rig.monitor.timers")] ?? globalThis;
-// Referenced: a headless Pi must not exit before a pending SIGKILL fires.
-const delay = (ms: number) => new Promise<void>((r) => timers().setTimeout(r, ms));
 
 /** The first `n` code points of `s`. */
 const cut = (s: string, n: number) => (s.length <= n ? s : Array.from(s).slice(0, n).join(""));
 
 type Reason = "flooded" | "timeout" | "output" | "stopped" | "shutdown";
-type Monitor = Group & {
+type Monitor = {
   id: string;
+  g: ReturnType<typeof spawnGroup>;
   owner: string;
   description: string;
   log: string;
@@ -73,7 +61,7 @@ type Monitor = Group & {
 
 export default function (pi: ExtensionAPI) {
   const monitors = new Map<string, Monitor>();
-  let dir: string | undefined; // this session's log directory, left for the OS to clean
+  const dir = logDir("monitor");
 
   const name = (m: Monitor) => `Monitor ${m.id} (${cut(oneLine(m.description), NAME_CHARS)})`;
 
@@ -105,34 +93,16 @@ export default function (pi: ExtensionAPI) {
   function start(p: { command: string; description: string }, seconds: number, c: ExtensionContext): Monitor {
     const full = tooManyJobs();
     if (full) throw new Error(full);
-    dir ??= mkdtempSync(join(tmpdir(), "pi-monitor-"));
     const id = randomUUID().slice(0, 8);
-    const log = join(dir, `${id}.log`);
-    const errors = join(dir, `${id}.err.log`);
+    const log = dir.path(`${id}.log`);
+    const errors = dir.path(`${id}.err.log`);
+    const g = spawnGroup({ command: p.command, cwd: c.cwd, dir, id, stderr: errors, counted: true });
     const out = openSync(log, "a", 0o600);
-    const err = openSync(errors, "a", 0o600);
-    const shell = getShellConfig();
-    const stdin = shell.commandTransport === "stdin";
-    let child: ChildProcess;
-    try {
-      child = spawn(shell.shell, stdin ? shell.args : [...shell.args, p.command], { cwd: c.cwd, detached: true, stdio: [stdin ? "pipe" : "ignore", "pipe", err] });
-    } catch (e) {
-      closeSync(out);
-      throw e;
-    } finally {
-      closeSync(err);
-    }
-    if (stdin) {
-      child.stdin?.on("error", () => {});
-      child.stdin?.end(p.command);
-    }
-    const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
-    const m: Monitor = { id, owner: c.sessionManager.getSessionId(), description: p.description, log, errors, seconds, child, pgid: child.pid, record: join(dir, `${id}.pid`), counted: true, out, tokens: BUDGET, dropped: 0, partial: "", last: "", done: closed.then(() => settle(m)) };
-    track(m);
-    child.stdout?.setEncoding("utf8"); // whole code points, even across chunks
-    child.stdout?.on("data", (chunk: string) => {
+    const m: Monitor = { id, g, owner: c.sessionManager.getSessionId(), description: p.description, log, errors, seconds, out, tokens: BUDGET, dropped: 0, partial: "", last: "", done: g.closed.then(() => settle(m)) };
+    g.child.stdout?.setEncoding("utf8"); // whole code points, even across chunks
+    g.child.stdout?.on("data", (chunk: string) => {
       writeSync(m.out, chunk);
-      if (!m.reason && pastOutputCap(log)) void stop(m, "output");
+      if (!m.reason && fstatSync(m.out).size > MAX_OUTPUT_BYTES) void stop(m, "output");
       const lines = (m.partial + chunk).split("\n");
       m.partial = lines.pop()!;
       if (m.partial.length > PARTIAL_MAX) {
@@ -144,33 +114,21 @@ export default function (pi: ExtensionAPI) {
       if (tail) m.last = cut(oneLine(tail), LINE_CHARS);
       if (lines.length && !m.reason) deliver(m, lines);
     });
-    child.once("exit", (code, signal) => {
-      m.code = code ?? 128 + (signal ? constants.signals[signal] ?? 0 : 0);
+    void g.exited.then((code) => {
+      m.code = code;
       void kill(m); // ends what the shell left in its group, and a pipe held open past it
     });
-    child.once("error", () => ((m.code = 127), void kill(m)));
     m.deadline = timers().setTimeout(() => void stop(m, "timeout"), seconds * 1000);
     monitors.set(id, m);
     fleet().register({ id, owner: m.owner, kind: "monitor", label: oneLine(p.description), activity: () => m.last, view: { log }, stop: () => stop(m, "stopped") });
     return m;
   }
 
-  /**
-   * SIGTERM to the group; if any of it is alive after KILL_MS, SIGKILL until it is empty,
-   * then the pipe closed. `groupOf` forgets the group, and its crash record, once it is empty.
-   */
+  /** Ends the group, then closes the pipe. */
   function kill(m: Monitor) {
     return (m.killed ??= (async () => {
-      signalGroup(groupOf(m), "SIGTERM");
-      const grace = delay(KILL_MS);
-      await Promise.race([m.done, grace]);
-      if (groupOf(m)) {
-        await grace;
-        signalGroup(groupOf(m), "SIGKILL");
-        // Killed processes linger briefly as zombies until init reaps them.
-        for (let i = 0; i < 100 && groupOf(m); i++) await delay(ZOMBIE_MS);
-      }
-      m.child.stdout?.destroy(); // a process outside the group may still hold it
+      await m.g.kill();
+      m.g.child.stdout?.destroy(); // a process outside the group may still hold it
       await m.done;
       monitors.delete(m.id);
     })());
@@ -197,7 +155,7 @@ export default function (pi: ExtensionAPI) {
     const end = {
       flooded: ["failed", "flooded", `${name(m)} failed [flooded]: it printed faster than the rate limit for ${FLOOD_MS / 1000}s. Tighten the command's filter so it prints fewer lines. ${logs}`],
       timeout: ["failed", "timeout", `${name(m)} failed [timeout]: it reached its ${m.seconds}s deadline. ${logs}`],
-      output: ["failed", "output", `${name(m)} failed [output]: its output passed 5 GB. Tighten the command's filter. ${logs}`],
+      output: ["failed", "output", `${name(m)} failed [output]: its output passed ${MAX_OUTPUT}. Tighten the command's filter. ${logs}`],
       stopped: ["stopped", "stopped", `${name(m)} stopped. ${logs}`],
       shutdown: ["stopped", "stopped", null],
     } as const;
@@ -242,8 +200,6 @@ export default function (pi: ExtensionAPI) {
   // Monitors belong to this session: shutdown, reload and session switch stop every one, without a notice.
   pi.on("session_shutdown", async () => {
     await Promise.all([...monitors.values()].map((m) => stop(m, "shutdown")));
-    try {
-      if (dir) rmdirSync(dir); // only when no monitor left a log
-    } catch {}
+    dir.remove();
   });
 }

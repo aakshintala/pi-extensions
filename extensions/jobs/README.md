@@ -33,6 +33,7 @@ Spec: #30. Built in #48, #49 (guards and crash clean-up) and #51
     `/bin/sleep`, `\sleep`, `$(...)` and backticks.
 - `jobs({ action, id?, timeout? })`:
   - `list`: the session's jobs with status, running time, log path and command.
+    Only the 20 most recent finished jobs are kept.
   - `wait`: returns when the job ends or after `timeout` seconds (default 30,
     clamped to 10-3,600), with its status and last lines. Cancelling the wait
     leaves the job running.
@@ -62,7 +63,7 @@ Only the session that started a job can see, wait on or stop it.
   handler sends SIGKILL to every job group it started.
 - When a job starts, its process group, its leader's start time and Pi's
   pid and start time are recorded next to its log, until the group is
-  empty. When a session starts, groups recorded by a Pi that has ended
+  empty. When the first session of a process starts, groups recorded by a Pi that has ended
   (killed with SIGKILL, for example) are killed, but only while the leader's
   start time still matches, so a reused pid is never signalled. Only this
   user's 0700 directories and 0600 records are read, and group ids of 1 or
@@ -77,7 +78,8 @@ Only the session that started a job can see, wait on or stop it.
   run at once, counting jobs whose shell exited while their leftover
   processes still run; `run_in_background` past that is refused. A foreground
   command can still run, and can still move to the background after
-  `autoBackgroundSeconds`. 16 is above the peak of 10 at once measured in
+  `autoBackgroundSeconds` or on Ctrl+B, even past the cap, so it never
+  blocks the turn; it then counts toward the cap. 16 is above the peak of 10 at once measured in
   the user's Pi session logs.
 - A job whose log passes 5 GB is stopped, and its notice says so. So are the
   processes a finished job left running, with a notice of their own.

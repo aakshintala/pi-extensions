@@ -18,7 +18,7 @@ import { rigSettings } from "../shared/settings/index.ts";
 
 const path = (p) => fileURLToPath(new URL(p, import.meta.url));
 const EXTENSIONS = [path("../extensions/fleet/index.ts"), path("../extensions/jobs/index.ts")];
-const TIMERS = Symbol.for("pi-rig.jobs.timers");
+const TIMERS = Symbol.for("pi-rig.timers");
 
 // The process's one settings instance, pinned to a directory this file owns.
 const settingsDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-jobs-settings-")));
@@ -314,6 +314,20 @@ test("wait times out with the job running, its timeout clamped to 10-3,600 s; li
   const list = await jobs.execute("c1", { action: "list" }, undefined, undefined, other);
   assert.equal(list.content[0].text, "No jobs.");
   await assert.rejects(jobs.execute("c2", { action: "stop", id }, undefined, undefined, other), { message: `No job ${id} of yours. Use an id from jobs list.` });
+});
+
+test("jobs list keeps the 20 most recent finished jobs", async (t) => {
+  const s = await start(t, []);
+  const tool = (name) => s.session.extensionRunner.getToolDefinition(name);
+  const ids = [];
+  for (let i = 0; i < 22; i++) {
+    const r = await tool("bash").execute(`c${i}`, { command: "true", run_in_background: true }, undefined, undefined, s.ctx());
+    ids.push(s.jobId(r.content[0].text));
+    await until(() => fleet().get(ids.at(-1))?.status === "completed", "the job to end");
+  }
+  const list = (await tool("jobs").execute("l", { action: "list" }, undefined, undefined, s.ctx())).content[0].text;
+  // The 22nd start forgot the oldest of the 21 finished before it.
+  assert.deepEqual([...list.matchAll(/^Job (\w{8})/gm)].map((m) => m[1]), ids.slice(1));
 });
 
 test("cancelling a wait leaves the job running", async (t) => {
@@ -635,12 +649,13 @@ test("at most 16 jobs and monitors run at once; more starts are refused, foregro
     says("done"),
   ]);
   // 15 groups tracked by others in this process, such as monitors or another session's jobs.
-  const { track } = await import("../shared/process-groups/index.ts");
+  const { logDir, spawnGroup } = await import("../shared/process-groups/index.ts");
+  const dir = logDir("monitor");
+  t.after(() => rmSync(dirname(dir.path("x")), { recursive: true, force: true }));
   for (let i = 0; i < 15; i++) {
-    const child = spawn("tail", ["-f", "/dev/null"], { detached: true, stdio: "ignore" });
+    const { child } = spawnGroup({ command: FOREVER, cwd: s.cwd, dir, id: `other${i}`, stdout: "/dev/null", stderr: "/dev/null", counted: true });
     // Waits for the exit: until it is reaped, the group still counts toward the cap.
     t.after(() => killed(child));
-    track({ child, pgid: child.pid, record: join(s.cwd, `other${i}.pid`), counted: true });
   }
   await s.session.prompt("go");
   const r = s.results();
@@ -705,23 +720,25 @@ test("each job's group and start time are recorded until its group is empty, lin
 });
 
 test("a hanging ps delays a spawn by at most its 1 s timeout, and no record is written", async (t) => {
-  const { startTimeSync, track } = await import("../shared/process-groups/index.ts");
+  const { logDir, spawnGroup, startTimeSync } = await import("../shared/process-groups/index.ts");
   const bin = realpathSync(mkdtempSync(join(tmpdir(), "pi-rig-jobs-ps-")));
-  const child = spawn("tail", ["-f", "/dev/null"], { detached: true, stdio: "ignore" });
+  const dir = logDir("jobs");
   const path = process.env.PATH;
+  let child;
   t.after(() => {
     process.env.PATH = path;
     rmSync(bin, { recursive: true, force: true });
-    return killed(child);
+    rmSync(dirname(dir.path("x")), { recursive: true, force: true });
+    return child && killed(child);
   });
   writeFileSync(join(bin, "ps"), "#!/bin/sh\nexec sleep 5\n", { mode: 0o755 });
   process.env.PATH = `${bin}:${path}`;
   const began = Date.now();
-  assert.equal(startTimeSync(child.pid), undefined);
-  track({ child, pgid: child.pid, record: join(bin, "x.pid") });
+  assert.equal(startTimeSync(process.pid), undefined);
+  ({ child } = spawnGroup({ command: FOREVER, cwd: bin, dir, id: "x", stdout: "/dev/null", stderr: "/dev/null", counted: false }));
   const took = Date.now() - began;
   assert.ok(took < 4500, `up to three ps runs (this one, Pi's and the leader's) took ${took} ms`); // 10-15 s without the timeout
-  assert.equal(existsSync(join(bin, "x.pid")), false, "an unknown start time writes no record");
+  assert.equal(existsSync(dir.path("x.pid")), false, "an unknown start time writes no record");
 });
 
 test("a killed Pi's jobs and monitors are reaped on the next start; nothing else is", async (t) => {
