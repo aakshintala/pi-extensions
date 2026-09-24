@@ -2,6 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import "../../tests/fixtures/tool-display/pi-tui.mjs";
 
+const { ToolGroups } = await import("../../shared/tool-display/index.ts");
+// These sessions draw pending calls; the grace period has its own tests.
+ToolGroups.defaultGraceMs = 0;
+
 const { RENDERERS } = await import("./index.ts");
 const theme = { fg: (_k, t) => t, bold: (t) => t };
 const ctx = (args) => ({ args, cwd: "/w", isPartial: false, isError: false, expanded: false });
@@ -37,7 +41,7 @@ test("a child session's start, agent_end and shutdown leave the parent's groups 
 
   const draw = (id) => RENDERERS.read.renderCall({ path: id }, theme, { ...ctx({ path: id }), toolCallId: id, invalidate() {} });
   ["p1", "p2"].forEach(draw);
-  assert.deepEqual(["p1", "p2"].flatMap((id) => draw(id).render(80)), [" ⠋ Read 2 files"]);
+  assert.deepEqual(["p1", "p2"].flatMap((id) => draw(id).render(80)), [" ⏺ Read 2 files"]);
   parent("session_shutdown");
 });
 
@@ -64,15 +68,15 @@ test("sessions that share a call id keep their own groups", async () => {
   child("tool_execution_end", { toolCallId: "dup", isError: false, result: { content: [] } });
   const draw = (b) => RENDERERS.read.renderCall(b.arguments, theme, { ...ctx(b.arguments), toolCallId: b.id, invalidate() {} });
   parentCalls.forEach(draw);
-  assert.deepEqual(parentCalls.flatMap((b) => draw(b).render(80)), [" ⠋ Read 2 files"], "while both run");
+  assert.deepEqual(parentCalls.flatMap((b) => draw(b).render(80)), [" ⏺ Read 2 files"], "while both run");
   child("session_shutdown");
-  assert.deepEqual(parentCalls.flatMap((b) => draw(b).render(80)), [" ⠋ Read 2 files"], "after the child shuts down");
+  assert.deepEqual(parentCalls.flatMap((b) => draw(b).render(80)), [" ⏺ Read 2 files"], "after the child shuts down");
   parent("session_shutdown");
 });
 
 // #40: "A call that returned an error before the abort counts as failed." Esc while
 // the model is only thinking after a real error must not hide that error.
-test("a real error stays failed and shown when Esc comes during a thinking-only reply, live and after reopen", async () => {
+test("a real error stays failed and folded when Esc comes during a thinking-only reply, live and after reopen", async () => {
   const { default: toolDisplay } = await import("./index.ts");
   const on = {};
   toolDisplay({ registerTool() {}, on: (name, f) => (on[name] = f) });
@@ -93,7 +97,7 @@ test("a real error stays failed and shown when Esc comes during a thinking-only 
   emit("agent_end");
   const draw = () => RENDERERS.read.renderCall(call.arguments, theme, { ...ctx(call.arguments), toolCallId: call.id, invalidate() {} }).render(80);
   // The reply with only thinking belongs to the run, so it leads the summary (#133).
-  const want = [" ⏺ thought · read 1 file · 1 failed", " ⏺ Read(missing.txt)"];
+  const want = [" ⏺ thought · read 1 file"];
   assert.deepEqual(draw(), want, "live");
   emit("session_shutdown");
   branch.push(...saved.map((message) => ({ type: "message", message })));

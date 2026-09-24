@@ -19,12 +19,31 @@ async function send(tui, text, n) {
   await tui.waitForEvent("agent_end", n);
 }
 
-test("widget: markers, one collapsed done line, overflow cap, hidden when cleared", async (t) => {
+test("widget: one compact row, click expands the capped list, hidden when cleared", async (t) => {
   const open = Array.from({ length: 9 }, (_, i) => ({ text: `step ${i + 1}`, status: i ? "pending" : "in_progress" }));
   const done = [{ text: "a", status: "completed" }, { text: "b", status: "completed" }];
   const tui = await start(t, { extensions: [EXT], replies: [call([...done, ...open]), "Planned.", call([]), "Cleared."] });
 
   await send(tui, "plan", 1);
+  await tui.waitForScreen(`
+
+ plan
+
+
+ ⏺ TodoWrite
+   ⎿  Todo list saved: 8 pending, 1 in_progress, 2 completed.
+
+ Planned.
+
+ ◼ step 1 · 8 pending · 2 done
+────────────────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+~/cwd
+↑132 ↓109 R3 W133 CH1.1% 0.2%/128k (auto)                              harness-1
+\n\n\n\n\n\n\n\n`);
+  tui.type("/todos");
+  tui.keys("Enter");
   await tui.waitForScreen(`
 
  plan
@@ -76,6 +95,27 @@ test("widget: markers, one collapsed done line, overflow cap, hidden when cleare
 ~/cwd
 ↑169 ↓117 R275 W170 CH70.7% 0.2%/128k (auto)                           harness-1
 `);
+});
+
+test("widget: a fullscreen click expands and collapses the list", async (t) => {
+  const todos = [{ text: "test", status: "in_progress" }, { text: "ship", status: "pending" }];
+  const tui = await start(t, { extensions: [EXT], args: ["--tui-mode", "fullscreen"], replies: [call(todos), "Planned."] });
+  await send(tui, "plan", 1);
+  const compact = " ◼ test · 1 pending";
+  const expanded = " ◻ ship";
+  const until = async (text, present) => {
+    const deadline = Date.now() + 20_000;
+    while (tui.screen().includes(text) !== present) {
+      if (Date.now() > deadline) throw new Error(tui.screen());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  await until(compact, true);
+  tui.click(4, tui.screen().split("\n").indexOf(compact) + 1);
+  await until(expanded, true);
+  tui.click(4, tui.screen().split("\n").indexOf(" ◼ test") + 1);
+  await until(compact, true);
+  await until(expanded, false);
 });
 
 test("widget: a fully completed list is hidden after the next prompt", async (t) => {

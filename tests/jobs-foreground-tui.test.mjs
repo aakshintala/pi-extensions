@@ -50,7 +50,7 @@ const screen = (chat, top, below, usage) => {
 };
 const CHAT = ["", " go", "", "", ` ⏺ Bash(${COMMAND})`];
 const RUNNING = screen([...CHAT, ""], WORKING, [], "↑2 ↓17 W2 CH0.0% 0.0%/128k (auto)");
-const ROW = [" ● main", `   shell ${COMMAND} · 0s · started`];
+const ROW = [" ● main", "   1 shell running in background"]; // running shells share one row
 
 /** The job ID and log path the result names, read off the screen once it shows. */
 async function moved(tui) {

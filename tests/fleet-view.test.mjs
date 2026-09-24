@@ -42,26 +42,92 @@ test("rows show kind, label, running time and activity, nested under their paren
   await tui.fx(
     { add: "a", kind: "agent", label: "scout", activity: "reading src/a.ts" },
     { add: "b", kind: "shell", label: "npm test", parent: "a", activity: "PASS 3" },
-    { add: "c", kind: "agent", label: "helper", parent: "b", activity: "thinking" },
-    { add: "d", kind: "monitor", label: "ci watch", status: "queued" },
+    { add: "c", kind: "agent", label: "helper", parent: "a", activity: "thinking" },
     { clock: 65 },
   );
   await tui.waitForScreen(idle([
     " ● main",
-    "   agent scout · 1m05s · reading src/a.ts",
-    "     shell npm test · 1m05s · PASS 3",
-    "       agent helper · 1m05s · thinking",
-    "   monitor ci watch · queued",
+    "   agent scout · 1m05s",
+    "    └─ reading src/a.ts",
+    "     agent helper · 1m05s",
+    "      └─ thinking",
+    "   1 shell running in background",
   ]));
 
   await tui.fx({ act: "b", text: "PASS 4" }, { clock: 3725 });
   await tui.waitForScreen(idle([
     " ● main",
-    "   agent scout · 1h02m · reading src/a.ts",
-    "     shell npm test · 1h02m · PASS 4",
-    "       agent helper · 1h02m · thinking",
-    "   monitor ci watch · queued",
+    "   agent scout · 1h02m",
+    "    └─ reading src/a.ts",
+    "     agent helper · 1h02m",
+    "      └─ thinking",
+    "   1 shell running in background",
   ]));
+});
+
+async function waitForText(tui, text) {
+  for (let i = 0; i < 100 && !tui.screen().includes(text); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(tui.screen().includes(text), `expected ${text} in screen:\n${tui.screen()}`);
+}
+
+test("running shells share one row; Enter lists only running shells and opens a log", async (t) => {
+  const tui = await start(t, { args: ["--tui-mode", "fullscreen"] });
+  await tui.fx(
+    { add: "a", kind: "shell", label: "build" },
+    { add: "b", kind: "shell", label: "lint" },
+    { add: "c", kind: "shell", label: "old job" },
+    { finish: "c", status: "failed", result: "exit 1" },
+  );
+  await waitForText(tui, "2 shells running in background");
+  tui.keys("Down", "Down", "Enter");
+  await waitForText(tui, "Running shells");
+  assert.match(tui.screen(), /build · a/);
+  assert.match(tui.screen(), /lint · b/);
+  assert.doesNotMatch(tui.screen(), /old job/);
+  tui.keys("Enter");
+  await waitForText(tui, "shell build · 0s · esc back");
+  await tui.fx({ finish: "a", status: "completed", result: "ok" });
+  await waitForText(tui, "1 shell running in background");
+  await tui.fx({ finish: "b", status: "completed", result: "ok" });
+  for (let i = 0; i < 100 && /shells? running in background/.test(tui.screen()); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.match(tui.screen(), /shell build · done 0s · esc back/); // log stays open after the last shell finishes
+  assert.doesNotMatch(tui.screen(), /shells? running in background/);
+  tui.keys("Escape");
+  for (let i = 0; i < 100 && tui.screen().includes("shell build · done 0s · esc back"); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.doesNotMatch(tui.screen(), /shell build · done 0s · esc back/);
+});
+
+test("the shell picker opens a log in regular mode", async (t) => {
+  const tui = await start(t);
+  await tui.fx({ add: "a", kind: "shell", label: "build" });
+  await tui.waitForScreen(idle([" ● main", "   1 shell running in background"]));
+  tui.keys("Down", "Down", "Enter");
+  await waitForText(tui, "Running shells");
+  tui.keys("Enter");
+  await waitForText(tui, "shell build · 0s · esc back");
+  tui.keys("Escape");
+  await tui.waitForScreen(idle([" ● main", "   1 shell running in background"]));
+});
+
+test("x on the shell row lets you stop one running shell", async (t) => {
+  const tui = await start(t);
+  await tui.fx({ add: "a", kind: "shell", label: "build" }, { add: "b", kind: "shell", label: "lint" });
+  await tui.waitForScreen(idle([" ● main", "   2 shells running in background"]));
+  tui.keys("Down", "Down", "x");
+  await waitForText(tui, "Stop running shell");
+  tui.keys("Enter");
+  await tui.waitForScreen(idle([" ● main", "›  1 shell running in background", KEYS]));
+});
+
+test("a click on an agent's activity line opens that agent", async (t) => {
+  const tui = await start(t, { args: ["--tui-mode", "fullscreen"] });
+  await tui.fx({ add: "a", kind: "agent", label: "scout", activity: "reading", transcript: "agent transcript" });
+  await waitForText(tui, "└─ reading");
+  const y = tui.screen().split("\n").findIndex((line) => line.includes("└─ reading")) + 1;
+  assert.ok(y > 0);
+  tui.click(10, y);
+  for (let i = 0; i < 100 && !tui.screen().includes("agent scout · 0s · esc back"); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.match(tui.screen(), /agent scout · 0s · esc back/);
 });
 
 test("control sequences are stripped from every row", async (t) => {
@@ -81,14 +147,14 @@ test("control sequences are stripped from every row", async (t) => {
   );
   await tui.waitForScreen(idle([
     " ● main",
-    "   agent scout · 0s · red next",
-    "   shell tab here · 0s · wipe",
+    "   agent scout · 0s",
+    "    └─ red next",
     "   monitor ci · failed 0s · exit 1",
-    "   shell eightbit · 0s · abcdef",
+    "   2 shells running in background",
   ]));
 });
 
-test("finished rows leave 30 s after they finish, without a prompt; a prompt does not remove them", async (t) => {
+test("finished rows leave 10 s after they finish, without a prompt; a prompt does not remove them", async (t) => {
   const tui = await start(t, { replies: ["ok"] });
   await tui.fx(
     { add: "a", kind: "agent", label: "scout" },
@@ -101,8 +167,8 @@ test("finished rows leave 30 s after they finish, without a prompt; a prompt doe
   );
   await tui.waitForScreen(idle([
     " ● main",
-    "   agent scout · done 5s · found 3 files",
-    "   shell build · stopped 7s · stopped by user",
+    "   agent scout · done 5s",
+    "    └─ found 3 files",
     "   monitor ci · 7s",
   ]));
 
@@ -112,45 +178,46 @@ test("finished rows leave 30 s after they finish, without a prompt; a prompt doe
   const chat = (fleet) => pad(["", " go", "", "", " ok", "", BORDER, "", BORDER, ...fleet, "~/cwd", "↑2 ↓1 W2 CH0.0% 0.0%/128k (auto)                                       harness-1"]);
   await tui.waitForScreen(chat([
     " ● main",
-    "   agent scout · done 5s · found 3 files",
-    "   shell build · stopped 7s · stopped by user",
+    "   agent scout · done 5s",
+    "    └─ found 3 files",
     "   monitor ci · 7s",
   ]));
 
-  await tui.fx({ clock: 34.9 });
+  await tui.fx({ clock: 14.9 });
   await tui.waitForScreen(chat([
     " ● main",
-    "   agent scout · done 5s · found 3 files",
-    "   shell build · stopped 7s · stopped by user",
-    "   monitor ci · 34s",
+    "   agent scout · done 5s",
+    "    └─ found 3 files",
+    "   monitor ci · 14s",
   ]));
-  await tui.fx({ clock: 35 }); // 30 s after scout finished
-  await tui.waitForScreen(chat([" ● main", "   shell build · stopped 7s · stopped by user", "   monitor ci · 35s"]));
-  await tui.fx({ clock: 37 });
-  await tui.waitForScreen(chat([" ● main", "   monitor ci · 37s"]));
+  await tui.fx({ clock: 15 }); // 10 s after scout finished
+  await tui.waitForScreen(chat([" ● main", "   monitor ci · 15s"]));
+  await tui.fx({ clock: 17 });
+  await tui.waitForScreen(chat([" ● main", "   monitor ci · 17s"]));
 });
 
-test("a selected finished row stays until the selection leaves it, then 30 s more", async (t) => {
+test("a selected finished row stays until the selection leaves it, then 10 s more", async (t) => {
   const tui = await start(t);
   const later = join(tui.home, "later");
   await tui.fx(
-    { add: "a", kind: "shell", label: "build" },
-    { add: "b", kind: "shell", label: "lint" },
+    { add: "a", kind: "agent", label: "build" },
+    { add: "b", kind: "agent", label: "lint" },
     { finish: "a", status: "completed", result: "ok" },
     { finish: "b", status: "completed", result: "ok" },
     { clockWhen: later, clock: 100 },
   );
   tui.keys("Down", "Down", "Down"); // lint is selected; build, above it, is not
+  await tui.waitForScreen(idle([" ● main", "   agent build · done 0s", "    └─ ok", "›  agent lint · done 0s", "    └─ ok", KEYS]));
   writeFileSync(later, "");
   await tui.waitForEvent("clock");
-  const selected = idle([" ● main", "›  shell lint · done 0s · ok", KEYS]);
+  const selected = idle([" ● main", "›  agent lint · done 0s", "    └─ ok", KEYS]);
   await tui.waitForScreen(selected); // build left; the selection stays on lint
   tui.keys("Escape"); // leaves it at 100 s
-  const left = idle([" ● main", "   shell lint · done 0s · ok"]);
+  const left = idle([" ● main", "   agent lint · done 0s", "    └─ ok"]);
   await tui.waitForScreen(left);
-  await tui.fx({ clock: 129 });
+  await tui.fx({ clock: 109.9 });
   await tui.waitForScreen(left);
-  await tui.fx({ clock: 130 });
+  await tui.fx({ clock: 110 });
   await tui.waitForScreen(idle());
 });
 
@@ -163,7 +230,7 @@ test("a finished item stays finished when its producer updates it", async (t) =>
     { clock: 9 },
     { update: "a", status: "running", label: "renamed" },
   );
-  await tui.waitForScreen(idle([" ● main", "   agent scout · done 5s · found 3 files"]));
+  await tui.waitForScreen(idle([" ● main", "   agent scout · done 5s", "    └─ found 3 files"]));
 });
 
 test("an activity line that throws breaks only its own row", async (t) => {
@@ -172,7 +239,7 @@ test("an activity line that throws breaks only its own row", async (t) => {
     { add: "a", kind: "agent", label: "broken", throws: true, detail: ["kid-1"] },
     { add: "b", kind: "shell", label: "fine", activity: "PASS 3" },
   );
-  await tui.waitForScreen(idle([" ● main", "   agent broken · 0s · detail failed · activity failed", "   shell fine · 0s · PASS 3"]));
+  await tui.waitForScreen(idle([" ● main", "   agent broken · 0s · detail failed", "    └─ activity failed", "   1 shell running in background"]));
 });
 
 test("detail fields follow the status and drop from the right when the row is narrow; the label and status stay", async (t) => {
@@ -189,8 +256,9 @@ test("detail fields follow the status and drop from the right when the row is na
   await wide.waitForScreen(idle([
     " ● main",
     "   agent scout · done 2m13s · claude-sonnet-4-5 · high · 41.2k tokens · $0.31",
+    "    └─ STATUS: DONE",
     "   agent a-very-long-agent-label-that-fills-the-row · 2m13s · claude-sonnet-4-5",
-    "   shell test · 2m13s · npm · PASS src/a.test.ts, src/b.test.ts, src/c.test.t...",
+    "   1 shell running in background",
   ]));
 
   const narrow = await start(t, { cols: 60 });
@@ -200,29 +268,35 @@ test("detail fields follow the status and drop from the right when the row is na
     "", border, "", border,
     " ● main",
     "   agent scout · done 2m13s · claude-sonnet-4-5 · high",
+    "    └─ STATUS: DONE",
     "   agent a-very-long-agent-label-that-fills-the-row · 2m13s",
-    "   shell test · 2m13s · npm · PASS src/a.test.ts, src/b.t...",
+    "   1 shell running in background",
     "~/cwd",
     "0.0%/128k (auto)                                   harness-1",
   ]));
 });
 
-test("arrow keys at an empty prompt move through FleetView; Esc returns", async (t) => {
+test("arrow keys at an empty prompt move through FleetView and past either end; Esc returns", async (t) => {
   const tui = await start(t);
   await tui.fx({ add: "a", kind: "agent", label: "one" }, { add: "b", kind: "shell", label: "two" });
   const screen = (marks, editor = "") =>
-    idle([`${marks[0]}● main`, `${marks[1]}  agent one · 0s`, `${marks[2]}  shell two · 0s`, ...(marks.trim() ? [KEYS] : [])], editor);
+    idle([`${marks[0]}● main`, `${marks[1]}  agent one · 0s`, `${marks[2]}  1 shell running in background`, ...(marks.trim() ? [KEYS] : [])], editor);
   await tui.waitForScreen(screen("   "));
 
   tui.keys("Down");
   await tui.waitForScreen(screen("›  "));
   tui.keys("Down");
   await tui.waitForScreen(screen(" › "));
-  tui.keys("Down", "Down"); // stops at the last row
+  tui.keys("Down");
   await tui.waitForScreen(screen("  ›"));
-  tui.keys("Up");
-  await tui.waitForScreen(screen(" › "));
-  tui.keys("Escape");
+  tui.keys("Down"); // past the last row: back to the editor
+  await tui.waitForScreen(screen("   "));
+
+  tui.keys("Down"); // re-enter: empty editor, so Down focuses main again
+  await tui.waitForScreen(screen("›  "));
+  tui.keys("Up"); // past the first row: back to the editor
+  await tui.waitForScreen(screen("   "));
+  tui.keys("Escape"); // already out: nothing happens
   await tui.waitForScreen(screen("   "));
 
   tui.keys("Left");
@@ -240,8 +314,8 @@ test("arrow keys at an empty prompt move through FleetView; Esc returns", async 
 test("rows stay within the line budget and scroll to the selection", async (t) => {
   const tui = await start(t);
   const labels = ["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8"];
-  await tui.fx(...labels.map((l) => ({ add: l, kind: "shell", label: l })));
-  const row = (label, sel) => `${sel ? "›" : " "}  shell ${label} · 0s`;
+  await tui.fx(...labels.map((l) => ({ add: l, kind: "agent", label: l })));
+  const row = (label, sel) => `${sel ? "›" : " "}  agent ${label} · 0s`;
   // Focused, the keys line takes one of the 6 lines.
   const view = (first, sel) => {
     const all = [`${sel === 0 ? "›" : " "}● main`, ...labels.map((l, i) => row(l, sel === i + 1))];
@@ -257,6 +331,18 @@ test("rows stay within the line budget and scroll to the selection", async (t) =
   await tui.waitForScreen(view(5, 8));
   tui.keys(...Array(8).fill("Up"));
   await tui.waitForScreen(view(0, 0));
+});
+
+test("scrolling keeps each agent's activity with its selectable row", async (t) => {
+  const tui = await start(t);
+  await tui.fx(...["a1", "a2", "a3", "a4"].map((id) => ({ add: id, kind: "agent", label: id, activity: "working" })));
+  await tui.waitForScreen(idle([
+    " ● main", "   agent a1 · 0s", "    └─ working", "   agent a2 · 0s", "    └─ working", "   … 2 more",
+  ]));
+  tui.keys("Down", "Down", "Down"); // second agent, below the focused viewport
+  await tui.waitForScreen(idle([
+    "   agent a1 · 0s", "    └─ working", "›  agent a2 · 0s", "    └─ working", "   … 3 more", KEYS,
+  ]));
 });
 
 test("notices are one compact themed line; a failure shows its error", async (t) => {
@@ -291,8 +377,8 @@ test("notices are one compact themed line; a failure shows its error", async (t)
     "",
     BORDER,
     " ● main",
-    "   agent scout · done 5s · found 3 files second line",
-    "   shell npm test · failed 7s · exit 1 Error: boom",
+    "   agent scout · done 5s",
+    "    └─ found 3 files second line",
     "   monitor ci watch · 7s",
     "~/cwd",
     "↑26 ↓5 R16 W26 CH44.4% 0.0%/128k (auto)                                harness-1",
@@ -302,13 +388,13 @@ test("notices are one compact themed line; a failure shows its error", async (t)
 test("x stops the selected running or queued row at once; on a finished row or main it does nothing", async (t) => {
   const tui = await start(t);
   await tui.fx(
-    { add: "a", kind: "shell", label: "build" },
+    { add: "a", kind: "agent", label: "build" },
     { add: "b", kind: "monitor", label: "ci", status: "queued" },
     { add: "c", kind: "agent", label: "scout" },
-    { finish: "c", status: "completed", result: "found 3 files" },
+    { finish: "c", status: "completed", result: "" },
   );
   const rows = (marks, a = "0s", b = "queued") =>
-    idle([`${marks[0]}● main`, `${marks[1]}  shell build · ${a}`, `${marks[2]}  monitor ci · ${b}`, `${marks[3]}  agent scout · done 0s · found 3 files`, KEYS]);
+    idle([`${marks[0]}● main`, `${marks[1]}  agent build · ${a.split(" · ")[0]}`, ...(a.startsWith("stopped") ? ["    └─ stopped by user"] : []), `${marks[2]}  monitor ci · ${b}`, `${marks[3]}  agent scout · done 0s`, KEYS]);
   tui.keys("Down", "x"); // main: nothing to stop, and x is not typed into the editor
   await tui.waitForScreen(rows("›   "));
   tui.keys("Down", "x");
@@ -325,15 +411,14 @@ test("Ctrl+X Ctrl+K in FleetView stops every running or queued agent and leaves 
   const tui = await start(t);
   await tui.fx(
     { add: "a", kind: "agent", label: "scout" },
-    { add: "b", kind: "agent", label: "helper", status: "queued" },
-    { add: "c", kind: "shell", label: "build" },
+    { add: "b", kind: "shell", label: "build" },
   );
   tui.keys("Down", "C-x", "C-k");
   await tui.waitForScreen(idle([
     "›● main",
-    "   agent scout · stopped 0s · stopped by user",
-    "   agent helper · stopped 0s · stopped by user",
-    "   shell build · 0s",
+    "   agent scout · stopped 0s",
+    "    └─ stopped by user",
+    "   1 shell running in background",
     KEYS,
   ]));
 });
@@ -359,7 +444,7 @@ for (const cols of [30, 60]) {
   });
 }
 const ROWS_AT = {
-  30: ["   agent a-very-long-… · 2m13s", "   shell test · 2m13s"],
-  60: ["   agent a-very-long-agent-label-that-fills-the-row… · 2m13s", "   shell test · 2m13s"],
+  30: ["   agent a-very-long-… · 2m13s", "    └─ reading", "   1 shell running in backg..."],
+  60: ["   agent a-very-long-agent-label-that-fills-the-row… · 2m13s", "    └─ reading", "   1 shell running in background"],
 };
 

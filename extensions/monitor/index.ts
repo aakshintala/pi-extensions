@@ -247,6 +247,7 @@ export default function (pi: ExtensionAPI) {
     ...toolRenderers({
       title: "Monitor",
       arg: (a: any) => oneLine(a?.description ?? ""),
+      summary: { verb: "started", one: "monitor" },
       result: (r: any) => ({ summary: oneLine(resultText(r)), body: [] }),
     }),
   } as any);

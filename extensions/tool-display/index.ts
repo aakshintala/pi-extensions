@@ -19,9 +19,6 @@ import {
 } from "../../shared/tool-display/index.ts";
 import { releaseHiddenThinking, useHiddenThinking } from "./thinking.ts";
 
-/** Spinner frame interval for running groups. */
-const SPIN_MS = 80;
-
 const textLines = (text: string) => (text === "" ? [] : text.replace(/\n$/, "").split("\n"));
 
 const contentLines = (a: any) => textLines(typeof a?.content === "string" ? a.content : "");
@@ -84,10 +81,10 @@ export default function (pi: ExtensionAPI, piVersion: string = VERSION) {
   // from the saved branch at session start and after /tree, so a resumed transcript
   // groups the same way. Each session (each instance of this extension) has its own groups.
   const groups = new ToolGroups();
-  let timer: ReturnType<typeof setInterval> | undefined;
-  const stopSpinner = () => {
-    clearInterval(timer);
-    timer = undefined;
+  let refresh: ReturnType<typeof setInterval> | undefined;
+  const stopRefresh = () => {
+    clearInterval(refresh);
+    refresh = undefined;
   };
   const load = (branch: any[]) => {
     groups.reset();
@@ -109,15 +106,16 @@ export default function (pi: ExtensionAPI, piVersion: string = VERSION) {
   pi.on("message_end", (e) => groups.track(e.message));
   pi.on("tool_execution_end", (e) => groups.settle(e.toolCallId, e.isError, e.result));
   pi.on("agent_start", () => {
-    timer ??= setInterval(() => groups.tick(), SPIN_MS);
+    // Keep the grace-period reveal and changing hints, without animating tool rows.
+    refresh ??= setInterval(() => groups.refreshPending(), 250);
   });
   pi.on("agent_end", () => {
-    stopSpinner();
+    stopRefresh();
     groups.endRun();
   });
   pi.on("session_shutdown", () => {
     releaseHiddenThinking(groups);
-    stopSpinner();
+    stopRefresh();
     groups.reset();
   });
 }

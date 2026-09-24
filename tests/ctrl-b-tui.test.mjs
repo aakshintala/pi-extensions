@@ -19,6 +19,12 @@ const BORDER = "─".repeat(COLS);
 const FOOTER = ["~/cwd", "0.0%/128k (auto)".padEnd(COLS - "harness-1".length) + "harness-1"];
 const RELOADED = " Reloaded keybindings, extensions, skills, prompts, themes, and context files";
 
+/** Waits for a fragment to appear on the screen, where an exact screen would be brittle. */
+async function waitForText(tui, text) {
+  for (let i = 0; i < 100 && !tui.screen().includes(text); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.ok(tui.screen().includes(text), `expected ${text} in screen:\n${tui.screen()}`);
+}
+
 // The chat, the editor, what is under it, and the footer.
 const screen = (chat, editor = "", below = []) => {
   const lines = [...chat, BORDER, editor, BORDER, ...below, ...FOOTER];
@@ -81,18 +87,18 @@ test("Ctrl+B blocked again by a reload warns once, at the next key", async (t) =
 test("Ctrl+B calls every registered handler, and reaches the editor once none is registered", async (t) => {
   const tui = await start(t);
   await tui.fx({ add: "j", kind: "shell", label: "build" }, { fg: "a" }, { fg: "b" }, { fg: "c" }, { fgEnd: "c" });
-  await tui.waitForScreen(screen([""], "", [" ● main", "   shell build · 0s"]));
+  await tui.waitForScreen(screen([""], "", [" ● main", "   1 shell running in background"]));
 
   tui.keys("C-b");
   await tui.waitForEvent("bg:b");
-  await tui.waitForScreen(screen([""], "", [" ● main", "   shell build · 0s"]));
+  await tui.waitForScreen(screen([""], "", [" ● main", "   1 shell running in background"]));
   assert.deepEqual(tui.events().filter((e) => e.startsWith("bg:")), ["bg:a", "bg:b"]);
 
   // With nothing to background, Ctrl+B reaches the editor, which no longer binds it.
   tui.type("ab");
   tui.keys("C-b");
   tui.type("X");
-  await tui.waitForScreen(screen([""], "abX", [" ● main", "   shell build · 0s"]));
+  await tui.waitForScreen(screen([""], "abX", [" ● main", "   1 shell running in background"]));
 });
 
 test("a handler that throws is dropped: the next Ctrl+B reaches the editor", async (t) => {
@@ -111,21 +117,24 @@ test("a handler that throws is dropped: the next Ctrl+B reaches the editor", asy
 
 test("FleetView keeps all 6 lines for rows while a command can be backgrounded", async (t) => {
   const tui = await start(t);
-  await tui.fx(...["a", "b", "c", "d", "e", "f"].map((id) => ({ add: id, kind: "shell", label: id })), { fg: "x" });
-  await tui.waitForScreen(screen([""], "", [" ● main", "   shell a · 0s", "   shell b · 0s", "   shell c · 0s", "   shell d · 0s", "   … 2 more"]));
+  await tui.fx(...["a", "b", "c", "d", "e", "f"].map((id) => ({ add: id, kind: "agent", label: id })), { fg: "x" }); // agents keep one row each, so the 6-line window shows
+  await tui.waitForScreen(screen([""], "", [" ● main", "   agent a · 0s", "   agent b · 0s", "   agent c · 0s", "   agent d · 0s", "   … 2 more"]));
 });
 
 test("Ctrl+B is not taken from an overlay", async (t) => {
   const tui = await start(t);
   await tui.fx({ add: "j", kind: "shell", label: "build" }, { fg: "a" });
   const overlay = (bottom) => "\n" + [" shell build · 0s · esc back", ...Array(ROWS - 2).fill(""), bottom].join("\n");
-  tui.keys("Down", "Down", "Enter"); // regular mode: the viewer is a full-size overlay
+  tui.keys("Down", "Down", "Enter"); // the shared shells row: a picker over the running shells opens
+  await waitForText(tui, "Running shells");
+  assert.match(tui.screen(), /build · j/, "the picker lists the only running shell");
+  tui.keys("Enter"); // the only running shell: exit into its log viewer
   await tui.waitForScreen(overlay("›"));
   tui.keys("C-b"); // the overlay has focus: Ctrl+B is left to it
   tui.type("hi");
   await tui.waitForScreen(overlay("› hi"));
   tui.keys("Escape");
-  await tui.waitForScreen(screen([""], "", [" ● main", "   shell build · 0s"]));
+  await tui.waitForScreen(screen([""], "", [" ● main", "   1 shell running in background"]));
   assert.deepEqual(tui.events().filter((e) => e.startsWith("bg:")), []);
   tui.keys("C-b");
   await tui.waitForEvent("bg:a");
@@ -137,10 +146,13 @@ test("Ctrl+B backgrounds while FleetView has focus on an item shown in the chat 
   // Fullscreen: the item takes the chat area, FleetView keeps focus on its row (#136), and Pi's editor keeps TUI focus.
   const viewing = (below) => {
     const lines = [" shell build · 0s · esc back"];
-    const bottom = [BORDER, "", BORDER, "   main", "›● shell build · 0s", " Enter to view · x to stop · ctrl+x ctrl+k to stop all agents", ...below, ...FOOTER];
+    const bottom = [BORDER, "", BORDER, "   main", "›● 1 shell running in background", " Enter to view · x to stop · ctrl+x ctrl+k to stop all agents", ...below, ...FOOTER];
     return "\n" + [...lines, ...Array(ROWS - lines.length - bottom.length).fill(""), ...bottom].join("\n");
   };
-  tui.keys("Down", "Down", "Enter");
+  tui.keys("Down", "Down", "Enter"); // the shared shells row: pick the job from the picker
+  await waitForText(tui, "Running shells");
+  assert.match(tui.screen(), /build · j/, "the picker lists the only running shell");
+  tui.keys("Enter");
   await tui.waitForScreen(viewing([]));
   tui.keys("C-b");
   await tui.waitForEvent("bg:a");

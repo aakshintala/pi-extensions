@@ -5,37 +5,39 @@ Collapses each run of tool calls into one summary line, and draws the built-in
 (`shared/tool-display/`), the way Claude Code shows them.
 
 ```
- ⏺ Read 1 file, edited 2 files +3 −2, wrote 1 file +6 · 1 failed
- ⏺ Edit(a.txt)
-   ⎿  Error: Could not find the exact text in a.txt. …
+ ⏺ Read 1 file, edited 2 files +3 −2, wrote 1 file +6
 ```
 
 - **Groups span responses (#133).** Consecutive calls share one summary line,
   across assistant responses, so an agent run of tool-only responses is one
-  line. Every call counts under its verb; `+a −r` comes from finished edits and
-  writes. It updates live, with a spinner while calls run. Inside a group, the
-  calls after the first and the tool-only responses between them draw no rows.
+  line. Shell executions fold into the groups around them. Every call counts
+  under its verb; `+a −r` comes from finished edits and writes. It updates live,
+  while Pi's editor shows the only animated working indicator. Inside a group, the calls after the first and
+  the tool-only responses between them draw no rows.
 - **What splits a group:** assistant text, thinking that is shown (Ctrl+T, or a
-  click on the block), your prompt, a steer or follow-up, a custom message or
-  notice drawn in the chat, a tool without a summary (such as `ask_user`), and
-  the end of the agent run. Hidden thinking does not.
-- **Failed calls always shown** right under their group's summary, with no
-  blank rows. Calls that returned an image also show, each with a blank row above
-  it (Pi draws images outside the tool's renderers).
-- **Running calls with a hint show** outside the summary, with a spinner and a
+  click on the block), your prompt, a steer or follow-up, an agent completion
+  notice, a tool without a summary (such as `ask_user`), and
+  the end of the agent run. Hidden thinking does not. A finished shell job or
+  monitor draws no notice, so it never splits a group.
+- **Failed, cancelled and image calls stay folded** under their group's summary,
+  with no blank rows or alerts. Ctrl+O or a click reveals failure details.
+  Image calls draw no text rows collapsed (Pi still draws the image itself).
+- **Slow calls show; fast ones never flash.** A pending group draws nothing until
+  a call settles or runs for a second, so a quick read never appears and
+  disappears. Genuinely slow calls get a static summary row.
+- **Running calls with a hint show** outside the summary, with a static mark and a
   dim hint line, and fold back in when they end. A foreground `bash` shows
   `ctrl+b to run in background` this way (#139):
 
   ```
-   ⠋ Ran 1 shell command
-   ⠋ Bash(npm test)
+   ⏺ Ran 1 shell command
+   ⏺ Bash(npm test)
      ⎿  ctrl+b to run in background
   ```
 
 - **Cancelled.** When a turn is aborted (Esc), calls with no result and calls
   whose error ends in Pi's `Operation aborted` or `Command aborted` count as
-  `cancelled` in the error colour. They are counted, not shown. Any other
-  returned error stays failed and shown.
+  `cancelled` when expanded. Any other returned error stays failed and folded.
 - **Ctrl+O** (`app.tools.expand`) shows every call on its own. In fullscreen
   mode, a click on a group opens or closes that group only (Pi sends mouse
   clicks only in fullscreen mode).
@@ -65,8 +67,8 @@ Expanded, each call looks like this:
 - **Edit diffs from the arguments.** The diff is computed from the call's
   `oldText`/`newText`, never by reading the file. Edits over 100,000
   characters show no diff.
-- **Errors always shown.** A failed call shows `Error:` and the message, wrapped
-  to the terminal width.
+- **Expanded errors.** An expanded failed call shows `Error:` and the message,
+  wrapped to the terminal width.
 - **Pi's own tools.** `read`, `edit` and `write` are built from Pi's
   exported tool definitions, so their descriptions, parameters and execution
   are Pi's. Registering them under the same names replaces the built-ins; only

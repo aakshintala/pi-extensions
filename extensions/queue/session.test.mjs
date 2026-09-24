@@ -100,7 +100,7 @@ test("steering goes in at the next turn boundary, follow-ups after the run, each
   assert.deepEqual(state.widget, []);
 });
 
-test("edit in place, delete and cancel change what is delivered; the draft comes back", async (t) => {
+test("retrieving, cycling and deleting queued rows preserves edits and the draft", async (t) => {
   const g = gate();
   const { session, state, press } = await start(t, [async () => (await g.wait(), tool()), say("turned"), say("f")]);
   const run = session.prompt("go");
@@ -111,7 +111,7 @@ test("edit in place, delete and cancel change what is delivered; the draft comes
   state.editor = "my draft";
   press("alt+up"); // the most recent: f1
   assert.equal(state.editor, "f1");
-  assert.deepEqual(state.widget, [" Steering (2) · next turn", "   s1", "   s2", " Follow-ups (1) · after the run", " › f1"]);
+  assert.deepEqual(state.widget, [" Steering (2) · next turn", "   s1", "   s2"]);
   await session.prompt("f1 edited", { streamingBehavior: "steer" }); // Enter saves in place
   assert.equal(state.editor, "my draft");
 
@@ -121,16 +121,34 @@ test("edit in place, delete and cancel change what is delivered; the draft comes
   press("alt+x"); // s2 gone; f1 edited is selected
   assert.equal(state.editor, "f1 edited");
   state.editor = "thrown away";
-  press("escape"); // Esc cancels
+  press("escape"); // Esc requeues the edited text; Pi aborts outside this fake UI
   assert.equal(state.editor, "my draft");
-  assert.deepEqual(state.widget, [" Steering (1) · next turn", "   s1", " Follow-ups (1) · after the run", "   f1 edited"]);
+  assert.deepEqual(state.widget, [" Steering (1) · next turn", "   s1", " Follow-ups (1) · after the run", "   thrown away"]);
 
   g.open();
   await run;
-  assert.deepEqual(transcript(session), ["user: go", "assistant: [ls]", "user: s1", "assistant: turned", "user: f1 edited", "assistant: f"]);
+  assert.deepEqual(transcript(session), ["user: go", "assistant: [ls]", "user: s1", "assistant: turned", "user: thrown away", "assistant: f"]);
 });
 
-test("a message delivered while it is being edited ends the edit with a notice", async (t) => {
+test("Option+Up takes a steer out of the queue; submitting the edit delivers it once", async (t) => {
+  const g = gate();
+  const { session, state, press, enter } = await start(t, [async () => (await g.wait(), tool()), say("reply")]);
+  const run = session.prompt("go");
+  await g.waiting;
+  await session.prompt("original", { streamingBehavior: "steer" });
+  press("alt+up");
+  assert.deepEqual(state.widget, [], "the original must leave the queue when editing starts");
+  assert.equal(state.editor, "original");
+  state.editor = "revised";
+  await enter();
+  assert.deepEqual(state.widget, [" Steering (1) · next turn", "   revised"]);
+  g.open();
+  await run;
+  await session.agent.waitForIdle?.();
+  assert.deepEqual(transcript(session), ["user: go", "assistant: [ls]", "user: revised", "assistant: reply"]);
+});
+
+test("a retrieved message stays out of the queue until submitted", async (t) => {
   const g = gate();
   const { session, state, press } = await start(t, [async () => (await g.wait(), tool()), say("turned")]);
   const run = session.prompt("go");
@@ -141,12 +159,44 @@ test("a message delivered while it is being edited ends the edit with a notice",
   state.editor = "half edi";
   g.open();
   await run;
-  assert.equal(state.editor, "draft");
-  assert.deepEqual(state.notices, ["info: The queued message you were editing was delivered"]);
-  assert.deepEqual(transcript(session), ["user: go", "assistant: [ls]", "user: s1", "assistant: turned"]);
+  assert.equal(state.editor, "half edi");
+  assert.deepEqual(state.widget, []);
+  assert.deepEqual(state.notices, []);
+  assert.deepEqual(transcript(session), ["user: go", "assistant: [ls]", "assistant: turned"]);
 });
 
-test("abort keeps the queue, paused, until the next submission", async (t) => {
+test("Esc while editing after the run settles sends the edited steer", async (t) => {
+  const g = gate();
+  const { session, state, press } = await start(t, [async () => (await g.wait(), tool()), say("first"), say("edited reply")]);
+  const run = session.prompt("go");
+  await g.waiting;
+  await session.prompt("original", { streamingBehavior: "steer" });
+  press("alt+up");
+  state.editor = "edited";
+  g.open();
+  await run;
+  await session.agent.waitForIdle();
+  press("escape");
+  for (let i = 0; i < 100 && !transcript(session).includes("user: edited"); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(transcript(session).filter((line) => line.startsWith("user:")), ["user: go", "user: edited"]);
+});
+
+test("aborting a turn starts a new turn with its queued steer", async (t) => {
+  const g = gate();
+  const { session, state } = await start(t, [async () => (await g.wait(), tool()), say("steered")]);
+  const run = session.prompt("go");
+  await g.waiting;
+  await session.prompt("queued steer", { streamingBehavior: "steer" });
+  const aborting = session.abort();
+  g.open();
+  await Promise.all([run, aborting]);
+  await session.agent.waitForIdle?.();
+  assert.deepEqual(state.widget, []);
+  assert.deepEqual(transcript(session).filter((line) => line.startsWith("user:")), ["user: go", "user: queued steer"]);
+  assert.equal(transcript(session).at(-1), "assistant: steered");
+});
+
+test("abort sends queued steering on a new turn, then delivers the follow-up", async (t) => {
   const g = gate();
   const { session, state } = await start(t, [async () => (await g.wait(), tool()), say("fresh"), say("s-reply"), say("f-reply")]);
   const run = session.prompt("go");
@@ -156,18 +206,8 @@ test("abort keeps the queue, paused, until the next submission", async (t) => {
   const aborting = session.abort();
   g.open();
   await Promise.all([run, aborting]);
-  assert.deepEqual(state.widget, [" Steering (1) · paused", "   s1", " Follow-ups (1) · paused", "   f1"]);
-  assert.deepEqual(transcript(session).slice(0, 1), ["user: go"]);
-
-  await session.prompt("new prompt");
-  assert.deepEqual(transcript(session).slice(-6), [
-    "user: new prompt",
-    "assistant: fresh",
-    "user: s1",
-    "assistant: s-reply",
-    "user: f1",
-    "assistant: f-reply",
-  ]);
+  await session.agent.waitForIdle?.();
+  assert.deepEqual(transcript(session).filter((line) => line.startsWith("user:")), ["user: go", "user: s1", "user: f1"]);
   assert.deepEqual(state.widget, []);
 });
 
@@ -325,6 +365,23 @@ test("a queued /reload keeps the draft typed while it waited", async (t) => {
   await run;
   await reloaded;
   assert.equal(state.editor, "half-typed draft");
+});
+
+test("reload while editing preserves the edited row and restores the previous draft", async (t) => {
+  const g = gate();
+  const { session, state, press } = await start(t, [async () => (await g.wait(), tool()), say("before")]);
+  const run = session.prompt("go");
+  await g.waiting;
+  await session.prompt("original", { streamingBehavior: "steer" });
+  state.editor = "previous draft";
+  press("alt+up");
+  state.editor = "edited before reload";
+  // Pi's reload can be invoked outside the editor, even while a row is detached.
+  await session.reload();
+  assert.equal(state.editor, "previous draft");
+  assert.deepEqual(state.widget, [" Steering (1) · next turn", "   edited before reload"]);
+  g.open();
+  await run;
 });
 
 test("a queued /reload waits while a picker or the label editor has focus", async (t) => {

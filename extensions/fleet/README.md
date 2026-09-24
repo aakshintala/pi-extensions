@@ -1,22 +1,23 @@
 # fleet
 
-FleetView: one list below the editor of all background work (agents, shell jobs and monitors) that other rig extensions register. Opening a row shows that item in the viewer. It also delivers their notices to the model. Spec: #29.
+FleetView lists agents, monitors and running shells below the editor. Open an agent or monitor directly; select a shell from the shared shell row to see its log. FleetView also delivers work notices to the model. Spec: #29.
 
-- The first row is the main session. Every item follows, and nested items are indented under their parent.
-- Each row shows kind, label, running time and the latest activity. A finished row shows its status and result.
-- An item's detail fields, such as an agent's model, thinking level, tokens and cost, follow its status. On a narrow row they drop from the right: once one does not fit, it and everything after it, the activity or result too, is dropped. The label is shortened with `…` so the status always shows.
-- A finished item leaves 30 s after it finishes. While it is selected, open in the viewer or has a running item under it, it stays, and the 30 s count from when that ends. Sending a prompt removes nothing.
-- FleetView shows at most 6 lines. A `… N more` line counts the hidden rows, and the list scrolls to keep the selection visible.
-- FleetView is hidden when nothing is registered.
-- Terminal control sequences are stripped from every row. A row whose activity line throws shows `activity failed`.
+- The first row is the main session. Agents and monitors follow; nested items are indented under their parent. Each agent's activity or result sits on an indented `└─` line attached to its row.
+- Running background shells share one row: `N shells running in background`. Enter or click to choose a running shell, then view its log. The row disappears when the last shell finishes. An open log stays open until you go back.
+- Agent and monitor rows show kind, label, running time and status. Monitors show their latest activity or result on the same row. A finished agent shows its result on the linked line.
+- An item's detail fields, such as an agent's model, thinking level, tokens and cost, follow its status. On a narrow row they drop from the right. The label is shortened with `…` so the status always shows. An agent's linked activity remains visible.
+- A finished agent or monitor leaves its row after 10 seconds. A finished shell leaves the shared shell row at once. Finished items stay in the registry while selected, open in the viewer or above running work; the 10 seconds start when that ends. Sending a prompt removes nothing.
+- FleetView shows at most 6 lines. A `… N more` line counts hidden items; the list scrolls by whole items, keeping an agent and its activity together.
+- FleetView is hidden when there are no visible agents, monitors or running shells.
+- Terminal control sequences are stripped from every row. An agent or monitor whose activity throws shows `activity failed`.
 
 ## Viewer
 
-- Enter or a click on a row shows that item in place of the chat. `●` marks the item on screen, and focus stays on its row (`›`).
+- Enter or a click on an agent or monitor row shows it in place of the chat. Click an agent's activity line to open the same agent. Enter or click the shell row to pick a running shell and open its log. `●` marks the item on screen, and focus stays on its row (`›`).
 - Up, Down and Enter on another row switch straight to it. Enter on `main` returns to the chat, with focus on `main`.
 - Esc in FleetView returns to the prompt with the item still open, so typing steers it. A second Esc closes it.
-- While FleetView has focus, a dim line under its rows gives its keys: `Enter to view · x to stop · ctrl+x ctrl+k to stop all agents`. It counts toward the 6 lines. A stop goes through the item's own `stop()`, so its notice and the row's decay work as usual.
-- A shell job or monitor shows its log file, read as it grows, with colours kept and other control sequences stripped. An agent shows its transcript.
+- While FleetView has focus, a dim line under its rows gives its keys: `Enter to view · x to stop · ctrl+x ctrl+k to stop all agents`. It counts toward the 6 lines. On the shell row, `x` lets you choose which running shell to stop. A stop uses the item's own `stop()`, so its notice and decay work as usual.
+- A shell job or monitor shows its log file, read as it grows, with colors kept and other control sequences stripped. An agent shows its transcript.
 - Main-session output keeps going to the chat while you view an item, so you see it when you return.
 - The viewer follows new output. Scrolling up pauses it, and End jumps back to the end and follows again.
 - What you type while viewing an agent steers it and shows in the viewer, echoed by the viewer unless the item's transcript shows its steers itself (`showsSteers`). Other items take no steering. Slash commands still go to Pi; nothing else reaches the main session.
@@ -26,8 +27,11 @@ FleetView: one list below the editor of all background work (agents, shell jobs 
 
 ## Notices
 
-- Each notice shows in the chat as one themed line: `✓ agent scout · done 5s · found 3 files`.
+- An agent's completion shows in the chat as one themed line: `✓ agent scout · done 5s · found 3 files`.
 - A failed (`✗`) or stopped (`■`) notice shows the whole error or reason under that line, with nothing to expand.
+- A finished shell job or monitor draws no notice: its result already reached the model,
+  and the tool groups around it stay collapsed. Failures, stops and running warnings
+  still show.
 - A notice that arrives while the session is idle starts a turn. One that arrives during a turn joins it at the next step, so notices that arrive together share one turn.
 
 ## Ending with work running
@@ -61,7 +65,7 @@ Until then Ctrl+B keeps moving the cursor, the hint never shows, and a warning n
 | Down or Left | Empty prompt | Focuses FleetView, on the open item, or on `main` when none is open |
 | Up / Down | FleetView focused | Moves the selection |
 | Enter | FleetView focused | Opens the selected row |
-| x | FleetView focused | Stops the selected running or queued item at once, with no confirmation |
+| x | FleetView focused | Stops the selected running or queued item. On the shell row, choose the shell first |
 | Ctrl+X, then Ctrl+K | FleetView focused | Stops every running or queued agent this session started, with its subagents; jobs and monitors keep running |
 | Esc | FleetView focused | Returns to the prompt; an open item stays open |
 | Click | Fullscreen mode | Opens the row, like Enter |

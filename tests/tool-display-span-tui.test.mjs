@@ -39,7 +39,7 @@ async function start(t, replies, { extensions = [TOOL_DISPLAY], tools = "read,ed
   return tui;
 }
 
-test("four tool-only responses are one summary line: thought, combined counts, the failure under it; Ctrl+O opens every call in order", async (t) => {
+test("four tool-only responses are one summary line: thought, combined counts, the failure folded; Ctrl+O opens every call in order", async (t) => {
   const tui = await start(
     t,
     [
@@ -56,10 +56,7 @@ test("four tool-only responses are one summary line: thought, combined counts, t
   const top = ["", " Thinking blocks: hidden", "", "", " go", "", ""];
   await tui.waitForScreen(rows(
     ...top,
-    " ⏺ thought · read 2 files, edited 2 files +1 −1, wrote 1 file +1 · 1 failed",
-    " ⏺ Edit(a.txt)",
-    "   ⎿  Error: Could not find the exact text in a.txt. The old text must match",
-    "      exactly including all whitespace and newlines.",
+    " ⏺ thought · read 2 files, edited 2 files +1 −1, wrote 1 file +1",
     "",
     " Done.",
     ...footer(usage),
@@ -95,8 +92,8 @@ test("a steer delivered at the end of a turn splits the run", async (t) => {
   await tui.waitForEvent("message_end", 2); // the prompt, then the response calling wait
   tui.type("also this");
   tui.keys("Enter");
-  // The group spinner's first frame comes round every 800 ms; the wait fixture keeps Pi's own indicator still.
-  await tui.waitForScreen(rows("", " go", "", "", " ⠋ Waited on 1 file", "", " Steering: also this", ` ↳ ${process.platform === "darwin" ? "Option" : "Alt"}+Up to edit all queued messages`, "",
+  // A running group shows the static ⏺ summary at once; the wait fixture keeps Pi's own indicator still.
+  await tui.waitForScreen(rows("", " go", "", "", " ⏺ Waited on 1 file", "", " Steering: also this", ` ↳ ${process.platform === "darwin" ? "Option" : "Alt"}+Up to edit all queued messages`, "",
     `── ~ Working ${"─".repeat(67)}`, "", RULE, "~/cwd", "↑2 ↓5 W2 CH0.0% 0.0%/128k (auto)                                       harness-1"));
   writeFileSync(join(tui.cwd, "go"), "");
   await tui.waitForEvent("agent_end");
@@ -111,11 +108,11 @@ test("ask_user splits the run", async (t) => {
     tools: "read,ask_user",
   });
   await tui.waitForEvent("message_end", 4);
-  await tui.waitForScreen(rows("", " go", "", "", " ⏺ Read 1 file", "", "", " ask_user", "", "", "Which?", "", "→ 1. Alpha", "  2. Beta",
-    "  3. Type your own answer", "", "  ↑↓ move · Enter choose · Esc cancel", "~/cwd", "↑19 ↓34 R2 W19 CH5.6% 0.1%/128k (auto)                                 harness-1"));
+  await tui.waitForScreen(rows("", " go", "", "", " ⏺ Read 1 file", "", " ⏺ Ask User(pick)", "", RULE, "Which?", "", "→ 1. Alpha", "  2. Beta",
+    "  3. Type your own answer", "", "  ↑↓ move · Enter choose · Esc cancel", RULE, "~/cwd", "↑19 ↓34 R2 W19 CH5.6% 0.1%/128k (auto)                                 harness-1"));
   tui.keys("Enter");
   await tui.waitForEvent("agent_end");
-  await tui.waitForScreen(rows("", " go", "", "", " ⏺ Read 1 file", "", "", " ask_user", " pick: Alpha", "", "", " ⏺ Read 1 file", "", " Done.",
+  await tui.waitForScreen(rows("", " go", "", "", " ⏺ Read 1 file", "", " ⏺ Ask User(pick)", "   ⎿  pick: Alpha", "", " ⏺ Read 1 file", "", " Done.",
     ...footer("↑75 ↓42 R79 W76 CH62.4% 0.1%/128k (auto)                               harness-1")));
 });
 

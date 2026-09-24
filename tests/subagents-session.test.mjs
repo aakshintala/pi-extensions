@@ -1344,8 +1344,8 @@ test("the tree's tool definitions go with its root: after its shutdown a transcr
     view.dispose();
     return text;
   };
-  // The rig's own renderer, from the child session this tree ran.
-  assert.match(draw(), /⏺ Stop\(ffffffff\)/);
+  // The rig's own renderer, from the child session this tree ran: the failed stop folds into its summary.
+  assert.match(draw(), /⏺ Stopped 1 subagent/);
   await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
   const after = draw();
   assert.doesNotMatch(after, /Stop\(/);

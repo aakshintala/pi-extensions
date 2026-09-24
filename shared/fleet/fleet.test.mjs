@@ -130,7 +130,7 @@ function fake(fleet) {
 }
 const ids = (fleet) => fleet.items().map((i) => i.id);
 
-test("a finished item leaves 30 s after it finishes, and no timer runs while nothing has finished", () => {
+test("a finished shell leaves 10 s after it finishes, and no timer runs while nothing has finished", () => {
   const fleet = createFleet();
   const clock = fake(fleet);
   fleet.register(job("a", "s1"));
@@ -138,18 +138,31 @@ test("a finished item leaves 30 s after it finishes, and no timer runs while not
   clock.tick(100);
   assert.equal(clock.pending.size, 0);
   fleet.finish("a", "completed", "ok", null);
-  clock.tick(10);
+  clock.tick(5);
   fleet.finish("b", "failed", "exit 1", null);
-  clock.tick(19.999);
+  clock.tick(4.999);
   assert.deepEqual(ids(fleet), ["a", "b"]);
   clock.tick(0.001);
   assert.deepEqual(ids(fleet), ["b"]);
-  clock.tick(10);
+  clock.tick(5);
   assert.deepEqual(ids(fleet), []);
   assert.equal(clock.pending.size, 0);
 });
 
-test("a viewed or selected item stays until it is left, then leaves 30 s later", () => {
+test("finished agents and monitors also leave after 10 s", () => {
+  const fleet = createFleet();
+  const clock = fake(fleet);
+  fleet.register({ ...job("a", "s1"), kind: "agent" });
+  fleet.register({ ...job("m", "s1"), kind: "monitor" });
+  fleet.finish("a", "completed", "ok", null);
+  fleet.finish("m", "failed", "error", null);
+  clock.tick(9.999);
+  assert.deepEqual(ids(fleet), ["a", "m"]);
+  clock.tick(0.001);
+  assert.deepEqual(ids(fleet), []);
+});
+
+test("a viewed or selected item stays until it is left, then leaves 10 s later", () => {
   const fleet = createFleet();
   const clock = fake(fleet);
   fleet.register(job("a", "s1"));
@@ -162,11 +175,14 @@ test("a viewed or selected item stays until it is left, then leaves 30 s later",
   clock.tick(300);
   assert.deepEqual(ids(fleet), ["a", "b"]);
   fleet.viewing = undefined;
-  clock.tick(20);
-  fleet.selected = undefined;
-  clock.tick(10);
+  clock.tick(9.999);
+  assert.deepEqual(ids(fleet), ["a", "b"]);
+  clock.tick(0.001);
   assert.deepEqual(ids(fleet), ["b"]);
-  clock.tick(20);
+  fleet.selected = undefined;
+  clock.tick(9.999);
+  assert.deepEqual(ids(fleet), ["b"]);
+  clock.tick(0.001);
   assert.deepEqual(ids(fleet), []);
 });
 

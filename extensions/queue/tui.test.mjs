@@ -9,6 +9,8 @@ import { liveGroup, startTui } from "../../tests/helpers/tui.mjs";
 
 const EXT = new URL("./index.ts", import.meta.url).pathname;
 const GATE = new URL("../../tests/fixtures/queue/gate.ts", import.meta.url).pathname;
+const TODO = new URL("../todo/index.ts", import.meta.url).pathname;
+const OTHER = new URL("../../tests/fixtures/queue/other-widget.ts", import.meta.url).pathname;
 const gateCall = [{ type: "toolCall", id: "g1", name: "gate", arguments: {} }];
 
 async function start(t, replies) {
@@ -21,6 +23,40 @@ async function start(t, replies) {
 }
 
 const release = (tui) => writeFileSync(join(tui.cwd, "release-1"), "");
+
+for (const [extensions, fullscreen] of [[[EXT, TODO, OTHER], false], [[OTHER, TODO, EXT], false], [[OTHER, TODO, EXT], true]]) {
+  test(`steering is above TODOs and other widgets (${extensions[0] === EXT ? "queue first" : "queue last"}, ${fullscreen ? "fullscreen" : "regular"})`, async (t) => {
+    const tui = await startTui(t, {
+      extensions: [GATE, ...extensions],
+      args: fullscreen ? ["--tui-mode", "fullscreen"] : [],
+      replies: [
+        [{ type: "toolCall", id: "t1", name: "todo_write", arguments: { todos: [{ text: "plan", status: "pending" }] } }],
+        "Planned.",
+        gateCall,
+        "Done.",
+      ],
+    });
+    t.after(() => assert.deepEqual(liveGroup(tui.pid), []));
+    tui.type("plan");
+    tui.keys("Enter");
+    await tui.waitForEvent("agent_end");
+    tui.type("work");
+    tui.keys("Enter");
+    await tui.waitForEvent("gate_waiting");
+    tui.type("steer me");
+    tui.keys("Enter");
+    const aboveBoth = (s) => s.includes("steer me") && s.indexOf("Steering (1)") < s.indexOf("◻ plan") && s.indexOf("Steering (1)") < s.indexOf("another widget");
+    for (let i = 0; i < 100 && !aboveBoth(tui.screen()); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(aboveBoth(tui.screen()), tui.screen());
+    tui.type("/other-widget");
+    tui.keys("Enter");
+    await waitForText(tui, /another widget updated/);
+    for (let i = 0; i < 100 && !aboveBoth(tui.screen()); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(aboveBoth(tui.screen()), tui.screen());
+    release(tui);
+    await tui.waitForEvent("agent_end", 2);
+  });
+}
 
 test("queue section above the editor; Option+Up/Down/X edit rows in Pi's editor and the draft comes back", async (t) => {
   const tui = await start(t, [gateCall, "Steered.", "Followed."]);
@@ -55,7 +91,7 @@ my draft
 
 `);
 
-  tui.keys("M-Up"); // the most recent row loads into the editor
+  tui.keys("M-Up"); // the most recent row leaves the queue and loads into the editor
   await tui.waitForScreen(`
 
  go
@@ -67,13 +103,13 @@ my draft
 
  Steering (1) · next turn
    first
- Follow-ups (1) · after the run
- › second
 ── ● Working ───────────────────────────────────────────────────────────────────
 second
 ────────────────────────────────────────────────────────────────────────────────
 ~/cwd
 ↑2 ↓2 W2 CH0.0% 0.0%/128k (auto)                                       harness-1
+
+
 
 
 
@@ -111,7 +147,7 @@ my draft
 
 `);
 
-  tui.keys("M-Up", "M-Up", "M-x"); // delete "first"; "second edited" is selected
+  tui.keys("M-Up", "M-Up", "M-x"); // delete "first"; "second edited" is now in the editor
   await tui.waitForScreen(`
 
  go
@@ -121,13 +157,13 @@ my draft
  gate
 
 
- Follow-ups (1) · after the run
- › second edited
 ── ● Working ───────────────────────────────────────────────────────────────────
 second edited
 ────────────────────────────────────────────────────────────────────────────────
 ~/cwd
 ↑2 ↓2 W2 CH0.0% 0.0%/128k (auto)                                       harness-1
+
+
 
 
 
@@ -194,126 +230,30 @@ my draft
 `);
 });
 
-test("Esc cancels an edit; Esc while working aborts and keeps the queue until the next prompt", async (t) => {
-  const tui = await start(t, [gateCall, "Done.", "Again."]);
+async function waitForText(tui, pattern) {
+  for (let i = 0; i < 100 && !pattern.test(tui.screen()); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.match(tui.screen(), pattern);
+}
+
+test("Esc aborts the running turn and sends its queued steer without another prompt", async (t) => {
+  const tui = await start(t, [gateCall, "Steered."]);
   tui.type("keep me");
-  tui.keys("Enter");
-  tui.type("/compact");
-  tui.keys("Enter"); // a command row: nothing to compact, so only a notice later
-  tui.type("draft");
-  tui.keys("M-Up", "M-Up");
-  tui.type(" and junk");
-  await tui.waitForScreen(`
-
- go
-
-
-
- gate
-
-
- Steering (1) · next turn
- › keep me
- Follow-ups (1) · after the run
- ⚙ /compact · runs when idle
-── ● Working ───────────────────────────────────────────────────────────────────
-keep me and junk
-────────────────────────────────────────────────────────────────────────────────
-~/cwd
-↑2 ↓2 W2 CH0.0% 0.0%/128k (auto)                                       harness-1
-
-
-
-
-
-
-`);
-
-  tui.keys("Escape");
-  await tui.waitForScreen(`
-
- go
-
-
-
- gate
-
-
- Steering (1) · next turn
-   keep me
- Follow-ups (1) · after the run
- ⚙ /compact · runs when idle
-── ● Working ───────────────────────────────────────────────────────────────────
-draft
-────────────────────────────────────────────────────────────────────────────────
-~/cwd
-↑2 ↓2 W2 CH0.0% 0.0%/128k (auto)                                       harness-1
-
-
-
-
-
-
-`);
-
-  tui.keys("C-u", "Escape");
-  await tui.waitForEvent("agent_end");
-  await tui.waitForScreen(`
-
- go
-
-
-
- gate
- released
-
-
- Error: This operation was aborted
-
- Steering (1) · paused
-   keep me
- Follow-ups (1) · paused
- ⚙ /compact · runs when idle
-────────────────────────────────────────────────────────────────────────────────
-
-────────────────────────────────────────────────────────────────────────────────
-~/cwd
-↑2 ↓2 W2 0.0%/128k (auto)                                              harness-1
-
-
-
-`);
-
-  tui.type("resume");
-  tui.keys("Enter");
+  tui.keys("Enter", "Escape");
   await tui.waitForEvent("agent_end", 2);
-  // Pi 0.87.1 prints its own red line for a manual compaction with nothing to do; no
-  // public API can predict or suppress it (see the PR). The queue adds its notice and moves on.
-  await tui.waitForScreen(`
+  await waitForText(tui, /keep me[\s\S]*Steered\./);
+  assert.match(tui.screen(), /Error: This operation was aborted/);
+  assert.doesNotMatch(tui.screen(), /Steering \(1\)/);
+});
 
- Error: This operation was aborted
-
-
- resume
-
-
- Done.
-
-
- keep me
-
-
- Again.
-
- Error: Compaction failed: Nothing to compact (session too small)
-
- Nothing to compact
-
-────────────────────────────────────────────────────────────────────────────────
-
-────────────────────────────────────────────────────────────────────────────────
-~/cwd
-↑27 ↓6 R22 W28 CH57.1% 0.0%/128k (auto)                                harness-1`);
+test("Esc while editing requeues the edited steer and aborts the current turn", async (t) => {
+  const tui = await start(t, [gateCall, "Steered."]);
+  tui.type("original");
+  tui.keys("Enter", "M-Up");
+  tui.type(" revised");
+  tui.keys("Escape");
+  await tui.waitForEvent("agent_end", 2);
+  await waitForText(tui, /original revised[\s\S]*Steered\./);
+  assert.doesNotMatch(tui.screen(), /Steering \(1\)/);
 });
 
 test("/compact and /reload typed while the agent works wait for it, with no error or warning", async (t) => {
@@ -349,6 +289,33 @@ test("/compact and /reload typed while the agent works wait for it, with no erro
 `);
 
   tui.type("draft kept"); // Pi's /reload clears the editor; the queue puts this back
+  // Wait for the full draft to render: release() lets /reload snapshot the editor,
+  // and keys still in flight would be clobbered when setEditorText restores it (#104).
+  await tui.waitForScreen(`
+
+ go
+
+
+
+ gate
+
+
+ Follow-ups (2) · after the run
+ ⚙ /compact · runs when idle
+ ⚙ /reload · runs when idle
+── ● Working ───────────────────────────────────────────────────────────────────
+draft kept
+────────────────────────────────────────────────────────────────────────────────
+~/cwd
+↑2 ↓2 W2 CH0.0% 0.0%/128k (auto)                                       harness-1
+
+
+
+
+
+
+
+`);
   release(tui);
   await tui.waitForEvent("session_start", 2);
   await tui.waitForScreen(`

@@ -2,7 +2,7 @@
   "piVersion": "0.87.1",
   "maxPromptTokens": 3550,
   "maxSkills": 5,
-  "commands": ["clear", "context", "quota", "rig", "skill:ponytail-audit", "theme", "usage"],
+  "commands": ["clear", "context", "quota", "rig", "skill:ponytail-audit", "theme", "todos", "usage"],
   "tools": {
     "get_quotas": 80,
     "read": 180,

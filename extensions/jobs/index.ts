@@ -428,6 +428,7 @@ export default function (pi: ExtensionAPI) {
     ...toolRenderers({
       title: "Jobs",
       arg: (a: any) => [a?.action, a?.id].filter(Boolean).join(" "),
+      summary: { verb: "managed", one: "job" },
       result: (r: any, _a, _e, theme) => {
         const [first = "", ...rest] = clean(resultText(r)).split("\n");
         return { summary: first, body: rest.map((l) => theme.fg("toolOutput", l)) };

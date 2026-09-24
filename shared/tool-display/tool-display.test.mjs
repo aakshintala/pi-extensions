@@ -6,6 +6,9 @@ import "../../tests/fixtures/tool-display/pi-tui.mjs";
 const td = await import("./index.ts");
 const { visibleWidth } = await import("@earendil-works/pi-tui");
 
+// Pending grouped calls show at once here; the grace period has its own tests below.
+td.ToolGroups.defaultGraceMs = 0;
+
 // Records every theme key used; each key gets its own SGR code so colours survive stripping checks.
 function recordingTheme() {
   const keys = [];
@@ -131,7 +134,7 @@ test("group summary: fixed per-verb wording in order of first use, line totals, 
   assert.equal(plain(td.summaryText(theme, calls, true)), "thought · read 3 files, edited 2 files +442 −12, updated todos, ran 1 shell command");
 });
 
-test("group summary: failed and cancelled calls count under their verb and again in the error colour", () => {
+test("group summary: failed and cancelled calls count under their verb without drawing alerts", () => {
   const theme = recordingTheme();
   const calls = [
     { summary: READ, status: "done" },
@@ -141,11 +144,9 @@ test("group summary: failed and cancelled calls count under their verb and again
     { summary: BASH, status: "cancelled" },
   ];
   const text = td.summaryText(theme, calls);
-  assert.equal(plain(text), "Read 3 files, edited 1 file, ran 1 shell command · 1 failed · 2 cancelled");
-  assert.match(text, /\x1b\[38;5;\d+m1 failed/);
-  assert.equal(theme.keys.at(-1), "error");
-  assert.equal(theme.keys.at(-2), "error");
-  assert.equal(plain(td.summaryText(recordingTheme(), [{ summary: READ, status: "error" }])), "Read 1 file · 1 failed");
+  assert.equal(plain(text), "Read 3 files, edited 1 file, ran 1 shell command");
+  assert.ok(!theme.keys.includes("error"));
+  assert.equal(plain(td.summaryText(recordingTheme(), [{ summary: READ, status: "error" }])), "Read 1 file");
 });
 
 test("outcome of a result: Pi's abort result is a cancel, any other error a failure", () => {
@@ -182,18 +183,18 @@ test("groups: a call revised out of the message leaves its group", (t) => {
   g.track({ role: "assistant", content: [toolCall("v1"), toolCall("v2")] }, true);
   draw(["v1", "v2"]);
   g.track({ role: "assistant", content: [toolCall("v1")] }, true);
-  assert.deepEqual(draw(["v1"]), [" ⠋ Read 1 file"]);
+  assert.deepEqual(draw(["v1"]), [" ⏺ Read 1 file"]);
   assert.deepEqual(draw(["v2"]), [" ⏺ Read(v2)"]); // no longer grouped
 });
 
-test("groups: a call with an image always shows, since Pi draws the image outside the renderers", (t) => {
+test("groups: a call with an image stays folded; Pi draws the image itself", (t) => {
   const g = new td.ToolGroups();
   t.after(() => g.reset());
   g.track({ role: "assistant", content: [toolCall("i1"), toolCall("i2")] });
   draw(["i1", "i2"]);
   g.settle("i1", false, { content: [] });
   g.settle("i2", false, { content: [{ type: "image", data: "", mimeType: "image/png" }] });
-  assert.deepEqual(draw(["i1", "i2"]), [" ⏺ Read 2 files", " ⏺ Read(i2)"]);
+  assert.deepEqual(draw(["i1", "i2"]), [" ⏺ Read 2 files"]);
 });
 
 test("groups: an aborted message cancels its calls with no result; an errored one fails them", (t) => {
@@ -202,8 +203,21 @@ test("groups: an aborted message cancels its calls with no result; an errored on
   g.track({ role: "assistant", stopReason: "aborted", content: [toolCall("a1"), toolCall("a2")] });
   g.track({ role: "assistant", stopReason: "error", content: [toolCall("f1")] });
   g.settle("a1", false, { content: [] });
-  assert.deepEqual(draw(["a1", "a2"]), [" ⏺ Read 2 files · 1 cancelled"]);
-  assert.deepEqual(draw(["f1"]), [" ⏺ Read 1 file · 1 failed", " ⏺ Read(f1)"]);
+  assert.deepEqual(draw(["a1", "a2"]), [" ⏺ Read 2 files"]);
+  assert.deepEqual(draw(["f1"]), [" ⏺ Read 1 file"]);
+});
+
+test("a failed collapsed group has a neutral dot and no error colour", (t) => {
+  const g = new td.ToolGroups();
+  t.after(() => g.reset());
+  g.track({ role: "assistant", content: [toolCall("neutral")] });
+  g.settle("neutral", true, { content: [{ type: "text", text: "ENOENT" }] });
+  g.endRun();
+  const theme = recordingTheme();
+  const render = () => GROUPED.renderCall({ path: "neutral" }, theme, { toolCallId: "neutral", args: {}, cwd: "/w", expanded: false, invalidate() {} });
+  assert.deepEqual(plainLines(render().render(80)), [" ⏺ Read 1 file"]);
+  assert.equal(theme.keys[0], "muted");
+  assert.ok(!theme.keys.includes("error"));
 });
 
 test("groups: a tool without a summary splits a run, and so does text", (t) => {
@@ -230,12 +244,12 @@ test("groups: an error before the user's abort of a later reply, or of a new pro
   g.track({ role: "assistant", stopReason: "toolUse", content: [toolCall("u1")] });
   g.settle("u1", true, { content: [{ type: "text", text: "ENOENT" }] });
   g.track({ role: "assistant", stopReason: "aborted", content: [{ type: "text", text: "The file" }] });
-  assert.deepEqual(draw(["u1"]), [" ⏺ Read 1 file · 1 failed", " ⏺ Read(u1)"]);
+  assert.deepEqual(draw(["u1"]), [" ⏺ Read 1 file"]);
   g.track({ role: "assistant", stopReason: "toolUse", content: [toolCall("u2")] });
   g.settle("u2", true, { content: [{ type: "text", text: "ENOENT" }] });
   g.track({ role: "user", content: "next" });
   g.track({ role: "assistant", stopReason: "aborted", content: [] });
-  assert.deepEqual(draw(["u2"]), [" ⏺ Read 1 file · 1 failed", " ⏺ Read(u2)"]);
+  assert.deepEqual(draw(["u2"]), [" ⏺ Read 1 file"]);
 });
 
 // #133: a run spans assistant messages until something drawn in the chat, or the end of the agent run.
@@ -277,7 +291,7 @@ test("groups: a new message reusing an earlier message's call id is a new call",
   g.settle("k1", true, { content: [{ type: "text", text: "ENOENT" }] });
   g.track({ role: "user", content: "next" });
   g.track(said(toolCall("k2"), toolCall("k1"))); // ids made from the clock can repeat
-  assert.deepEqual(draw(["k2", "k1"]), [" ⠋ Read 2 files"]); // the old call's failure is not the new one's
+  assert.deepEqual(draw(["k2", "k1"]), [" ⏺ Read 2 files"]); // the old call's failure is not the new one's
 });
 
 test("groups: text, a message drawn in the chat, a call without a summary, the end of an aborted message and the end of the agent run each split a run", (t) => {
@@ -333,20 +347,20 @@ test("groups: a message that gains text after joining a run leaves it", (t) => {
   const g = groups(t);
   g.track(said(toolCall("j1")));
   g.track(said(toolCall("j2")), true);
-  assert.deepEqual(draw(["j1", "j2"]), [" ⠋ Read 2 files"]);
+  assert.deepEqual(draw(["j1", "j2"]), [" ⏺ Read 2 files"]);
   g.track(said(toolCall("j2"), { type: "text", text: "Done." }));
-  assert.deepEqual(draw(["j1"]), [" ⠋ Read 1 file"]);
-  assert.deepEqual(draw(["j2"]), [" ⠋ Read 1 file"]);
+  assert.deepEqual(draw(["j1"]), [" ⏺ Read 1 file"]);
+  assert.deepEqual(draw(["j2"]), [" ⏺ Read 1 file"]);
 });
 
-test("groups: a collapsed group's first call draws its failed calls, which draw nothing themselves", (t) => {
+test("groups: a collapsed group's failed calls stay folded under the summary", (t) => {
   const g = groups(t);
   g.track(said(toolCall("f1"), toolCall("f2"), toolCall("f3")));
   g.settle("f1", false, { content: [] });
   g.settle("f2", true, { content: [{ type: "text", text: "ENOENT /w/f2" }] });
   g.settle("f3", false, { content: [] });
   draw(["f1", "f2", "f3"]);
-  assert.deepEqual(draw(["f1"]), [" ⏺ Read 3 files · 1 failed", " ⏺ Read(f2)", "   ⎿  Error: ENOENT f2"]);
+  assert.deepEqual(draw(["f1"]), [" ⏺ Read 3 files"]);
   assert.deepEqual([draw(["f2"]), draw(["f3"])], [[], []]);
 });
 
@@ -358,30 +372,24 @@ const hinted = (t, owner = "s") => {
   return g;
 };
 
-test("hints: a hinted call after the first shows outside the summary, spinning, and folds back when cleared", (t) => {
+test("hints: a hinted call after the first shows outside the summary with its hint, and folds back when cleared", (t) => {
   const g = hinted(t);
   g.track(said(toolCall("h1"), toolCall("h2"), toolCall("h3")));
   g.settle("h1", false, { content: [] });
   draw(["h1", "h2", "h3"]);
   const clear = td.showHint("s", "h2", HINT);
-  assert.deepEqual(draw(["h1", "h2", "h3"]), [" ⠋ Read 3 files", " ⠋ Read(h2)", "   ⎿  ctrl+b to run in background"]);
+  assert.deepEqual(draw(["h1", "h2", "h3"]), [" ⏺ Read 3 files", " ⏺ Read(h2)", "   ⎿  ctrl+b to run in background"]);
   clear();
-  assert.deepEqual(draw(["h1", "h2", "h3"]), [" ⠋ Read 3 files"]);
+  assert.deepEqual(draw(["h1", "h2", "h3"]), [" ⏺ Read 3 files"]);
 });
 
-test("hints: a failed call still shows under the summary while the group's first call is hinted", (t) => {
+test("hints: a failed call stays folded while the group's first call is hinted", (t) => {
   const g = hinted(t);
   g.track(said(toolCall("l1"), toolCall("l2")));
   g.settle("l2", true, { content: [{ type: "text", text: "ENOENT /w/l2" }] });
   draw(["l1", "l2"]);
   td.showHint("s", "l1", HINT);
-  assert.deepEqual(draw(["l1", "l2"]), [
-    " ⠋ Read 2 files · 1 failed",
-    " ⠋ Read(l1)",
-    "   ⎿  ctrl+b to run in background",
-    " ⏺ Read(l2)",
-    "   ⎿  Error: ENOENT l2",
-  ]);
+  assert.deepEqual(draw(["l1", "l2"]), [" ⏺ Read 2 files", " ⏺ Read(l1)", "   ⎿  ctrl+b to run in background"]);
 });
 
 test("hints: read on every draw; while the hint returns nothing the call stays folded", (t) => {
@@ -389,9 +397,9 @@ test("hints: read on every draw; while the hint returns nothing the call stays f
   g.track(said(toolCall("r1")));
   let text;
   td.showHint("s", "r1", () => text);
-  assert.deepEqual(draw(["r1"]), [" ⠋ Read 1 file"]);
+  assert.deepEqual(draw(["r1"]), [" ⏺ Read 1 file"]);
   text = "hint";
-  assert.deepEqual(draw(["r1"]), [" ⠋ Read 1 file", " ⠋ Read(r1)", "   ⎿  hint"]);
+  assert.deepEqual(draw(["r1"]), [" ⏺ Read 1 file", " ⏺ Read(r1)", "   ⎿  hint"]);
 });
 
 test("hints: two sessions with the same call id never share a hint or clear each other's", (t) => {
@@ -410,20 +418,55 @@ test("hints: two sessions with the same call id never share a hint or clear each
   const clearA = td.showHint("a", "dup", HINT);
   td.showHint("b", "dup", () => "b's hint");
   clearA();
-  assert.deepEqual(drawIn(inA), [" ⠋ Read 1 file"]);
-  assert.deepEqual(drawIn(inB), [" ⠋ Read 1 file", " ⠋ Read(dup)", "   ⎿  b's hint"]);
+  assert.deepEqual(drawIn(inA), [" ⏺ Read 1 file"]);
+  assert.deepEqual(drawIn(inB), [" ⏺ Read 1 file", " ⏺ Read(dup)", "   ⎿  b's hint"]);
 });
 
-test("hints: a spinner tick redraws a hinted first call once, and only this session's hinted calls", (t) => {
+test("hints: a hint redraws its call, and only this session's hinted calls", (t) => {
   const a = hinted(t, "a");
   const b = hinted(t, "b");
   a.track(said(toolCall("k1")));
   b.track(said(toolCall("k2")));
   const counts = { k1: 0, k2: 0 };
   for (const id of ["k1", "k2"]) GROUPED.renderCall({ path: id }, recordingTheme(), { toolCallId: id, args: {}, cwd: "/w", expanded: false, invalidate: () => counts[id]++ });
+  // No tool-row spinner is left, so the hint itself (not a tick) triggers the redraw.
   td.showHint("a", "k1", HINT);
-  td.showHint("b", "k2", HINT);
-  Object.assign(counts, { k1: 0, k2: 0 });
-  a.tick();
   assert.deepEqual(counts, { k1: 1, k2: 0 });
+  td.showHint("b", "k2", HINT);
+  assert.deepEqual(counts, { k1: 1, k2: 1 });
+});
+
+test("groups: a shell execution folds into the run around it instead of splitting it", (t) => {
+  const g = groups(t);
+  g.track(said(toolCall("e1")));
+  g.track({ role: "bashExecution", command: "echo hi", output: "hi" });
+  g.track(said(toolCall("e2")));
+  for (const id of ["e1", "e2"]) g.settle(id, false, { content: [] });
+  g.endRun();
+  assert.deepEqual(draw(["e1", "e2"]), [" ⏺ Read 2 files"]);
+});
+
+test("groups: a fresh pending group draws nothing; settling or outlasting the grace period shows it", (t) => {
+  const g = groups(t);
+  g.graceMs = 60_000;
+  g.track(said(toolCall("w1"), toolCall("w2")));
+  assert.deepEqual(draw(["w1", "w2"]), [], "fresh pending calls never flash");
+  g.settle("w1", false, { content: [] });
+  assert.deepEqual(draw(["w1", "w2"]), [" ⏺ Read 2 files"], "a settled call shows at once");
+  g.graceMs = 0;
+  const h = groups(t);
+  h.graceMs = 60_000;
+  h.track(said(toolCall("w3")));
+  assert.deepEqual(draw(["w3"]), []);
+  h.graceMs = 0;
+  assert.deepEqual(draw(["w3"]), [" ⏺ Read 1 file"], "a call past its grace period shows");
+});
+
+test("hints: a hinted call shows at once, inside the grace period", (t) => {
+  const g = hinted(t);
+  g.graceMs = 60_000;
+  g.track(said(toolCall("g1"), toolCall("g2")));
+  assert.deepEqual(draw(["g1", "g2"]), []);
+  td.showHint("s", "g2", HINT);
+  assert.deepEqual(draw(["g1", "g2"]), [" ⏺ Read 2 files", " ⏺ Read(g2)", "   ⎿  ctrl+b to run in background"]);
 });

@@ -91,6 +91,7 @@ class Transcript extends Container {
   private last?: string; // id of the last entry drawn
   private tools: ToolExecutionComponent[] = [];
   private pending = new Map<string, ToolExecutionComponent>(); // saved calls without a result
+  private rendered = new Map<string, { target: ToolExecutionComponent; message: any }>(); // finished calls, for the refresh above
   private streaming?: { component: AssistantMessageComponent; calls: Map<string, ToolExecutionComponent> };
   private seen = -1;
   private expanded: boolean;
@@ -118,6 +119,7 @@ class Transcript extends Container {
   /** The viewer closed it: its calls leave the process-wide group index. */
   dispose() {
     this.groups.reset();
+    this.rendered.clear();
   }
 
   private tool(call: any, m: any) {
@@ -152,7 +154,9 @@ class Transcript extends Container {
       }
     } else if (message.role === "toolResult") {
       this.groups.settle(message.toolCallId, message.isError, message);
-      this.pending.get(message.toolCallId)?.updateResult(message);
+      const target = this.pending.get(message.toolCallId);
+      target?.updateResult(message);
+      if (target) this.rendered.set(message.toolCallId, { target, message });
       this.pending.delete(message.toolCallId);
     } else if (message.role === "custom" && message.display) {
       // Plain text with control sequences removed: a child's message never styles or moves the parent's screen.
@@ -183,6 +187,7 @@ class Transcript extends Container {
       this.groups.reset();
       this.tools = [];
       this.pending.clear();
+      this.rendered.clear();
       let earlier = 0;
       for (; id; id = up(id)) if (isMessage(m.getEntry(id))) earlier++;
       if (earlier) this.saved.addChild(new Text(this.ui.theme.fg("dim", `… ${earlier} earlier message${earlier === 1 ? "" : "s"}`), 1, 0));
@@ -231,7 +236,12 @@ class Transcript extends Container {
       this.tools = this.tools.filter((c) => !gone.has(c));
       this.streaming = undefined;
     }
-    if (!session?.isStreaming) this.groups.endRun();
+    if (!session?.isStreaming) {
+      this.groups.endRun();
+      // A closed transcript renders once: settle-time rows baked a spinner while the
+      // run was open, so refresh every finished call to rest on the dot.
+      for (const { target, message } of this.rendered.values()) target.updateResult(message);
+    }
     const steers = session?.getSteeringMessages() ?? [];
     if (steers.length) {
       this.live.addChild(new Spacer(1));

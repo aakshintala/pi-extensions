@@ -2,15 +2,14 @@
 // submissions made while the agent works are held here, shown above Pi's own editor,
 // edited in that editor, and handed to Pi with its own delivery rules.
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Spacer, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { fleet, viewerTakes } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts"; // row text is user input
 import { editorFocused as mainEditorFocused } from "../../shared/tui/index.ts";
 
 type Lane = "steer" | "followUp";
 type Row = { id: number; lane: Lane; text: string; images?: ImageContent[]; error?: string };
-type Mode = "all" | "one-at-a-time";
 
 const WIDGET = "queue";
 const ENTRY = "rig.queue"; // rows and draft saved across /reload
@@ -31,17 +30,18 @@ const NOTHING_TO_COMPACT = /^(Nothing to compact|Already compacted)/;
 export default function (pi: ExtensionAPI) {
   let rows: Row[] = [];
   let nextId = 1;
-  let paused = false; // after an abort, until the next submission or Option+Up
+  let paused = false; // a failed queued command waits for the next submission or Option+Up
   let running: "compact" | "reload" | undefined; // a command row is executing
-  let edit: { id: number; draft: string } | undefined;
+  let edit: { row: Row; draft: string } | undefined;
   // Every change of `edit` goes through here: the fleet viewer leaves typed input alone while a row is edited.
   const setEdit = (next: typeof edit) => {
     edit = next;
     fleet().editing = !!next;
   };
-  let modes: Record<Lane, Mode> = { steer: "one-at-a-time", followUp: "one-at-a-time" };
   let ctx: ExtensionContext | undefined;
   let tui: any; // from the widget factory
+  let widgetComponent: object | undefined;
+  let pinTimer: ReturnType<typeof setInterval> | undefined;
   let reloadRow: Row | undefined; // a /reload row waiting for Pi's main editor
   let reloadDraft: string | undefined; // editor text saved while a queued /reload runs
   let unsubscribeKeys: (() => void) | undefined;
@@ -53,14 +53,43 @@ export default function (pi: ExtensionAPI) {
 
   const ordered = () => [...rows.filter((r) => r.lane === "steer"), ...rows.filter((r) => r.lane === "followUp")];
 
+  // Pi orders above-editor widgets by their most recent setWidget call, with no order option.
+  // Keep this component first even when another extension redraws its widget later.
+  const pinAbove = (component: object) => {
+    const visit = (node: any): boolean => {
+      const children = node?.children;
+      if (!Array.isArray(children)) return false;
+      const i = children.indexOf(component);
+      if (i >= 0) {
+        // Keep Pi's leading spacer before the widgets; only reorder widget siblings.
+        const firstWidget = children[0] instanceof Spacer ? 1 : 0;
+        if (i !== firstWidget) {
+          children.splice(i, 1);
+          children.splice(firstWidget, 0, component);
+          tui.requestRender();
+        }
+        return true;
+      }
+      return children.some(visit);
+    };
+    visit(tui);
+  };
+
   // Always set, even empty (it then renders no lines), so `tui` is known before the first row.
   const draw = () => {
     if (!ctx?.hasUI) return;
+    // Pi rebuilds its widget container when any extension sets a widget. A cached
+    // queue component may not render again, so keep its placement while rows exist.
+    if (rows.length && !pinTimer) pinTimer = setInterval(() => widgetComponent && tui && pinAbove(widgetComponent), 150);
+    if (!rows.length && pinTimer) {
+      clearInterval(pinTimer);
+      pinTimer = undefined;
+    }
     ctx.ui.setWidget(
       WIDGET,
       (t, theme) => {
             tui = t;
-            return {
+            const component = {
               invalidate() {},
               render(width: number) {
                 const lines: string[] = [];
@@ -73,7 +102,6 @@ export default function (pi: ExtensionAPI) {
                   const color = lane === "steer" ? "accent" : "warning";
                   lines.push(` ${theme.fg(color, `${name} (${group.length})`)}${theme.fg("dim", ` · ${paused ? "paused" : when}`)}`);
                   for (const r of group) {
-                    const selected = r.id === edit?.id;
                     const command = commandOf(r);
                     const images = r.images?.length ? ` [${r.images.length} image${r.images.length > 1 ? "s" : ""}]` : "";
                     const note = r.error
@@ -81,26 +109,33 @@ export default function (pi: ExtensionAPI) {
                       : command
                         ? theme.fg("dim", " · runs when idle")
                         : "";
-                    const mark = selected ? theme.fg(color, "›") : command ? "⚙" : " ";
-                    const text = selected ? theme.fg(color, oneLine(r.text)) : theme.fg("muted", oneLine(r.text));
+                    const mark = command ? "⚙" : " ";
+                    const text = theme.fg("muted", oneLine(r.text));
                     lines.push(truncateToWidth(` ${mark} ${text}${images}${note}`, width));
                   }
                 }
                 return lines;
               },
             };
+            widgetComponent = component;
+            return component;
           },
     );
   };
 
   const endEdit = (text?: string) => {
     if (!edit || !ctx) return;
-    const row = rows.find((r) => r.id === edit!.id);
-    if (row && text !== undefined) row.text = text;
-    ctx.ui.setEditorText(edit.draft);
+    const { row, draft } = edit;
+    if (text !== undefined) row.text = text;
+    ctx.ui.setEditorText(draft);
     setEdit(undefined);
+    return row;
+  };
+
+  const putBack = (row: Row) => {
+    rows.push(row);
+    rows.sort((a, b) => a.id - b.id);
     draw();
-    if (ctx.isIdle()) dispatchIdle();
   };
 
   // Rows ahead of the first command row, in one lane; a command row holds everything behind it.
@@ -111,11 +146,6 @@ export default function (pi: ExtensionAPI) {
 
   const deliver = (batch: Row[], deliverAs?: Lane) => {
     rows = rows.filter((r) => !batch.includes(r));
-    if (edit && batch.some((r) => r.id === edit!.id)) {
-      ctx?.ui.setEditorText(edit.draft);
-      setEdit(undefined);
-      ctx?.ui.notify("The queued message you were editing was delivered", "info");
-    }
     draw();
     for (const r of batch) {
       const content = r.images?.length ? [{ type: "text" as const, text: r.text }, ...r.images] : r.text;
@@ -123,16 +153,16 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
+  // A boundary drains the whole ready batch at once: queued messages arrive together.
   const atBoundary = (lane: Lane) => {
     if (paused || running) return;
-    const batch = ready(lane);
-    deliver(modes[lane] === "all" ? batch : batch.slice(0, 1), lane);
+    deliver(ready(lane), lane);
   };
 
   function dispatchIdle() {
     if (!ctx || paused || running || edit || !rows.length || !ctx.isIdle()) return;
-    const next = ready("steer")[0] ?? ready("followUp")[0];
-    if (next) return deliver([next]);
+    const batch = ready("steer").length ? ready("steer") : ready("followUp");
+    if (batch.length) return deliver(batch);
     runCommand(rows[0]);
   }
 
@@ -184,33 +214,39 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  // Option+Up selects the most recent row, then moves up; Option+Down moves down. The
-  // row being left keeps what was typed into it.
+  // Option+Up takes the newest row out of the queue. Moving between rows puts the
+  // previous edit back before taking the next, so nothing is silently lost.
   const select = (step: number) => {
     const c = ctx!;
     paused = false;
     if (!edit) {
       const latest = rows.reduce((a, b) => (b.id > a.id ? b : a));
-      setEdit({ id: latest.id, draft: c.ui.getEditorText() });
+      rows = rows.filter((r) => r !== latest);
+      setEdit({ row: latest, draft: c.ui.getEditorText() });
       c.ui.setEditorText(latest.text);
       return draw();
     }
+    const current = edit.row;
+    current.text = c.ui.getEditorText().trim() || current.text;
+    putBack(current);
     const order = ordered();
-    const i = order.findIndex((r) => r.id === edit!.id);
-    order[i].text = c.ui.getEditorText().trim() || order[i].text;
+    const i = order.findIndex((r) => r === current);
     const next = order[(i + step + order.length) % order.length];
-    edit.id = next.id;
+    rows = rows.filter((r) => r !== next);
+    edit.row = next;
     c.ui.setEditorText(next.text);
     draw();
   };
 
   const remove = () => {
-    const order = ordered();
-    const i = order.findIndex((r) => r.id === edit!.id);
-    rows = rows.filter((r) => r.id !== edit!.id);
-    const next = ordered()[Math.min(i, rows.length - 1)];
-    if (!next) return endEdit();
-    edit!.id = next.id;
+    const next = ordered().at(-1);
+    if (!next) {
+      endEdit();
+      draw();
+      return dispatchIdle();
+    }
+    rows = rows.filter((r) => r !== next);
+    edit!.row = next;
     ctx!.ui.setEditorText(next.text);
     draw();
   };
@@ -226,17 +262,25 @@ export default function (pi: ExtensionAPI) {
   };
 
   const onKey = (data: string) => {
-    if (!ctx || !rows.length || !editorFocused()) return;
+    if (!ctx || (!rows.length && !edit) || !editorFocused()) return;
     const handled = (() => {
       if (matchesKey(data, "alt+up")) return select(-1), true;
       if (edit && matchesKey(data, "alt+down")) return select(1), true;
       if (edit && matchesKey(data, "alt+x")) return remove(), true;
-      if (edit && matchesKey(data, "escape")) return endEdit(), true;
+      if (edit && matchesKey(data, "escape")) {
+        const row = endEdit(ctx!.ui.getEditorText());
+        if (row) putBack(row);
+        if (ctx!.isIdle()) dispatchIdle();
+        return false; // Pi handles Esc: abort this turn, then the queued steer starts a new turn
+      }
       // Enter while editing on /compact, /reload or an extension command: Pi would run it
       // before the input event, so save it in place here instead.
       const text = ctx!.ui.getEditorText().trim();
       if (!edit || !matchesKey(data, "enter") || !(commandOf({ text }) || extensionCommand(text))) return false;
-      return endEdit(text), true;
+      const row = endEdit(text);
+      if (row) putBack(row);
+      if (ctx!.isIdle()) dispatchIdle();
+      return true;
     })();
     return handled ? { consume: true } : undefined;
   };
@@ -255,8 +299,6 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", (event, c) => {
     ctx = c;
-    const settings = SettingsManager.create(c.cwd);
-    modes = { steer: settings.getSteeringMode(), followUp: settings.getFollowUpMode() };
     const token = (globalThis as any)[RELOAD];
     delete (globalThis as any)[RELOAD];
     const saved = (c.sessionManager.getEntries() as any[]).findLast((e) => e.type === "custom" && e.customType === ENTRY)?.data;
@@ -275,13 +317,18 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", (event) => {
-    if (event.reason === "reload" && (rows.length || reloadDraft)) {
+    if (event.reason === "reload" && (rows.length || edit || reloadDraft)) {
+      // A retrieved row is absent from rows; save its current editor text before Pi replaces the runtime.
+      const savedRows = edit ? [...rows, { ...edit.row, text: ctx?.ui.getEditorText() ?? edit.row.text }].sort((a, b) => a.id - b.id) : rows;
       const token = crypto.randomUUID();
-      pi.appendEntry(ENTRY, { token, rows, paused, draft: reloadDraft });
+      pi.appendEntry(ENTRY, { token, rows: savedRows, paused, draft: edit?.draft ?? reloadDraft });
       (globalThis as any)[RELOAD] = token;
     }
     for (const t of timers) clearTimeout(t);
     timers.clear();
+    clearInterval(pinTimer);
+    pinTimer = undefined;
+    widgetComponent = undefined;
     unsubscribeKeys?.();
     if (ctx?.hasUI) ctx.ui.setWidget(WIDGET, undefined);
     rows = [];
@@ -295,7 +342,11 @@ export default function (pi: ExtensionAPI) {
     if (event.source !== "interactive") return { action: "continue" };
     ctx = c;
     if (edit) {
-      endEdit(event.text);
+      const row = endEdit(event.text);
+      if (row) {
+        putBack(row);
+        if (ctx.isIdle()) dispatchIdle();
+      }
       return { action: "handled" };
     }
     // Steering the item the fleet viewer shows, whichever extension loaded first.
@@ -313,15 +364,15 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("turn_end", (event, c) => {
     ctx = c;
-    if (aborted(event.message, c)) paused = rows.length > 0;
-    atBoundary("steer");
+    if (!aborted(event.message, c)) atBoundary("steer");
     draw();
   });
 
   pi.on("agent_end", (event, c) => {
     ctx = c;
     const last: any = event.messages.at(-1);
-    if (aborted(last, c)) paused = rows.length > 0;
+    // An aborted run ends before any queued steer can join it. Deliver it when idle.
+    if (aborted(last, c)) return;
     // Pi decides on retry or compaction after agent_end; a follow-up now would hide that.
     if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "length")) return;
     atBoundary(ready("steer").length ? "steer" : "followUp");

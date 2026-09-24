@@ -2,6 +2,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { isChild } from "../../shared/subagent/index.ts";
+import { resultText, toolRenderers } from "../../shared/tool-display/index.ts";
 import { oneLine } from "../../shared/text/index.ts"; // question text is model input
 import { panel, type Outcome, type Question } from "./panel.ts";
 
@@ -80,6 +81,15 @@ export default function (pi: ExtensionAPI) {
     description: DESCRIPTION,
     parameters: PARAMETERS as never,
     executionMode: "sequential",
+    ...toolRenderers({
+      title: "Ask User",
+      arg: (p: any) => (p?.questions ?? []).map((q: any) => oneLine(q?.header ?? "")).filter(Boolean).join(", "),
+      // No summary: the question splits the run, and the answers stay visible.
+      result: (r: any, _a, _e, theme) => {
+        const [first = "", ...rest] = resultText(r).split("\n");
+        return { summary: first || "Answered", body: rest.map((l) => theme.fg("toolOutput", l)) };
+      },
+    }),
     async execute(_id, params: { questions: Question[] }, signal, _onUpdate, ctx) {
       const questions = params.questions.map(clean);
       for (const q of questions) {
@@ -91,7 +101,7 @@ export default function (pi: ExtensionAPI) {
         : await ctx.ui.custom<Outcome>((tui, theme, _kb, done) => {
             // An aborted turn closes the panel; the call then reports `cancelled`.
             signal?.addEventListener("abort", () => done({ cancelled: true }), { once: true });
-            return panel(questions, theme, () => tui.requestRender(), done);
+            return panel(tui, questions, theme, () => tui.requestRender(), done);
           });
       return { content: [{ type: "text", text: format(questions, outcome) }], details: { questions, ...outcome } };
     },

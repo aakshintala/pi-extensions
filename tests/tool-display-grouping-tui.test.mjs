@@ -3,8 +3,8 @@
 // Esc counts result-less calls as cancelled, and a click toggles one group.
 // Pi draws all of a message's text before its tool calls, so text between two runs
 // shows above both groups, not between them.
-// Running screens wait for the group spinner's first frame (⠋): it comes round every
-// 800 ms, and the wait fixture makes Pi's own working indicator still.
+// A running group shows its static ⏺ summary at once (the dot does not spin; the
+// wait fixture makes Pi's own working indicator still).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, writeFileSync } from "node:fs";
@@ -33,7 +33,7 @@ async function start(t, replies, args = []) {
   return tui;
 }
 
-test("a run of calls is one live summary line; failures show under it; text makes a second group, drawn after all of the message's text; Ctrl+O expands", async (t) => {
+test("a run of calls is one live summary line; failures stay folded; text makes a second group, drawn after all of the message's text; Ctrl+O expands", async (t) => {
   const tui = await start(t, [
     [
       text("Looking."),
@@ -54,19 +54,19 @@ test("a run of calls is one live summary line; failures show under it; text make
  Looking.
  Then:
 
- ${bullet} Read 1 file, edited 2 files +3 −2, waited on 1 file · 1 failed
- ⏺ Edit(a.txt)
-   ⎿  Error: Could not find the exact text in a.txt. The old text must match
-      exactly including all whitespace and newlines.
+ ${bullet} Read 1 file, edited 2 files +3 −2, waited on 1 file
 
- ⏺ Wrote 1 file +2
+ ${bullet} Wrote 1 file +2
 `;
-  await tui.waitForScreen(`${top("⠋")}
+  await tui.waitForScreen(`${top("⏺")}
 ── ~ Working ───────────────────────────────────────────────────────────────────
 
 ${RULE}
 ~/cwd
 ↑2 ↓62 W2 CH0.0% 0.1%/128k (auto)                                      harness-1
+
+
+
 
 
 
@@ -89,6 +89,9 @@ ${RULE}
 ${RULE}
 ~/cwd
 ↑141 ↓64 R2 W141 CH0.7% 0.2%/128k (auto)                               harness-1
+
+
+
 
 
 
@@ -136,11 +139,11 @@ ${RULE}
 test("Esc counts calls with no result as cancelled", async (t) => {
   const tui = await start(t, [[call("c1", "read", { path: "a.txt" }), call("c2", "wait", { file: "x" }), call("c3", "wait", { file: "y" })], "Done."]);
   await tui.waitForEvent("tool_execution_end"); // the read is done, both waits are running
-  await tui.waitForScreen(rows(["", " go", "", "", " ⠋ Read 1 file, waited on 2 files", "", `── ~ Working ${"─".repeat(67)}`, "", RULE, "~/cwd",
+  await tui.waitForScreen(rows(["", " go", "", "", " ⏺ Read 1 file, waited on 2 files", "", `── ~ Working ${"─".repeat(67)}`, "", RULE, "~/cwd",
     "↑2 ↓15 W2 CH0.0% 0.0%/128k (auto)                                      harness-1"]));
   tui.keys("Escape");
   await tui.waitForEvent("agent_end");
-  await tui.waitForScreen(rows(["", " go", "", "", " ⏺ Read 1 file, waited on 2 files · 2 cancelled", "", " Error: This operation was aborted", "", RULE, "", RULE, "~/cwd",
+  await tui.waitForScreen(rows(["", " go", "", "", " ⏺ Read 1 file, waited on 2 files", "", " Error: This operation was aborted", "", RULE, "", RULE, "~/cwd",
     "↑2 ↓15 W2 0.0%/128k (auto)                                             harness-1"]));
 });
 

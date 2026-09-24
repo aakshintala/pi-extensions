@@ -1,8 +1,8 @@
 // The Ctrl+B hint on the running call (#139) in a real pi: while a foreground command
-// can be backgrounded, its call shows outside the group summary with a spinner and a
-// dim hint line, and folds back into the summary when it ends, is killed or moves to the background.
-// Running screens wait for the spinner's first frame (⠋): it comes round every 800 ms,
-// and the clock fixture makes Pi's own working indicator still.
+// can be backgrounded, its call shows outside the group summary with a dim hint
+// line, and folds back into the summary when it ends, is killed or moves to the background.
+// A running group shows its static ⏺ summary at once; the clock fixture makes Pi's own
+// working indicator still.
 import { test } from "node:test";
 import assert from "node:assert";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -76,9 +76,18 @@ function watchUnderEditor(tui) {
   };
 }
 const RUNNING = screen(
-  [...GO, " ⠋ Ran 1 shell command", ` ⠋ Bash(${LONG})`, "   ⎿  ctrl+b to run in background", ""],
+  [...GO, " ⏺ Ran 1 shell command", ` ⏺ Bash(${LONG})`, "   ⎿  ctrl+b to run in background", ""],
   WORKING, [], "↑2 ↓19 W2 CH0.0% 0.0%/128k (auto)",
 );
+
+test("the editor is the only animated working indicator while a tool runs", async (t) => {
+  const tui = await start(t, [bash(LONG), "finished"]);
+  await started(t, tui);
+  const running = await poll(() => tui.screen().includes(WORKING) && tui.screen().includes("Ran 1 shell command") && tui.screen(), "the active tool and editor");
+  assert.doesNotMatch(running, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/, "tool rows must not show a spin frame");
+  writeFileSync(join(tui.cwd, "done"), "");
+  await tui.waitForEvent("agent_end");
+});
 
 test("while a long command runs, its call shows outside the summary with the hint; once it ends it folds back in; the rows under the editor never change", async (t) => {
   const tui = await start(t, [bash(LONG), "finished"]);
@@ -97,7 +106,7 @@ test("after Ctrl+B the call folds into its summary and the job is listed in Flee
   await tui.waitForScreen(RUNNING);
   tui.keys("C-b");
   await tui.waitForEvent("agent_end");
-  const row = [" ● main", `   shell ${LONG} · 0s`];
+  const row = [" ● main", "   1 shell running in background"]; // running shells share one row
   await tui.waitForScreen(screen([...GO, " ⏺ Ran 1 shell command", "", " backgrounded", ""], BORDER, row, "↑55 ↓22 R2 W55 CH1.9% 0.1%/128k (auto)"));
   writeFileSync(join(tui.cwd, "done"), ""); // lets the job end before shutdown checks its group
 });
@@ -108,7 +117,7 @@ test("Esc during a hinted run kills the command and leaves no hint", async (t) =
   await tui.waitForScreen(RUNNING);
   tui.keys("Escape");
   await tui.waitForEvent("agent_end");
-  await tui.waitForScreen(screen([...GO, " ⏺ Ran 1 shell command · 1 cancelled", "", " Error: This operation was aborted", ""], BORDER, [], "↑2 ↓19 W2 0.0%/128k (auto)"));
+  await tui.waitForScreen(screen([...GO, " ⏺ Ran 1 shell command", "", " Error: This operation was aborted", ""], BORDER, [], "↑2 ↓19 W2 0.0%/128k (auto)"));
   await poll(() => !liveGroup(tui.pgid).length, "the command's group to be gone"); // SIGKILL may follow SIGTERM by 800 ms
 });
 
@@ -124,7 +133,7 @@ test("while Ctrl+B still moves the cursor left, a running call shows no hint", a
   const tui = await start(t, [bash(LONG), "finished"], null); // Pi's default keybindings
   await started(t, tui);
   // FleetView's warning about Ctrl+B names a temporary path, so match rows, not the screen.
-  await poll(() => tui.screen().includes(" ⠋ Ran 1 shell command\n\n── ● Working"), "the running summary");
+  await poll(() => tui.screen().includes(" ⏺ Ran 1 shell command\n\n── ● Working"), "the running summary");
   assert.ok(!tui.screen().includes("ctrl+b to run in background"), tui.screen());
   writeFileSync(join(tui.cwd, "done"), "");
   await tui.waitForEvent("agent_end");

@@ -9,7 +9,7 @@ import { oneLine } from "../text/index.ts";
 /** Most notices held for one owner that has not attached; the oldest are dropped. */
 export const MAX_HELD = 50;
 /** How long a finished item stays once nothing keeps it, in ms (#137). */
-export const DECAY_MS = 30_000;
+export const DECAY_MS = 10_000;
 
 export type Timers = Pick<typeof globalThis, "setTimeout" | "clearTimeout">;
 
@@ -35,9 +35,9 @@ export interface ItemSpec {
   parentId?: string;
   /** Defaults to "running". */
   status?: "queued" | "running";
-  /** A short line of latest activity, read on every render. */
+  /** A short line of latest activity, read on every render. Agents show it on a linked line. */
   activity(): string;
-  /** Fields shown between the status and the activity, such as the model and tokens, read on every render. FleetView drops them from the right when the row is too narrow. */
+  /** Fields shown after the status, such as model and tokens, read on every render. FleetView drops them from the right when the row is too narrow. */
   detail?(): string[];
   view: ItemView;
   stop(): void | Promise<void>;
@@ -80,7 +80,7 @@ export interface Fleet {
   get(id: string): Item | undefined;
   /** In registration order. */
   items(): readonly Item[];
-  /** Drops every finished item now. Finished items also leave by themselves, `DECAY_MS` after they finish. */
+  /** Drops every finished item now. Finished items otherwise leave after `DECAY_MS`. */
   prune(): void;
   /** Called after every change. Returns an unsubscribe function. */
   subscribe(listener: () => void): () => void;
