@@ -12,8 +12,8 @@ const { workingLabel } = await import("./index.ts");
 test("the accent moves through the label but the elapsed time advances only each second", () => {
   const theme = { fg: (_color, letter) => `[${letter}]` };
   assert.equal(workingLabel("Thinking", 0, theme), "[T]hinking · 0s");
-  assert.equal(workingLabel("Thinking", 250, theme), "T[h]inking · 0s");
-  assert.equal(workingLabel("Running tool", 1000, theme), "Runn[i]ng tool · 1s");
+  assert.equal(workingLabel("Thinking", 125, theme), "T[h]inking · 0s");
+  assert.equal(workingLabel("Running tool", 1000, theme), "Running [t]ool · 1s");
 });
 
 test("the editor shows model and tool phases in its existing working border", async (t) => {

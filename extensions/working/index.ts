@@ -1,7 +1,7 @@
 // Use Pi's existing editor indicator for model and tool activity; add no widget.
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 
-const FRAME_MS = 250;
+const FRAME_MS = 125;
 type Phase = "Thinking" | "Running tool";
 
 export function workingLabel(phase: Phase, elapsedMs: number, theme: Pick<Theme, "fg">): string {
