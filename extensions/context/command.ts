@@ -5,12 +5,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 
-import {
-	buildNativeSnapshot,
-	type CompactionState,
-	type InitialCaptureState,
-	type SilentProbeState,
-} from "./capture.ts";
+import { buildNativeSnapshot, type InitialCaptureState, type SilentProbeState } from "./capture.ts";
 import type { InitialSnapshot } from "./model.ts";
 import { runWithProbeToken } from "./probe-token.ts";
 import { normalizePreviewText } from "./text.ts";
@@ -31,15 +26,15 @@ const ARGUMENT_OPTIONS = [
 ] satisfies AutocompleteItem[];
 
 /** The focused view a `/context` invocation requests. */
-export type ContextView = "usage" | "injections";
+type ContextView = "usage" | "injections";
 
 /** Parsed `/context` argument grammar. */
-export type ContextCommand =
+type ContextCommand =
 	| { readonly type: "view"; readonly view: ContextView }
 	| { readonly type: "invalid"; readonly message: string };
 
 /** Resolved Initial capture, possibly degraded to the pi-native fallback. */
-export interface InitialCaptureResult {
+interface InitialCaptureResult {
 	readonly snapshot: InitialSnapshot;
 	readonly degradedReason?: string;
 }
@@ -71,15 +66,15 @@ export async function resolveInitialCapture(
 	pi: ExtensionAPI,
 	capture: InitialCaptureState,
 	probe: SilentProbeState,
-	compaction: CompactionState,
 	context: ExtensionCommandContext,
 ): Promise<InitialCaptureResult> {
 	if (capture.snapshot !== undefined) return { snapshot: capture.snapshot };
 
+	// Pi's idle wait also covers compaction, so no compaction can reject the probe after it.
 	await context.waitForIdle();
 	if (capture.snapshot !== undefined) return { snapshot: capture.snapshot };
 
-	const unavailableReason = await getProbeUnavailableReason(context, compaction.isActive);
+	const unavailableReason = await getProbeUnavailableReason(context);
 	if (unavailableReason !== undefined) {
 		return createFallback(pi, context, unavailableReason);
 	}
@@ -141,11 +136,7 @@ function truncate(text: string, maxLength: number): string {
  * Explain why a silent probe cannot run now, or undefined when it can. Auth is
  * checked the way Pi checks it before a prompt: configured, or resolvable now.
  */
-async function getProbeUnavailableReason(
-	context: ExtensionCommandContext,
-	compactionInProgress: boolean,
-): Promise<string | undefined> {
-	if (compactionInProgress) return "Silent probe unavailable: context compaction is in progress.";
+async function getProbeUnavailableReason(context: ExtensionCommandContext): Promise<string | undefined> {
 	const model = context.model;
 	if (model === undefined) return "Silent probe unavailable: no model is selected.";
 	if (!context.modelRegistry.hasConfiguredAuth(model) && !(await context.modelRegistry.getApiKeyAndHeaders(model)).ok) {

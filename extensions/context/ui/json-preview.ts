@@ -4,7 +4,7 @@
  * content. Every preview level expands them; the compact provider-bound form
  * still backs every token estimate. Pure string logic — no pi or TUI access.
  */
-import type { JsonSpan } from "../model.ts";
+import type { Span } from "../model.ts";
 
 /** Spaces per nesting level, matching how tool schemas are usually authored. */
 const JSON_INDENT = 2;
@@ -14,7 +14,7 @@ const JSON_INDENT = 2;
  * without a span, and a span whose slice no longer parses, are returned
  * unchanged, so a stale marker degrades to the captured form.
  */
-export function expandJsonSpan(text: string, span: JsonSpan | undefined): string {
+export function expandJsonSpan(text: string, span: Span | undefined): string {
 	if (span === undefined) return text;
 	const expanded = prettifyJson(text.slice(span.start, span.end));
 	if (expanded === undefined) return text;
@@ -25,7 +25,7 @@ export function expandJsonSpan(text: string, span: JsonSpan | undefined): string
  * Re-anchor a span after `removed` characters were dropped from the front of
  * its text; undefined once the removal reaches into the JSON run itself.
  */
-export function shiftJsonSpan(span: JsonSpan | undefined, removed: number): JsonSpan | undefined {
+export function shiftJsonSpan(span: Span | undefined, removed: number): Span | undefined {
 	if (span === undefined || removed === 0) return span;
 	if (removed > span.start) return undefined;
 	return { start: span.start - removed, end: span.end - removed };

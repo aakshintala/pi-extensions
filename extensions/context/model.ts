@@ -4,10 +4,12 @@
  * never parse labels to recover source, kind, or parent/child relationships.
  */
 
+import type { ContextUsage } from "@earendil-works/pi-coding-agent";
+
 import type { SystemMessage } from "./transcript.ts";
 
-export const PI_SOURCE_ID = "pi";
-export const AGGREGATE_SOURCE_ID = "aggregate:extensions";
+const PI_SOURCE_ID = "pi";
+const AGGREGATE_SOURCE_ID = "aggregate:extensions";
 
 /** Everything pi itself assembles: its prompt, context files, skills, and built-in tools. */
 export const PI_SOURCE: InjectionSource = { id: PI_SOURCE_ID, label: "pi", native: true };
@@ -39,9 +41,6 @@ export const BUILT_IN_TOOLS_LABEL = "Built-in Tools";
 /** What produced the captured snapshot. */
 export type CaptureOrigin = "real-turn" | "synthetic-probe";
 
-/** The frozen lifecycle phase represented by the v0.2.0 injection model. */
-export type InjectionPhase = "initial";
-
 /** What kind of context data an injection item is. */
 export type InjectionKind =
 	| "base-prompt"
@@ -62,18 +61,12 @@ export interface InjectionSource {
 	readonly native: boolean;
 }
 
-/** Half-open `[start, end)` character range within captured text. */
-export interface TextSpan {
-	readonly start: number;
-	readonly end: number;
-}
-
 /**
- * Character range of a JSON document embedded in preview text, known from how
- * the text was built rather than from inspecting it. Full-content previews
- * expand the run; the compact provider-bound form still backs every estimate.
+ * Half-open `[start, end)` character range within captured text. As a `jsonSpan`
+ * it marks a JSON document known from how the text was built; full-content
+ * previews expand the run, the compact form still backs every estimate.
  */
-export interface JsonSpan {
+export interface Span {
 	readonly start: number;
 	readonly end: number;
 }
@@ -114,7 +107,7 @@ export interface InjectionSection {
 	 */
 	readonly moved?: boolean;
 	/** Serialized JSON inside `text`, e.g. a tool's parameter schema. */
-	readonly jsonSpan?: JsonSpan;
+	readonly jsonSpan?: Span;
 	/** Preview-only extension prompt lines; their owning tools count them instead. */
 	readonly injectedReferences?: readonly InjectedReference[];
 }
@@ -123,7 +116,6 @@ export interface InjectionSection {
 export interface InjectionItem {
 	/** Stable id, unique within a snapshot. */
 	readonly id: string;
-	readonly phase: InjectionPhase;
 	readonly kind: InjectionKind;
 	readonly source: InjectionSource;
 	/** Human-readable item label without embedded hierarchy or source. */
@@ -134,7 +126,7 @@ export interface InjectionItem {
 	/** Raw injected text for preview. Process-local; never log or persist. */
 	readonly text: string;
 	/** Serialized JSON inside `text`, e.g. non-string message content. */
-	readonly jsonSpan?: JsonSpan;
+	readonly jsonSpan?: Span;
 	/** Labeled parts of `text`, e.g. a tool's prompt lines and definition; never extra tokens. */
 	readonly sections?: readonly InjectionSection[];
 	/** True when a `--system-prompt` replacement suppressed this item; it reads 0 tokens. */
@@ -152,7 +144,7 @@ export interface InjectionItem {
 }
 
 /** Items of one source, with a precomputed total. */
-export interface InjectionGroup {
+interface InjectionGroup {
 	readonly source: InjectionSource;
 	readonly items: readonly InjectionItem[];
 	readonly totalTokens: number;
@@ -204,23 +196,17 @@ export interface UsagePreviewEntry {
 	/** Raw content for preview. Process-local; never log or persist. */
 	readonly text: string;
 	/** Serialized JSON inside `text`, e.g. tool-call arguments. */
-	readonly jsonSpan?: JsonSpan;
+	readonly jsonSpan?: Span;
 	/** Labeled parts of `text`, carried from the measured item; never extra tokens. */
 	readonly sections?: readonly InjectionSection[];
-}
-
-/** Pi-reported usage; tokens/percent are omitted when unknown (e.g. right after compaction). */
-export interface ReportedContextUsage {
-	readonly tokens?: number;
-	readonly contextWindow: number;
-	readonly percent?: number;
 }
 
 /** On-demand estimated context composition presented by the Usage view. */
 export interface ContextUsageSnapshot {
 	readonly computedAt: Date;
 	readonly modelLabel?: string;
-	readonly reported?: ReportedContextUsage;
+	/** Pi-reported usage; tokens/percent are null when unknown (e.g. right after compaction). */
+	readonly reported?: ContextUsage;
 	readonly categories: readonly UsageCategory[];
 	/** Sum of the top-level category estimates. */
 	readonly estimatedTokens: number;
@@ -233,13 +219,11 @@ export interface ContextUsageSnapshot {
  * sources follow by total size, and the unattributable aggregate comes last.
  * Items inside each group follow the order pi assembles them into a request
  * (base prompt, appended prompt, context files, skills, built-in tools, other
- * tools, then everything else by size). Returned objects own all nested data;
- * later mutation of the input cannot change the groups.
+ * tools, then everything else by size).
  */
-export function groupInjections(items: readonly InjectionItem[]): InjectionGroup[] {
+function groupInjections(items: readonly InjectionItem[]): InjectionGroup[] {
 	const groups = new Map<string, MutableGroup>();
-	for (const input of items) {
-		const item = copyItem(input);
+	for (const item of items) {
 		let group = groups.get(item.source.id);
 		if (group === undefined) {
 			group = { source: item.source, items: [], totalTokens: 0 };
@@ -254,7 +238,7 @@ export function groupInjections(items: readonly InjectionItem[]): InjectionGroup
 	return [...groups.values()].sort(compareGroups);
 }
 
-/** Build an owned Initial snapshot from measured items. */
+/** Build an Initial snapshot from measured items. */
 export function buildSnapshot(
 	items: readonly InjectionItem[],
 	origin: CaptureOrigin,
@@ -274,35 +258,6 @@ interface MutableGroup {
 	source: InjectionSource;
 	items: InjectionItem[];
 	totalTokens: number;
-}
-
-/** Owned copy of an item, including its nested source, spans, and children. */
-function copyItem(item: InjectionItem): InjectionItem {
-	return {
-		...item,
-		source: { ...item.source },
-		systemMessage: item.systemMessage === undefined ? undefined : structuredClone(item.systemMessage),
-		jsonSpan: copyJsonSpan(item.jsonSpan),
-		injectedReferences: copyInjectedReferences(item.injectedReferences),
-		sections: item.sections?.map((section) => ({
-			...section,
-			jsonSpan: copyJsonSpan(section.jsonSpan),
-			injectedReferences: copyInjectedReferences(section.injectedReferences),
-		})),
-		children: item.children?.map((child) => copyItem(child)),
-	};
-}
-
-/** Own reference records and their nested provenance without adding their text to totals. */
-function copyInjectedReferences(
-	references: readonly InjectedReference[] | undefined,
-): InjectedReference[] | undefined {
-	return references?.map((reference) => ({ ...reference, source: { ...reference.source } }));
-}
-
-/** Owned copy of an optional span. */
-function copyJsonSpan(span: JsonSpan | undefined): JsonSpan | undefined {
-	return span === undefined ? undefined : { ...span };
 }
 
 /**

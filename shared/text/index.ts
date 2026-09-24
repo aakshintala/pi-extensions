@@ -16,6 +16,9 @@ export const oneLine = (s: unknown) =>
     .replace(/ {2,}/g, " ")
     .trim();
 
+/** Terminal sequences removed. Control characters and line breaks are left alone. */
+export const stripSequences = (s: string) => s.replace(SEQUENCE, "");
+
 /** Terminal sequences removed except SGR (colours and styles). Control characters are left alone. */
 export const keepSgr = (s: string) => s.replace(SEQUENCE, (m) => (SGR.test(m) ? m : ""));
 

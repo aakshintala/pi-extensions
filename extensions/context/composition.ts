@@ -5,6 +5,8 @@
  */
 import { type ContextEvent, type ContextUsage, convertToLlm, estimateTokens } from "@earendil-works/pi-coding-agent";
 
+import { charTokens } from "./measure.ts";
+
 import {
 	BUILT_IN_TOOLS_LABEL,
 	type ContextUsageSnapshot,
@@ -12,7 +14,6 @@ import {
 	type InvisibleReasoningEstimate,
 	type InitialSnapshot,
 	type InjectionItem,
-	type ReportedContextUsage,
 	SKILLS_LABEL,
 	SYSTEM_PROMPT_LABEL,
 	type UsageCategory,
@@ -20,10 +21,12 @@ import {
 } from "./model.ts";
 
 /** Everything computeUsage needs; messages must already be synthetic-filtered. */
-export interface UsageInputs {
+interface UsageInputs {
 	snapshot: InitialSnapshot;
+	/** Frozen Initial capture, the source of request-only messages. */
+	initial: InitialSnapshot;
 	messages: ContextEvent["messages"];
-	reported?: ReportedContextUsage;
+	reported?: ContextUsage;
 	modelLabel?: string;
 	computedAt?: Date;
 	/** Auto-compaction reserve (settings `reserveTokens`); omit when auto-compaction is disabled. */
@@ -41,7 +44,7 @@ export function computeUsage(inputs: UsageInputs): ContextUsageSnapshot {
 	const prompt = classifyPromptCategories(inputs.snapshot);
 	const categories = [
 		...prompt.categories,
-		...classifyMessages(inputs.messages, requestOnlyMessages(inputs.snapshot), prompt.promptAdditions),
+		...classifyMessages(inputs.messages, requestOnlyMessages(inputs.initial), prompt.promptAdditions),
 	].filter((category) => category.tokens > 0);
 	return {
 		computedAt: inputs.computedAt ?? new Date(),
@@ -69,16 +72,6 @@ export function collectPreviewEntries(category: UsageCategory): UsagePreviewEntr
 		entries.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
 	}
 	return entries;
-}
-
-/** Convert pi's nullable ContextUsage to the undefined-based model shape. */
-export function toReportedUsage(usage: ContextUsage | undefined): ReportedContextUsage | undefined {
-	if (usage === undefined) return undefined;
-	return {
-		tokens: usage.tokens ?? undefined,
-		contextWindow: usage.contextWindow,
-		percent: usage.percent ?? undefined,
-	};
 }
 
 /** Prompt-derived categories, plus the additions the Extensions category adopts. */
@@ -198,7 +191,7 @@ function classifyMessages(
 					assistantToolCalls.push({
 						timestamp: message.timestamp,
 						breadcrumb: ["assistant", block.name],
-						tokens: textTokens(block.name.length + args.length),
+						tokens: charTokens(block.name.length + args.length),
 						text: `${block.name}(${args})`,
 						// The arguments sit between the call parentheses this entry adds around them.
 						jsonSpan: { start: block.name.length + 1, end: block.name.length + 1 + args.length },
@@ -319,7 +312,7 @@ type AssistantContextMessage = Extract<ContextEvent["messages"][number], { role:
  */
 function thinkingEntries(message: AssistantContextMessage): UsagePreviewEntry[] {
 	const texts = message.content.flatMap((block) => (block.type === "thinking" ? [block.thinking] : []));
-	const visibleTokens = textTokens(texts.reduce((sum, text) => sum + text.length, 0));
+	const visibleTokens = charTokens(texts.reduce((sum, text) => sum + text.length, 0));
 	const reportedTokens = reportedReasoningTokens(message);
 	const countedTokens = Math.max(visibleTokens, reportedTokens ?? 0);
 	const signatureChars = message.content.reduce((sum, block) => {
@@ -383,7 +376,7 @@ function createInvisibleReasoningEstimate(
 	// envelope and counts the reconstructed thinking, at a model-dependent ratio that
 	// measured either side of 4. See doc/THINKING.md.
 	return {
-		tokens: textTokens(signatureChars),
+		tokens: charTokens(signatureChars),
 		basis: "signature-proxy",
 		encoded: true,
 	};
@@ -402,7 +395,7 @@ function reportedReasoningTokens(message: AssistantContextMessage): number | und
 /** Pool chars/4 rounding across all blocks while retaining one preview entry per block. */
 function allocateTextTokens(texts: readonly string[]): number[] {
 	const allocations = texts.map((text) => Math.floor(text.length / 4));
-	const target = textTokens(texts.reduce((sum, text) => sum + text.length, 0));
+	const target = charTokens(texts.reduce((sum, text) => sum + text.length, 0));
 	let remainder = target - allocations.reduce((sum, tokens) => sum + tokens, 0);
 	const rankedIndexes = texts
 		.map((text, index) => ({ index, remainder: text.length % 4 }))
@@ -426,7 +419,7 @@ function blockEntries(timestamp: number, kind: string, texts: readonly string[])
 	return texts.map((text, index) => ({
 		timestamp,
 		breadcrumb: texts.length > 1 ? ["assistant", `${kind} ${index + 1}/${texts.length}`] : ["assistant"],
-		tokens: textTokens(text.length),
+		tokens: charTokens(text.length),
 		text,
 	}));
 }
@@ -475,9 +468,4 @@ function appendEntry(
 /** Leaves from accumulated per-key preview entries. */
 function leavesFromMap(idPrefix: string, totals: Map<string, UsagePreviewEntry[]>): UsageCategory[] {
 	return [...totals.entries()].map(([label, entries]) => leaf(`${idPrefix}:${label}`, label, entries));
-}
-
-/** Same chars/4 heuristic pi's estimateTokens uses for text content. */
-function textTokens(chars: number): number {
-	return Math.ceil(chars / 4);
 }

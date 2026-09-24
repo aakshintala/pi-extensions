@@ -8,8 +8,9 @@ import type { ExtensionCommandContext, Theme, ThemeColor } from "@earendil-works
 import { Key, matchesKey, type TuiMouseEvent, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 import type { ContextUsageSnapshot, UsageCategory, UsagePreviewEntry } from "../model.ts";
-import { normalizeInlineText, normalizePreviewText } from "../text.ts";
-import { collectPreviewEntries } from "../usage.ts";
+import { oneLine } from "../../../shared/text/index.ts";
+import { normalizePreviewText } from "../text.ts";
+import { collectPreviewEntries } from "../composition.ts";
 import { ListNavigator, PreviewScroller } from "./injections-model.ts";
 import { expandJsonSpan } from "./json-preview.ts";
 import {
@@ -100,7 +101,7 @@ const MAP_KEY_DETAILED_SPARE_ROWS = 5;
 const MAP_KEY_COMPACT_SPARE_ROWS = 2;
 
 /** Everything the Usage view renders, classified once when the view opens. */
-export interface UsageViewInput {
+interface UsageViewInput {
 	readonly usage: ContextUsageSnapshot;
 	readonly degradedReason?: string;
 }
@@ -189,7 +190,7 @@ export async function showUsageView(context: ExtensionCommandContext, input: Usa
 }
 
 /** Exported for direct render/input tests; use showUsageView from pi code. */
-export class UsageView {
+class UsageView {
 	private readonly theme: Theme;
 	private readonly input: UsageViewInput;
 	private readonly done: (result: undefined) => void;
@@ -337,7 +338,7 @@ export class UsageView {
 			return [this.fit(title, width), "", this.fit(summary, width)];
 		}
 
-		const normalizedModel = normalizeInlineText(this.usage.modelLabel ?? "");
+		const normalizedModel = oneLine(this.usage.modelLabel ?? "");
 		const separator = theme.fg("dim", " · ");
 		const fullMetadata = normalizedModel === ""
 			? summary
@@ -513,14 +514,14 @@ export class UsageView {
 		const reported = this.usage.reported;
 		if (reported === undefined) return this.theme.fg("muted", "Context usage unavailable.");
 		const contextWindow = formatTokens(reported.contextWindow);
-		if (reported.tokens === undefined) {
+		if (reported.tokens === null) {
 			const percent = formatPercent(this.usage.estimatedTokens / reported.contextWindow);
 			return this.theme.fg(
 				"text",
 				`≈${formatTokens(this.usage.estimatedTokens)}/${contextWindow} (${percent})`,
 			);
 		}
-		const percent = reported.percent === undefined ? "" : ` (${formatPercent(reported.percent / 100)})`;
+		const percent = reported.percent === null ? "" : ` (${formatPercent(reported.percent / 100)})`;
 		return this.theme.fg("text", `${formatTokens(reported.tokens)}/${contextWindow}${percent}`);
 	}
 
@@ -595,7 +596,7 @@ export class UsageView {
 		if (row.type === "buffer") return `${BUFFER_CELL} Auto-Compact Buffer`;
 		if (row.type === "free") return `${FREE_CELL} Free Space`;
 		const indent = "  ".repeat(row.depth);
-		return `${indent}${categoryMarker(row.category.id, row.depth)} ${normalizeInlineText(row.category.label)}`;
+		return `${indent}${categoryMarker(row.category.id, row.depth)} ${oneLine(row.category.label)}`;
 	}
 
 	/** Themed hierarchy label; the marker keeps its map color even when selected. */
@@ -612,7 +613,7 @@ export class UsageView {
 		const color = this.categoryColor(row.rootId);
 		const marker = this.paint(color, categoryMarker(row.category.id, row.depth));
 		const labelColor = selected ? "accent" : row.depth === 0 ? "text" : row.depth === 1 ? "muted" : "dim";
-		return `${indent}${marker} ${this.theme.fg(labelColor, normalizeInlineText(row.category.label))}`;
+		return `${indent}${marker} ${this.theme.fg(labelColor, oneLine(row.category.label))}`;
 	}
 
 	/** Percentage text used by the independently aligned rightmost column. */
@@ -649,7 +650,7 @@ export class UsageView {
 		const reason = this.input.degradedReason;
 		return reason === undefined
 			? []
-			: wrapDescriptionLines(this.theme, normalizeInlineText(reason), "warning", width);
+			: wrapDescriptionLines(this.theme, oneLine(reason), "warning", width);
 	}
 
 	// === Preview mode ===
@@ -837,7 +838,7 @@ export class UsageView {
 	/** Accent category title with its token and percentage metadata, shared by both preview levels. */
 	private categoryHeaderLine(row: CategoryLegendRow, width: number): string {
 		const theme = this.theme;
-		const title = theme.fg("accent", theme.bold(normalizeInlineText(row.category.label)));
+		const title = theme.fg("accent", theme.bold(oneLine(row.category.label)));
 		const percent = this.plainLegendPercent(row.category.tokens);
 		const meta = theme.fg(
 			"muted",
@@ -965,7 +966,7 @@ export class UsageView {
 			// The leading cell names the producer and heads the whole block, so it is bold.
 			const lead = index === 0;
 			const color: ThemeColor = lead ? "mdHeading" : "muted";
-			const name = normalizeInlineText(cell);
+			const name = oneLine(cell);
 			cells.push(
 				`${theme.fg("dim", "[")}${theme.fg(color, lead ? theme.bold(name) : name)}${theme.fg("dim", "]")}`,
 			);
@@ -1120,14 +1121,14 @@ function legendTokens(row: LegendRow): number {
 }
 
 /** Compact token count: 951, 3.7k, 43.8k, 1M. */
-export function formatTokens(tokens: number): string {
+function formatTokens(tokens: number): string {
 	if (tokens < 1_000) return `${tokens}`;
 	if (tokens < 1_000_000) return `${trimTrailingZero((tokens / 1_000).toFixed(1))}k`;
 	return `${trimTrailingZero((tokens / 1_000_000).toFixed(1))}M`;
 }
 
 /** Percentage with one decimal below 10%: 0.4%, 4.2%, 96%. */
-export function formatPercent(ratio: number): string {
+function formatPercent(ratio: number): string {
 	const percent = ratio * 100;
 	if (percent >= 10) return `${Math.round(percent)}%`;
 	return `${trimTrailingZero(percent.toFixed(1))}%`;

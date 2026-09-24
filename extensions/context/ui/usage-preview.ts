@@ -5,13 +5,13 @@
  */
 
 /** Absolute line span of one block inside the flattened preview stream. */
-export interface PreviewBlockExtent {
+interface PreviewBlockExtent {
 	readonly start: number;
 	readonly height: number;
 }
 
 /** Owner of one flattened preview line; blank separator rows have none. */
-export interface PreviewLineRef {
+interface PreviewLineRef {
 	readonly blockIndex: number;
 	readonly lineIndex: number;
 }
