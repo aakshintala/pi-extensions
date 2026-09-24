@@ -481,3 +481,23 @@ test("a shut-down footer stops mirroring the quota client", async () => {
   assert.equal(quotas(), shown);
   assert.equal(s.renders, renders);
 });
+
+test("quota off: no tool, command, fetch or footer segment", async () => {
+  status(fakePi(), { gitDirty: async () => null }); // declares the section
+  const section = rigSettings(agentDir).sections().find((x) => x.name === "status");
+  section.set("quota", false);
+  try {
+    let fetches = 0;
+    const tools = [];
+    const pi = { ...fakePi(), registerTool: (t) => tools.push(t.name) };
+    status(pi, { fetch: async () => (fetches++, Response.json(FEED)), quotaTimers: { ...fakeTimers(), setInterval: () => 1, clearInterval() {} }, gitDirty: async () => null });
+    const s = session(pi, { trusted: false });
+    await s.emit("session_start");
+    await flush();
+    assert.deepEqual([tools, Object.keys(pi.commands), fetches], [[], [], 0]);
+    assert.ok(!s.lines()[1].includes("Q "), "no quota segment");
+    await s.emit("session_shutdown");
+  } finally {
+    section.reset("quota");
+  }
+});
