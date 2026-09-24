@@ -175,3 +175,30 @@ test("closing the viewer disposes the transcript it showed", (t) => {
   viewer.close();
   assert.equal(disposed, 1);
 });
+
+// #161: the item can leave the registry (prune, or decay once it is no longer kept) while
+// its view is still on screen; the header is the only way back at that point, so it must
+// not go blank.
+test("the header still shows a way back once the viewed item leaves the registry", (t) => {
+  const registry = fleet();
+  registry.register({ id: "u3", owner: "unit", kind: "shell", label: "build", activity: () => "", view: { log: "/dev/null" }, stop() {} });
+  let frame;
+  const ctx = {
+    ui: {
+      theme: { fg: (_c, s) => s },
+      custom: (build) => {
+        frame = build({ terminal: { rows: 24 } }, undefined, undefined, () => {});
+        return new Promise(() => {}); // the overlay stays open
+      },
+    },
+  };
+  const viewer = createViewer(ctx, () => ({ children: [], requestRender() {} }));
+  viewer.open(registry.get("u3"));
+  assert.match(frame.render(80)[0], /esc back/, "shown while the item is there");
+
+  registry.finish("u3", "stopped", "stopped by user", null);
+  registry.prune(); // gone from the registry; the viewer is still open on it
+  assert.match(frame.render(80)[0], /esc back/, "still shown once the item is gone");
+
+  viewer.close();
+});

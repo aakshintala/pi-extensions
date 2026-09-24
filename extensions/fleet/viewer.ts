@@ -45,13 +45,15 @@ export const endedAs = (status: Item["status"]) => (isFinished(status) ? (status
 export const stateOf = (item: Item) =>
   item.status === "queued" ? "queued" : endedAs(item.status) + duration((item.endedAt ?? fleet().now()) - item.startedAt);
 
-/** The item's header line: kind, label, status, running time and the frame's keys. */
+/** The item's header line: kind, label, status, running time and the frame's keys. Still
+ * shows "esc back" when the item has left the registry (#161): the view it left behind
+ * (a log's last lines, a transcript) stays up, so the way out of it must too. */
 function header(ctx: ExtensionContext, id: string): Component {
   return {
     render(width) {
       const item = fleet().get(id);
-      if (!item) return [];
       const theme = ctx.ui.theme;
+      if (!item) return [truncateToWidth(` ${theme.fg("dim", "· esc back")}`, width)];
       const state = stateOf(item);
       const keys = `esc back${item.steer ? " · enter steers" : ""}`;
       return [truncateToWidth(` ${theme.fg("accent", `${oneLine(item.kind)} ${oneLine(item.label)}`)} · ${state} ${theme.fg("dim", `· ${keys}`)}`, width)];

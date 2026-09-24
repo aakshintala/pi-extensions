@@ -21,7 +21,7 @@ FleetView lists agents, monitors and running shells below the editor. Open an ag
 - Main-session output keeps going to the chat while you view an item, so you see it when you return.
 - The viewer follows new output. Scrolling up pauses it, and End jumps back to the end and follows again.
 - What you type while viewing an agent steers it and shows in the viewer, echoed by the viewer unless the item's transcript shows its steers itself (`showsSteers`). Other items take no steering. Slash commands still go to Pi; nothing else reaches the main session.
-- The viewer stays open when its item finishes, and closes once the item is removed.
+- The viewer stays open when its item finishes, and closes once the item is removed. Its header keeps showing `esc back` even in that gap, so there is always an on-screen way out.
 - The chat swap reaches into Pi's layout, and only fullscreen mode has the scroll view it needs. In regular mode, or if Pi is not version 0.87.1 or its layout differs, the viewer opens as a full-size overlay instead. Switching to regular mode while an item is swapped in moves it to the overlay. The overlay has its own steer line, PageUp, PageDown, Home, End and the mouse wheel scroll it, and while scrolled up its header counts the lines below.
 - A log shows at most its last 2,000 lines. Each read takes at most 1 MiB, and a line says how many bytes it skipped.
 
