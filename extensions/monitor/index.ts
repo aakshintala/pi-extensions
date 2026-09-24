@@ -4,7 +4,7 @@
 // FleetView row shows, stderr to a separate log. Every timer runs on the seam below.
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, fstatSync, mkdtempSync, openSync, readSync, rmdirSync, writeSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, rmdirSync, writeSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { getShellConfig, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -60,6 +60,8 @@ type Monitor = Group & {
   tokens: number;
   dropped: number;
   partial: string;
+  /** The last non-blank stdout line, for the FleetView row. */
+  last: string;
   refill?: unknown;
   flood?: unknown;
   /** Closes the flood window when REFILL_MS pass without a drop. */
@@ -68,23 +70,6 @@ type Monitor = Group & {
   /** Resolves once stdout has closed and the end notice is sent. */
   done: Promise<void>;
 };
-
-/** The last line in the last 4 KiB of a log; empty if it cannot be read. */
-function lastLine(file: string) {
-  let fd: number | undefined;
-  try {
-    fd = openSync(file, "r");
-    const size = fstatSync(fd).size;
-    const n = Math.min(4096, size);
-    const buf = Buffer.alloc(n);
-    readSync(fd, buf, 0, n, size - n);
-    return buf.toString("utf8").trimEnd().split("\n").at(-1) ?? "";
-  } catch {
-    return "";
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
 
 export default function (pi: ExtensionAPI) {
   const monitors = new Map<string, Monitor>();
@@ -142,7 +127,7 @@ export default function (pi: ExtensionAPI) {
       child.stdin?.end(p.command);
     }
     const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
-    const m: Monitor = { id, owner: c.sessionManager.getSessionId(), description: p.description, log, errors, seconds, child, pgid: child.pid, record: join(dir, `${id}.pid`), counted: true, out, tokens: BUDGET, dropped: 0, partial: "", done: closed.then(() => settle(m)) };
+    const m: Monitor = { id, owner: c.sessionManager.getSessionId(), description: p.description, log, errors, seconds, child, pgid: child.pid, record: join(dir, `${id}.pid`), counted: true, out, tokens: BUDGET, dropped: 0, partial: "", last: "", done: closed.then(() => settle(m)) };
     track(m);
     child.stdout?.setEncoding("utf8"); // whole code points, even across chunks
     child.stdout?.on("data", (chunk: string) => {
@@ -155,6 +140,8 @@ export default function (pi: ExtensionAPI) {
         const i = unfinished(m.partial);
         m.partial = cut(oneLine(m.partial.slice(0, i)), LINE_CHARS) + m.partial.slice(i, i + PARTIAL_MAX);
       }
+      const tail = m.partial.trim() ? m.partial : lines.findLast((l) => l.trim());
+      if (tail) m.last = cut(oneLine(tail), LINE_CHARS);
       if (lines.length && !m.reason) deliver(m, lines);
     });
     child.once("exit", (code, signal) => {
@@ -164,7 +151,7 @@ export default function (pi: ExtensionAPI) {
     child.once("error", () => ((m.code = 127), void kill(m)));
     m.deadline = timers().setTimeout(() => void stop(m, "timeout"), seconds * 1000);
     monitors.set(id, m);
-    fleet().register({ id, owner: m.owner, kind: "monitor", label: oneLine(p.description), activity: () => lastLine(log), view: { log }, stop: () => stop(m, "stopped") });
+    fleet().register({ id, owner: m.owner, kind: "monitor", label: oneLine(p.description), activity: () => m.last, view: { log }, stop: () => stop(m, "stopped") });
     return m;
   }
 

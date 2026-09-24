@@ -6,7 +6,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, truncateSync, writeFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { logLine, logSource, MAX_LINES, MAX_READ } = await import("../extensions/fleet/log.ts");
+const { logLine, logSource, MAX_LINES, MAX_READ, PARTIAL_MAX } = await import("../extensions/fleet/log.ts");
 const { createViewer, findChat, TESTED_PI } = await import("../extensions/fleet/viewer.ts");
 const { fleet } = await import("../shared/fleet/index.ts");
 const { Container, Text } = await import("@earendil-works/pi-tui");
@@ -49,6 +49,22 @@ test("a log source reads only what was appended, across split lines and characte
   writeFileSync(path, "fresh\n");
   source.read();
   assert.deepEqual(source.lines(), ["fresh"], "a truncated log starts over");
+});
+
+test("an unended line keeps only its last carriage-return write, and a long one is capped", (t) => {
+  const path = tempLog(t);
+  const source = logSource(path);
+  writeFileSync(path, "done\n");
+  for (let i = 0; i <= 100; i++) {
+    appendFileSync(path, `${"#".repeat(1000)} ${i}%\r`);
+    source.read();
+  }
+  const lines = source.lines();
+  assert.deepEqual(lines, ["done", `${"#".repeat(1000)} 100%`]);
+  assert.equal(source.lines(), lines, "unchanged lines are not rebuilt");
+  appendFileSync(path, "x".repeat(PARTIAL_MAX * 2));
+  source.read();
+  assert.equal(source.lines()[1], "x".repeat(PARTIAL_MAX));
 });
 
 test("a log source keeps the latest lines", (t) => {

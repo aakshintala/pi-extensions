@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { duration, fleet, isFinished, viewerTakes, type Item, type Notice } from "../../shared/fleet/index.ts";
 import { oneLine } from "../../shared/text/index.ts";
 import { ctrlBFree, editorFocused } from "../../shared/tui/index.ts";
-import { createViewer, type Viewer } from "./viewer.ts";
+import { createViewer, endedAs, stateOf, type Viewer } from "./viewer.ts";
 
 /** Most lines FleetView takes, including the "… N more" line. */
 const MAX_LINES = 6;
@@ -41,17 +41,19 @@ function rows(items: readonly Item[]): Row[] {
   const visible = items.filter((i) => i.kind !== "shell");
   const ids = new Set(visible.map((i) => i.id));
   const out: Row[] = [{ depth: 0 }];
+  const placed = new Set<Item>();
   const add = (parent: string | undefined, depth: number) => {
     for (const item of visible) {
       const p = item.parentId && ids.has(item.parentId) && item.parentId !== item.id ? item.parentId : undefined;
       if (p !== parent) continue;
       out.push({ item, depth });
+      placed.add(item);
       add(item.id, depth + 1);
     }
   };
   add(undefined, 0);
   // Items in a parent cycle have no root; show them at the top level.
-  for (const item of visible) if (!out.some((r) => r.item === item)) out.push({ item, depth: 0 });
+  for (const item of visible) if (!placed.has(item)) out.push({ item, depth: 0 });
   if (shells.length) out.push({ shells, depth: 0 });
   return out;
 }
@@ -80,7 +82,7 @@ const renderNotice: MessageRenderer = (message, { outputPad }, theme) => {
   const content = typeof message.content === "string" ? message.content : message.content.map((c) => ("text" in c ? c.text : "")).join("");
   if (!item) return new Text(theme.fg("muted", content.split("\n").map(oneLine).join("\n")), outputPad, 0);
   const [color, icon] = isFinished(item.status) ? ICON[item.status as keyof typeof ICON] : (["accent", "●"] as const);
-  const state = isFinished(item.status) ? (item.status === "completed" ? "done " : `${item.status} `) : "";
+  const state = endedAs(item.status);
   // The same fields FleetView rows show (model, tokens, cost...), so a finished notice
   // carries what the row did (#5); a producer that throws keeps only its row broken.
   const fields = safeDetail(item).map(oneLine).filter(Boolean).map((f) => ` · ${f}`).join("");
@@ -241,11 +243,7 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     if (!row.item) return [theme.fg("accent", mark) + " main"];
     const item = row.item;
     const done = isFinished(item.status);
-    const state =
-      item.status === "queued"
-        ? "queued"
-        : (done ? (item.status === "completed" ? "done " : `${item.status} `) : "") +
-          duration((item.endedAt ?? registry.now()) - item.startedAt);
+    const state = stateOf(item);
     const activity = activityOf(item);
     // The label and status always stay: the label is shortened to leave room for the status (#138).
     const name = oneLine(item.label);
@@ -334,24 +332,25 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
   };
 
   // The selected item does not decay (#137): tell the registry, and follow it when rows above it leave.
-  const hold = () => {
-    registry.selected = focused ? current()[selected]?.item?.id : undefined;
+  const hold = (all = current()) => {
+    registry.selected = focused ? all[selected]?.item?.id : undefined;
   };
 
+  // An open log is read by its own watcher (viewer.ts), not here.
   const redraw = () => {
-    const held = current().findIndex((r) => r.item && r.item.id === registry.selected);
+    const all = current();
+    const held = all.findIndex((r) => r.item && r.item.id === registry.selected);
     if (held >= 0) selected = held;
     const shown = viewer.active();
     if (shown && !registry.get(shown)) viewer.close(); // pruned: nothing left to show
-    viewer.refresh(); // a producer update often means new log output
     const running = registry.items().some((i) => !isFinished(i.status));
     if (running && !timer) timer = setInterval(() => tui?.requestRender(), 1000);
     if (!running && timer) {
       clearInterval(timer);
       timer = undefined;
     }
-    if (current().length === 1) focused = false;
-    hold();
+    if (all.length === 1) focused = false;
+    hold(all);
     tui?.requestRender();
   };
   const unsubscribe = registry.subscribe(redraw);
