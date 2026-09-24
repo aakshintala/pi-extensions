@@ -126,6 +126,18 @@ function setting(t, key, value) {
   });
 }
 
+/**
+ * Shortens the extension's stop and shutdown bounds (5s, 10s) to 50ms for this test, so a
+ * test of the bound need not sleep it. Only timers the subagents extension sets with those
+ * delays change; Pi's own and the faux provider's keep real time.
+ */
+function fastBounds(t) {
+  const real = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) =>
+    real(fn, (ms === 5000 || ms === 10_000) && /at bounded .*extensions\/subagents\/index\.ts/.test(new Error().stack) ? 50 : ms, ...args);
+  t.after(() => (globalThis.setTimeout = real));
+}
+
 const idOf = (label) => fleet().items().find((i) => i.label === `do ${label}`)?.id;
 const noticed = (context, label, status = "completed") => context.messages.some((m) => m.role !== "assistant" && m.role !== "toolResult" && textOf(m).includes(`(do ${label}) ${status}`));
 /** Answers only when aborted, as a provider does. */
@@ -543,6 +555,7 @@ test("stop waits for the child's own work to stop before shutting it down, but n
       return says("waiting on jobs")();
     },
   );
+  fastBounds(t); // after start(), so its session_shutdown at cleanup is fast too
   globalThis[JOB_STOPPED] = (job) =>
     job === "slow"
       ? new Promise((resolve) => setImmediate(() => ((shutWhenStopped.slow = shut.length), resolve())))
@@ -838,9 +851,10 @@ test("an agent being stopped cannot start anything below it", { timeout: 20_000 
   assert.equal(attempt, "Refused: you are being stopped.");
 });
 
-test("the parent's shutdown gives up on a child that will not stop, after a bound", { timeout: 30_000 }, async (t) => {
+test("the parent's shutdown gives up on a child that will not stop, after a bound", { timeout: 20_000 }, async (t) => {
   const [held, release] = [gate(), gate()];
   const { session, results } = await start(t, [calls(spawn("stuck")), says("started")], () => (held.open(), release.then(says("late"))));
+  fastBounds(t); // after start(), so its session_shutdown at cleanup is fast too
   t.after(() => release.open());
   const ui = new Proxy({}, { get: () => () => undefined });
   await session.bindExtensions({ uiContext: ui, mode: "rpc" }); // with a UI the run ends at once
@@ -875,7 +889,7 @@ test("stopping a nested agent frees room for a queued top-level spawn at once", 
   assert.equal(g1AtD, "running"); // D started while G1 was still winding down
 });
 
-test("an abandoned child is disposed, spends nothing more, and holds its place in the cap until its run settles", { timeout: 40_000 }, async (t) => {
+test("an abandoned child is disposed, spends nothing more, and holds its place in the cap until its run settles", { timeout: 20_000 }, async (t) => {
   const [gRunning, release] = [gate(), gate()];
   let fResult;
   const root = async (context) => {
@@ -896,6 +910,7 @@ test("an abandoned child is disposed, spends nothing more, and holds its place i
     if (task === "F") return says("F done")();
     return context.messages.some((m) => m.role === "toolResult") ? says("waiting")() : calls(spawn("G"))();
   });
+  fastBounds(t); // after start(), so its session_shutdown at cleanup is fast too
   setting(t, "maxSessions", 3); // the root, C and G; then the root, abandoned G and E
   await session.prompt("go");
   // G, abandoned, still held its place, so F queued; it started once G's run settled.
