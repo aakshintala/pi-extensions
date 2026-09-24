@@ -139,6 +139,11 @@ export function registerFooter(pi: ExtensionAPI, { timers = globalThis, now = Da
   let perf: Snapshot["perf"];
   let reqStart: number | undefined, firstToken: number | undefined;
   let render = () => {};
+  // Bumped by every code path that can change what render() draws (including
+  // branch changes, which reach it through the wrapper below), so the width-keyed
+  // cache below never serves a stale line. Correctness over savings: nothing here
+  // is deliberately left out of the bump.
+  let version = 0;
 
   // Git: one debounce timer and one git per instance (one per process, via the
   // lock); a request made during a run reruns once after it.
@@ -196,16 +201,28 @@ export function registerFooter(pi: ExtensionAPI, { timers = globalThis, now = Da
     const { truncateToWidth } = await import("@earendil-works/pi-tui");
     ctx.ui.setFooter((tui, theme, footerData) => {
       const draw = () => tui.requestRender();
-      render = draw;
-      const unsubscribe = footerData.onBranchChange(draw);
+      // requestRender alone would leave the cache below serving last frame's
+      // lines: every draw (including a branch change, subscribed below) must
+      // also invalidate it.
+      const bump = () => {
+        version++;
+        draw();
+      };
+      render = bump;
+      const unsubscribe = footerData.onBranchChange(bump);
+      let cacheKey = "";
+      let cached: string[] | undefined;
       return {
         invalidate() {},
         dispose() {
           unsubscribe();
-          if (render === draw) render = () => {}; // a newer footer keeps its own
+          if (render === bump) render = () => {}; // a newer footer keeps its own
         },
-        render: (width: number) =>
-          footerLines(
+        render: (width: number) => {
+          const key = `${width}:${version}`;
+          if (cached && cacheKey === key) return cached;
+          cacheKey = key;
+          return (cached = footerLines(
             {
               model: ctx.model?.id,
               thinking: pi.getThinkingLevel(),
@@ -218,7 +235,8 @@ export function registerFooter(pi: ExtensionAPI, { timers = globalThis, now = Da
               perf,
             },
             theme,
-          ).map((line) => truncateToWidth(line, width)),
+          ).map((line) => truncateToWidth(line, width)));
+        },
       };
     });
   });

@@ -57,8 +57,11 @@ function fakePi() {
   return {
     handlers,
     commands,
+    thinking: "high",
     on: (name, fn) => (handlers[name] ??= []).push(fn),
-    getThinkingLevel: () => "high",
+    getThinkingLevel() {
+      return this.thinking;
+    },
     registerTool() {},
     registerCommand: (name, c) => (commands[name] = c),
   };
@@ -67,7 +70,7 @@ function fakePi() {
 // A session driving the handlers `register(pi)` installed. ctx.cwd differs from
 // the session's cwd on purpose: the footer must use the session's.
 function session(pi, { trusted = true, mode = "tui", branch = [], gitBranch = "main", cwd = "/repo", model = "m1" } = {}) {
-  const s = { renders: 0, getBranch: 0, contextUsage: 0, percent: 5, component: undefined, notes: [] };
+  const s = { renders: 0, getBranch: 0, contextUsage: 0, percent: 5, component: undefined, notes: [], gitBranch };
   const ctx = {
     mode,
     cwd: "/launched-here",
@@ -81,9 +84,15 @@ function session(pi, { trusted = true, mode = "tui", branch = [], gitBranch = "m
     },
   };
   s.ctx = ctx;
+  // Fires the same callback the footer subscribes with footerData.onBranchChange,
+  // so tests can simulate a branch change the way pi-tui's footer data provider does.
+  s.fireBranchChange = () => s.onBranchChange?.();
   s.mount = (factory) => {
     const tui = { requestRender: () => s.renders++ };
-    return factory(tui, THEME, { getGitBranch: () => gitBranch, onBranchChange: () => () => {} });
+    return factory(tui, THEME, {
+      getGitBranch: () => s.gitBranch,
+      onBranchChange: (cb) => ((s.onBranchChange = cb), () => {}),
+    });
   };
   s.emit = async (type, event = {}) => {
     for (const fn of pi.handlers[type] ?? []) await fn({ type, ...event }, ctx);
@@ -164,6 +173,42 @@ test("usage and context: counted at start, on compaction and per message, never 
   await s.emit("session_compact");
   assert.match(s.lines()[0], /in 1\.5k out 300/, "a recount replaces the running totals");
   assert.equal(s.getBranch, 2);
+});
+
+test("the per-width render cache never serves a stale line: model, thinking, branch, quota and usage each invalidate it", async () => {
+  const pi = fakePi();
+  const footer = registerFooter(pi, { gitDirty: async () => null });
+  const s = session(pi, { trusted: false, model: "m1" });
+  await s.emit("session_start");
+  // s.lines() always renders at width 500 (see the helper above): same width every
+  // call, so only the cache key (width + version) can explain any change below.
+
+  let before = s.lines()[0];
+  s.ctx.model.id = "m2";
+  await s.emit("model_select");
+  assert.notEqual(s.lines()[0], before, "model");
+
+  before = s.lines()[0];
+  pi.thinking = "low";
+  await s.emit("thinking_level_select");
+  assert.notEqual(s.lines()[0], before, "thinking level");
+
+  before = s.lines()[1];
+  s.gitBranch = "feature";
+  s.fireBranchChange();
+  assert.notEqual(s.lines()[1], before, "branch");
+
+  before = s.lines()[1];
+  footer.quotas({ providers: [{ id: "solo", quotas: [{ label: "x", percentRemaining: 5, status: "low" }] }] });
+  assert.notEqual(s.lines()[1], before, "quota");
+
+  before = s.lines()[0];
+  await s.emit("message_end", { message: { role: "assistant", usage: usage(10, 5) } });
+  assert.notEqual(s.lines()[0], before, "usage");
+
+  // Same width, nothing changed since: the cache serves the identical array back.
+  const same = s.lines();
+  assert.equal(s.lines(), same);
 });
 
 test("TTFT and TPS come from the last reply's timing", async () => {
