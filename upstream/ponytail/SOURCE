@@ -2,6 +2,4 @@ https://github.com/DietrichGebert/ponytail
 version 4.10.0, commit e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156 (2026-09-14)
 License: MIT (LICENSE)
 
-Kept for reference:
-- upstream/ponytail/skills/ponytail/SKILL.md: source of the distilled section in extensions/ponytail/index.ts
-- upstream/ponytail/skills/ponytail-audit/SKILL.md: source of the rig skill skills/ponytail-audit/SKILL.md
+The source snapshot was removed; it is in git history at 6aeb512.

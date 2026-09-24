@@ -1,6 +1,6 @@
 # pi-rig
 
-Customized Pi extensions maintained as a lightweight monorepo. Every extension is rebuilt here from a behaviour spec; vendored upstream source is kept for reference and never loaded by Pi.
+Customized Pi extensions maintained as a lightweight monorepo. Every extension is rebuilt here from a behaviour spec; upstream provenance (SOURCE and LICENSE) is recorded in `upstream/`.
 
 ## Install
 

@@ -1,5 +1,5 @@
-# Upstream source lives here for provenance and audit only.
+# Upstream provenance
 
-Pi never loads this directory (it is absent from the `pi` manifest in
-the root `package.json`). Every directory needs a recorded source
-version or commit and license.
+Each directory records where a rebuilt extension came from: `SOURCE` (version or
+commit) and `LICENSE`. Pi never loads this directory. The source snapshots were
+removed; they are in git history at 6aeb512.

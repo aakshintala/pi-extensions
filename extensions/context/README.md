@@ -34,7 +34,7 @@ None.
 ## Upstream
 
 Ported from [`pi-context-view`](https://github.com/dimk90/pi-context-view)
-0.6.0, MIT licence (see `LICENSE`); the upstream snapshot and its SOURCE record are in `upstream/pi-context-view/`. Cut: `pi-context-view.json` and
+0.6.0, MIT licence (see `LICENSE`); its SOURCE record is in `upstream/pi-context-view/`. Cut: `pi-context-view.json` and
 `/context config`, hex colours, prompt parsing for Pi 0.80–0.85, guessed
 attribution of prompt additions (they show as unattributed), skill badges and
 zoom.
