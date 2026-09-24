@@ -5,7 +5,7 @@ import { rigSettings } from "../../shared/settings/index.ts";
 import { registerFooter, type FooterDeps } from "./footer.ts";
 import { registerQuota, type ClientOptions } from "./quota.ts";
 
-export type StatusDeps = FooterDeps & { fetch?: typeof fetch; quotaTimers?: ClientOptions["timers"] };
+type StatusDeps = FooterDeps & { fetch?: typeof fetch; quotaTimers?: ClientOptions["timers"] };
 
 export default function (pi: ExtensionAPI, deps: StatusDeps = {}) {
   const rig = rigSettings(getAgentDir());
@@ -13,7 +13,6 @@ export default function (pi: ExtensionAPI, deps: StatusDeps = {}) {
     { key: "quotaPort", type: "integer", min: 1, max: 65535, default: 8787, description: "QuotaBar.app feed port" },
     { key: "quotaRefreshSeconds", type: "integer", min: 5, max: 3600, default: 60, description: "Quota polling interval" },
   ]);
-  pi.on("session_start", (_event, ctx) => rig.notifyWarnings(ctx.ui));
   const footer = registerFooter(pi, deps);
   const off = registerQuota(pi, settings, { fetch: deps.fetch, now: deps.now, timers: deps.quotaTimers }).onFeed(footer.quotas);
   pi.on("session_shutdown", () => void off()); // idempotent: a second delete is a no-op

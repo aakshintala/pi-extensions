@@ -1,5 +1,5 @@
 // Pi's main editor, found by structure: Pi exposes no handle to it.
-import { VERSION } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, VERSION } from "@earendil-works/pi-coding-agent";
 import { getKeybindings } from "@earendil-works/pi-tui";
 
 /**
@@ -11,19 +11,30 @@ export const ctrlBFree = () => !getKeybindings().getKeys("tui.editor.cursorLeft"
 type Node = { children?: unknown[]; getFocusedComponent?: () => unknown };
 
 /**
- * Whether Pi's main editor has focus, so no picker, dialog or overlay owns the key.
+ * Pi's main editor: the default editor, or one set by setEditorComponent. Pi gives
+ * either its app actions and autocomplete a CustomEditor mounted by ui.custom() lacks.
  *
- * Pi 0.87.1 mounts its editor container as the root's fifth child
- * (interactive-mode.js:661, mountInteractiveTui) and wires its submit handler onto every
- * editor it mounts there; pickers and the reload box that take the slot have none. The
- * lookup is redone on each call so an editor swapped in by setEditorComponent is found.
- * Off Pi 0.87.x, or with anything else in the slot or in focus, it returns false: the
- * caller treats that as "cannot tell", never as a wrong component.
+ * Pi 0.87.1 mounts it as the root's fifth child's only child (interactive-mode.js:661,
+ * mountInteractiveTui). The lookup is redone on each call so a swapped-in editor is
+ * found. Off Pi 0.87.x, or with anything else in the slot, undefined: the caller treats
+ * that as "cannot tell", never as a wrong component.
  */
+export function mainEditor(tui: unknown, version: string = VERSION): CustomEditor | undefined {
+  if (!version.startsWith("0.87.")) return undefined;
+  const editor = ((tui as Node | undefined)?.children?.[4] as Node | undefined)?.children?.[0] as
+    | Record<string, unknown>
+    | undefined;
+  return editor instanceof CustomEditor &&
+    typeof editor.tryTriggerAutocomplete === "function" &&
+    typeof editor.isShowingAutocomplete === "function" &&
+    Array.isArray((editor as { state?: { lines?: unknown } }).state?.lines) &&
+    (editor as { actionHandlers?: Map<string, unknown> }).actionHandlers?.has?.("app.clear") === true
+    ? editor
+    : undefined;
+}
+
+/** Whether Pi's main editor has focus, so no picker, dialog or overlay owns the key. */
 export function editorFocused(tui: unknown, version: string = VERSION): boolean {
-  if (!version.startsWith("0.87.")) return false;
-  const root = tui as Node | undefined;
-  const editor = (root?.children?.[4] as Node | undefined)?.children?.[0] as Record<string, unknown> | undefined;
-  const isEditor = ["onSubmit", "getText", "handleInput"].every((k) => typeof editor?.[k] === "function");
-  return isEditor && root!.getFocusedComponent?.() === editor;
+  const editor = mainEditor(tui, version);
+  return editor !== undefined && (tui as Node)?.getFocusedComponent?.() === editor;
 }

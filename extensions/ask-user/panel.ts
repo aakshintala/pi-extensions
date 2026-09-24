@@ -14,10 +14,15 @@ import {
 import { oneLine } from "../../shared/text/index.ts";
 
 export type Question = { question: string; header: string; options?: { label: string; description?: string }[]; multiSelect?: boolean };
-export type Answer = { labels: string[]; text?: string };
+type Answer = { labels: string[]; text?: string };
 export type Outcome = { cancelled: true } | { cancelled: false; answers: (Answer | null)[]; note?: string };
 
 const TEXT_ROW = "Type your own answer";
+const NOTE_ROW = "Add a note to the agent (optional)";
+
+/** Labels and typed text, comma-joined; "skipped" for no answer. */
+export const answerText = (a: Answer | null): string =>
+  a ? [...a.labels, ...(a.text ? [`"${a.text}"`] : [])].join(", ") : "skipped";
 
 export function panel(tui: TUI, questions: Question[], theme: Theme, render: () => void, done: (o: Outcome) => void): Component {
   const n = questions.length;
@@ -54,7 +59,6 @@ export function panel(tui: TUI, questions: Question[], theme: Theme, render: () 
     const labels = opts(i).filter((_, k) => state[i].picked.has(k)).map((o) => o.label);
     return labels.length || text(i) ? { labels, ...(text(i) ? { text: text(i) } : {}) } : null;
   };
-  const show = (a: Answer | null) => (a ? [...a.labels, ...(a.text ? [`"${a.text}"`] : [])].join(", ") : "skipped");
   const finish = () => {
     const t = oneLine(note.getText());
     done({ cancelled: false, answers: questions.map((_, i) => answer(i)), ...(t ? { note: t } : {}) });
@@ -99,10 +103,10 @@ export function panel(tui: TUI, questions: Question[], theme: Theme, render: () 
   // starts on the option's own row and the box grows below it. Pi's Editor always
   // draws its top/bottom borders; the panel uses none, so they are dropped here.
   // Unfocused, a field with text is one truncated line; empty, a dim hint.
-  const field = (editor: Editor, focused: boolean, lead: string, width: number) => {
+  const field = (editor: Editor, focused: boolean, lead: string, width: number, placeholder: string) => {
     editor.focused = focused;
     const v = oneLine(editor.getText());
-    if (!focused) return [lead + (v ? truncateToWidth(v, width - visibleWidth(lead)) : theme.fg("dim", TEXT_ROW))];
+    if (!focused) return [lead + (v ? truncateToWidth(v, width - visibleWidth(lead)) : theme.fg("dim", placeholder))];
     const indent = visibleWidth(lead);
     const rendered = editor.render(Math.max(1, width - indent));
     const body = (rendered.length >= 2 ? rendered.slice(1, -1) : rendered).map((l) => l.trimEnd());
@@ -127,10 +131,10 @@ export function panel(tui: TUI, questions: Question[], theme: Theme, render: () 
     const lead = pointer(s.cursor === k) + (q.multiSelect ? "    " : `${k + 1}. `);
     const tick = !q.multiSelect && s.chosen?.text ? theme.fg("success", " ✓") : "";
     if (s.cursor === k) {
-      for (const l of field(s.editor, true, lead, width)) lines.push(l);
+      for (const l of field(s.editor, true, lead, width, TEXT_ROW)) lines.push(l);
     } else {
-      const v = text(tab);
-      lines.push(lead + (v ? truncateToWidth(v, width - visibleWidth(lead)) : theme.fg("dim", TEXT_ROW)) + tick);
+      const [line] = field(s.editor, false, lead, width, TEXT_ROW);
+      lines.push(line + tick);
     }
     const choose = q.multiSelect ? "Space toggle · Enter confirm" : "Enter choose";
     lines.push("", theme.fg("dim", `  ↑↓ move · ${choose}${n > 1 ? " · Tab/←→ switch" : ""} · Esc cancel`));
@@ -139,13 +143,13 @@ export function panel(tui: TUI, questions: Question[], theme: Theme, render: () 
 
   function reviewLines(width: number): string[] {
     const lines = [theme.bold("Review your answers"), ""];
-    questions.forEach((q, i) => lines.push(`${pointer(row === i)}${theme.fg("muted", `${q.header}:`)} ${show(answer(i))}`));
+    questions.forEach((q, i) => lines.push(`${pointer(row === i)}${theme.fg("muted", `${q.header}:`)} ${answerText(answer(i))}`));
     lines.push("");
     if (row === n) {
-      for (const l of field(note, true, pointer(true), width)) lines.push(l);
+      for (const l of field(note, true, pointer(true), width, NOTE_ROW)) lines.push(l);
     } else {
-      const v = oneLine(note.getText());
-      lines.push(pointer(false) + (v || theme.fg("dim", "Add a note to the agent (optional)")));
+      const [line] = field(note, false, pointer(false), width, NOTE_ROW);
+      lines.push(line);
     }
     lines.push(pointer(row === n + 1) + theme.fg(row === n + 1 ? "accent" : "text", "Submit answers"));
     lines.push("", theme.fg("dim", "  Enter on an answer to change it · Tab/←→ switch · Esc cancel"));

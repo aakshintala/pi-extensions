@@ -131,13 +131,14 @@ summary: { verb: "updated", many: "todos" }                                     
 
 `oneLine(s)` turns model or producer text into one plain line for the screen:
 7- and 8-bit CSI, OSC, DCS, SOS, PM and APC sequences are removed, and control
-characters and newlines collapse to a space. Used by `extensions/todo` and
-`extensions/fleet`.
+characters and newlines collapse to a space. Used across most extensions that
+draw model or tool text on one line.
 
 `keepSgr(s)` removes the same sequences except SGR (colours and styles), for
 text shown with its colours. `unfinished(s)` gives where a sequence cut off by
 the end of `s` starts, for text that arrives in pieces. Both are used by the
-fleet viewer's log.
+fleet viewer's log, and by `extensions/jobs` and `extensions/monitor` for live
+output.
 
 ### `fleet/`
 
@@ -240,4 +241,4 @@ dir.remove();                                  // on shutdown; a directory with 
 
 `isChild(ctx)` says whether a session is a subagent's: it holds the custom entry
 `MARKER` (`rig.subagent`), which `extensions/subagents` writes first in every
-child session. Used by `extensions/subagents`, `extensions/todo` and `extensions/ask-user`.
+child session. Used by `extensions/subagents` and `extensions/ask-user`.

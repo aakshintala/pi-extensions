@@ -4,7 +4,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { isChild } from "../../shared/subagent/index.ts";
 import { resultText, toolRenderers } from "../../shared/tool-display/index.ts";
 import { oneLine } from "../../shared/text/index.ts"; // question text is model input
-import { panel, type Outcome, type Question } from "./panel.ts";
+import { answerText, panel, type Outcome, type Question } from "./panel.ts";
 
 const str = (description?: string) => ({ type: "string", ...(description ? { description } : {}) });
 
@@ -58,11 +58,7 @@ const clean = (q: Question): Question => ({
 /** One compact line per question, then the note; `cancelled` alone when declined. */
 export function format(questions: Question[], o: Outcome): string {
   if (o.cancelled) return "cancelled";
-  const lines = questions.map((q, i) => {
-    const a = o.answers[i];
-    const parts = a ? [...a.labels, ...(a.text ? [`"${a.text}"`] : [])] : ["skipped"];
-    return `${q.header}: ${parts.join(", ")}`;
-  });
+  const lines = questions.map((q, i) => `${q.header}: ${answerText(o.answers[i])}`);
   if (o.note) lines.push(`note: ${o.note}`);
   return lines.join("\n");
 }
