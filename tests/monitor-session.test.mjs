@@ -24,7 +24,7 @@ after(() => rmSync(settingsDir, { recursive: true, force: true }));
 
 const path = (p) => fileURLToPath(new URL(p, import.meta.url));
 const SCRIPT = path("./fixtures/monitor/batches.sh");
-const TIMERS = Symbol.for("pi-rig.monitor.timers");
+const TIMERS = Symbol.for("pi-rig.timers");
 
 const textOf = (m) => (typeof m.content === "string" ? m.content : m.content.map((c) => c.text ?? `call ${c.name}`).join(""));
 const says = (text) => () => fauxAssistantMessage(fauxText(text));
