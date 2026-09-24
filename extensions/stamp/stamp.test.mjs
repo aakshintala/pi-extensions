@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import "../../tests/fixtures/tool-display/pi-tui.mjs";
@@ -41,8 +41,15 @@ test("theme changes are picked up when the component is invalidated", () => {
   color = "A";
 });
 
-test("appends nothing on messages and one entry only at settlement", async () => {
-  process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "stamp-test-"));
+test("appends nothing on messages and one entry only at settlement", async (t) => {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  const agentDir = mkdtempSync(join(tmpdir(), "stamp-test-"));
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(agentDir, { recursive: true, force: true });
+  });
   const { default: stamp } = await import("./index.ts");
   const handlers = {};
   const entries = [];
