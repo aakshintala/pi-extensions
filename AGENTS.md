@@ -30,3 +30,11 @@ Keep READMEs *scannable*, modelled on [narumiruna/pi-extensions](https://github.
 - **`extensions/<name>/README.md`:** what the extension does, its tools, commands, keys and `rig.json` settings, in short sections.
 
 Update both READMEs in the same change that adds or changes an extension.
+
+### Render and lifecycle
+
+- Renderer closures never capture Pi's render `context`; copy the values into locals.
+- Components cache their output per width and clear it in `invalidate()`.
+- No polling timers for layout.
+- Caches are WeakMaps or bounded.
+- Every timer, listener, watcher and child process is released on `session_shutdown`.
