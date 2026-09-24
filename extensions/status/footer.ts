@@ -213,7 +213,9 @@ export function registerFooter(pi: ExtensionAPI, { timers = globalThis, now = Da
       let cacheKey = "";
       let cached: string[] | undefined;
       return {
-        invalidate() {},
+        invalidate() {
+          cached = undefined; // a theme change redraws with the new colours
+        },
         dispose() {
           unsubscribe();
           if (render === bump) render = () => {}; // a newer footer keeps its own
