@@ -1,49 +1,12 @@
 /**
- * Terminal sanitizers shared by command reporting and the views. Every string
- * that reaches the terminal from outside this extension — captured content,
- * configuration files, error messages — passes through here first.
+ * Terminal sanitizer for multi-line preview text; one-line text uses shared
+ * `oneLine`. Every string that reaches the terminal from outside this
+ * extension passes through one of them first.
  */
+import { stripSequences } from "../../shared/text/index.ts";
 
-const TERMINAL_STRING_START = /\u001B[\]PX^_]|[\u0090\u0098\u009D\u009E\u009F]/g;
-const TERMINAL_STRING_END = /\u0007|\u001B\\|\u009C/g;
-const TERMINAL_CSI_SEQUENCE = /(?:\u001B\[|\u009B)[\u0030-\u003F]*[\u0020-\u002F]*[\u0040-\u007E]/g;
-const TERMINAL_ESCAPE_SEQUENCE = /\u001B[\u0020-\u002F]*[\u0030-\u007E]/g;
-const TERMINAL_CONTROL_CHARACTER = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
-
-/** Normalize whitespace and remove terminal control sequences from raw preview text. */
+/** Normalize line breaks and tabs, then remove terminal sequences and control characters but keep lines. */
 export function normalizePreviewText(text: string): string {
-	const normalized = text
-		.replaceAll("\r\n", "\n")
-		.replaceAll("\r", "\n")
-		.replaceAll("\t", "    ");
-	return stripTerminalStrings(normalized)
-		.replace(TERMINAL_CSI_SEQUENCE, "")
-		.replace(TERMINAL_ESCAPE_SEQUENCE, "")
-		.replace(TERMINAL_CONTROL_CHARACTER, "");
-}
-
-/**
- * Remove OSC, DCS, SOS, PM and APC strings. A string with no terminator runs to
- * the end of the text, as a terminal reads it, so its payload is dropped too
- * (the same rule as shared/text's `oneLine`; this variant keeps line breaks).
- */
-function stripTerminalStrings(text: string): string {
-	const parts: string[] = [];
-	let offset = 0;
-	TERMINAL_STRING_START.lastIndex = 0;
-	let start: RegExpExecArray | null;
-	while ((start = TERMINAL_STRING_START.exec(text)) !== null) {
-		parts.push(text.slice(offset, start.index));
-		TERMINAL_STRING_END.lastIndex = TERMINAL_STRING_START.lastIndex;
-		if (TERMINAL_STRING_END.exec(text) === null) return parts.join("");
-		offset = TERMINAL_STRING_END.lastIndex;
-		TERMINAL_STRING_START.lastIndex = offset;
-	}
-	parts.push(text.slice(offset));
-	return parts.join("");
-}
-
-/** Sanitize dynamic text for one terminal line and collapse embedded whitespace. */
-export function normalizeInlineText(text: string): string {
-	return normalizePreviewText(text).replace(/\s+/g, " ").trim();
+	return stripSequences(text.replace(/\r\n?/g, "\n").replaceAll("\t", "    "))
+		.replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, "");
 }

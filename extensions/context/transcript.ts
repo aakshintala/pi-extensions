@@ -5,7 +5,7 @@ import type { ContextEvent } from "@earendil-works/pi-coding-agent";
 export type SystemMessage = Extract<ContextEvent["messages"][number], { role: "system" }>;
 
 /** Current prompt and tools after applying system messages in transcript order. */
-export interface SystemState {
+interface SystemState {
 	readonly content: string;
 	readonly sections: Record<string, string>;
 	readonly tools: NonNullable<SystemMessage["toolsAdded"]>;

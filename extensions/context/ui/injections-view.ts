@@ -6,7 +6,8 @@ import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-a
 import { Key, matchesKey, type TuiMouseEvent, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 import type { InitialSnapshot, InjectionItem } from "../model.ts";
-import { normalizeInlineText, normalizePreviewText } from "../text.ts";
+import { oneLine } from "../../../shared/text/index.ts";
+import { normalizePreviewText } from "../text.ts";
 import {
 	buildInjectionRows,
 	collectItemsById,
@@ -49,7 +50,7 @@ const MAX_TOKEN_VALUE_COLUMN = 54;
 const TOKEN_LEADER_GAP = 4;
 
 /** Everything the Injections view renders. */
-export interface InjectionsViewInput {
+interface InjectionsViewInput {
 	readonly snapshot: InitialSnapshot;
 	readonly degradedReason?: string;
 }
@@ -90,7 +91,7 @@ export async function showInjectionsView(
 }
 
 /** Exported for direct render/input tests; use showInjectionsView from pi code. */
-export class InjectionsView {
+class InjectionsView {
 	private readonly theme: Theme;
 	private readonly input: InjectionsViewInput;
 	private readonly done: (result: undefined) => void;
@@ -275,8 +276,8 @@ export class InjectionsView {
 		this.previewScroller.setExtent(wrapped.length, viewport.visibleCount);
 
 		const lines: string[] = [border, ""];
-		const title = theme.fg("accent", theme.bold(normalizeInlineText(item.label)));
-		const source = normalizeInlineText(item.source.label);
+		const title = theme.fg("accent", theme.bold(oneLine(item.label)));
+		const source = oneLine(item.source.label);
 		const meta = theme.fg("muted", `${source} · ${item.tokens.toLocaleString("en-US")} tokens`);
 		const marker = item.moved === true ? movedMarker(theme) : "";
 		const fitsMarker = visibleWidth(title) + visibleWidth(meta) + visibleWidth(marker) + 2 <= width;
@@ -429,7 +430,7 @@ export class InjectionsView {
 
 	/** Unstyled hierarchy label used to keep the value column stable while scrolling. */
 	private plainRowLabel(row: Exclude<InjectionRow, { readonly kind: "separator" }>): string {
-		const label = normalizeInlineText(row.label);
+		const label = oneLine(row.label);
 		return row.kind === "item" ? `${this.treePrefix(row)}${label}` : label;
 	}
 
@@ -439,7 +440,7 @@ export class InjectionsView {
 		selected: boolean,
 	): string {
 		const theme = this.theme;
-		const label = normalizeInlineText(row.label);
+		const label = oneLine(row.label);
 		if (row.kind === "group" || row.kind === "total") {
 			return theme.bold(theme.fg(selected ? "accent" : "text", label));
 		}
@@ -460,7 +461,7 @@ export class InjectionsView {
 		return this.fit(
 			this.theme.fg(
 				"dim",
-				`${BODY_INDENT}(${this.navigator.selectedOrdinal + 1}/${this.navigator.selectableCount})`,
+				`${BODY_INDENT}(${this.navigator.selected + 1}/${this.navigator.selectableCount})`,
 			),
 			width,
 		);
@@ -471,7 +472,7 @@ export class InjectionsView {
 		if (this.input.degradedReason === undefined) return [];
 		const reason = this.theme.fg(
 			"warning",
-			`${BODY_INDENT}${normalizeInlineText(this.input.degradedReason)}`,
+			`${BODY_INDENT}${oneLine(this.input.degradedReason)}`,
 		);
 		return wrapTextWithAnsi(reason, width);
 	}

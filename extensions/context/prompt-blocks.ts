@@ -1,5 +1,5 @@
 /** Locate pi's XML prompt sections and the tool-line blocks inside them. */
-import type { TextSpan } from "./model.ts";
+import type { Span } from "./model.ts";
 
 /** Block pi renders one bullet per visible tool into. */
 export const AVAILABLE_TOOLS_BLOCK = {
@@ -18,10 +18,10 @@ export const DOCUMENTATION_BLOCK = {
 export const BASE_PROMPT_BLOCKS = [AVAILABLE_TOOLS_BLOCK, GUIDELINES_BLOCK, DOCUMENTATION_BLOCK];
 
 /** One complete top-level XML section, with transport framing separated from its body. */
-export interface PromptSection extends TextSpan {
+export interface PromptSection extends Span {
 	readonly name: string;
 	/** Includes the newline before the body, but not the newline before the closing tag. */
-	readonly body: TextSpan;
+	readonly body: Span;
 }
 
 /**
@@ -66,17 +66,17 @@ export function findSectionToolBlocks(prompt: string, sections: readonly PromptS
 }
 
 /** One selected header and its bounded content, in original prompt coordinates. */
-export interface LocatedPromptBlock extends TextSpan {
+export interface LocatedPromptBlock extends Span {
 	readonly id: string;
 	readonly label: string;
 	/** Exact bullet region, including the newline before the first bullet. */
-	readonly bullets?: TextSpan;
+	readonly bullets?: Span;
 	/** Position differs from pi's normal block order; no claim about which handler moved it. */
 	readonly moved?: boolean;
 }
 
 /** Consecutive complete bullet lines; stop before any unrelated prose or following header. */
-function findBulletSpan(prompt: string, start: number): TextSpan | undefined {
+function findBulletSpan(prompt: string, start: number): Span | undefined {
 	let end = start;
 	while (prompt.startsWith("\n- ", end)) {
 		const newline = prompt.indexOf("\n", end + 1);

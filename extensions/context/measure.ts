@@ -17,9 +17,9 @@ import {
 	type InjectionKind,
 	type InjectionSection,
 	type InjectionSource,
-	type JsonSpan,
 	PI_SOURCE,
 	SKILLS_LABEL,
+	type Span,
 	SYSTEM_PROMPT_LABEL,
 } from "./model.ts";
 import {
@@ -57,24 +57,13 @@ const SECTION_PARTS: Readonly<Record<string, { id: string; label: string }>> = {
 	skills: { id: "base-prompt:skills", label: SKILLS_LABEL },
 };
 
-/** One visible skill before pi adds XML transport framing. */
-export interface SkillSlice {
-	name: string;
-	description: string;
-	filePath: string;
-}
-
 /** Minimal slice of BuildSystemPromptOptions that measurement needs. */
 export interface PromptOptionsSlice {
-	cwd: string;
 	/** Home directory used to abbreviate context-file paths; omitted disables it. */
 	homeDir?: string;
 	customPrompt?: string;
-	appendSystemPrompt?: string;
 	/** Custom section bodies, including overrides of Pi's named sections. */
 	sections?: Record<string, string>;
-	contextFilePaths?: string[];
-	skills?: SkillSlice[];
 }
 
 /** One active tool as it contributes to the initial context. */
@@ -185,9 +174,7 @@ function measureGeneratedSection(
 ): boolean {
 	if (options.sections?.[name]) return false;
 	if (name === "project_context" && body.includes("<project_instructions path=")) {
-		const paths = [...body.matchAll(/<project_instructions path="([^"]+)">/g)].map((match) => match[1]);
-		const section = `<project_context>\n${body}\n</project_context>`;
-		measureContextFiles(section, { ...options, contextFilePaths: paths }, items, []);
+		measureContextFiles(body, options.homeDir, items);
 		return true;
 	}
 	if (name === "skills" && body.includes("<available_skills>")) {
@@ -243,7 +230,7 @@ export function textTokens(text: string): number {
 }
 
 /** Token estimate for an already known character count. */
-function charTokens(chars: number): number {
+export function charTokens(chars: number): number {
 	return Math.ceil(chars / 4);
 }
 
@@ -376,7 +363,7 @@ interface SectionDraft {
 	/** True for a block an extension moved out of the region pi rendered it into. */
 	readonly moved?: boolean;
 	/** Serialized JSON inside `text`; marked here rather than detected in the preview. */
-	readonly jsonSpan?: JsonSpan;
+	readonly jsonSpan?: Span;
 	/** Prompt-line insertions that affect only the preview, never this section's estimate. */
 	readonly injectedReferences?: readonly InjectedReference[];
 }
@@ -541,31 +528,23 @@ function claimGuidelines(tool: ToolSlice, claimed: Set<string>): string[] {
 }
 
 /**
- * Carve pi's project-context section and expose each context file as a child of
+ * Expose each context file in pi's project-context section body as a child of
  * one Instruction Files aggregate, without counting the XML transport scaffolding.
  */
-function measureContextFiles(
-	base: string,
-	options: PromptOptionsSlice,
-	items: InjectionItem[],
-	carvedSpans: Span[],
-): void {
-	const sectionSpan = findContextSectionSpan(base);
-	if (sectionSpan === undefined) return;
+function measureContextFiles(body: string, homeDir: string | undefined, items: InjectionItem[]): void {
 	const children: InjectionItem[] = [];
-	for (const filePath of options.contextFilePaths ?? []) {
-		const content = findContextFileContent(base, filePath);
+	for (const [, filePath] of body.matchAll(/<project_instructions path="([^"]+)">/g)) {
+		const content = findContextFileContent(body, filePath);
 		if (content === undefined) continue;
 		children.push(createItem(
 			`context-file:${filePath}`,
 			"context-file",
 			PI_SOURCE,
-			abbreviateHome(filePath, options.homeDir),
+			abbreviateHome(filePath, homeDir),
 			content,
 		));
 	}
 	children.sort((a, b) => b.tokens - a.tokens);
-	carvedSpans.push(expandLineBreaks(base, sectionSpan));
 	if (children.length === 0) return;
 
 	const label = `${INSTRUCTION_FILES_LABEL} (${children.length})`;
@@ -624,7 +603,7 @@ function createSystemPromptItem(parts: readonly PromptPart[]): InjectionItem {
 	};
 }
 
-/** Build an initial-phase InjectionItem with derived char/token sizes. */
+/** Build an InjectionItem with derived char/token sizes. */
 function createItem(
 	id: string,
 	kind: InjectionKind,
@@ -634,7 +613,6 @@ function createItem(
 ): InjectionItem {
 	return {
 		id,
-		phase: "initial",
 		kind,
 		source,
 		label,
@@ -726,7 +704,7 @@ function childSection(child: InjectionItem, separator: string): InjectionSection
  * its single part. A child split into several parts marks each part separately,
  * so no one run covers its text and the aggregate part expands nothing.
  */
-function childJsonSpan(child: InjectionItem): JsonSpan | undefined {
+function childJsonSpan(child: InjectionItem): Span | undefined {
 	const sections = child.sections;
 	if (sections === undefined) return child.jsonSpan;
 	return sections.length === 1 ? sections[0]?.jsonSpan : undefined;
@@ -752,16 +730,6 @@ function carve(text: string, spans: Span[]): string {
 	return remainder + text.slice(cursor);
 }
 
-/** Half-open [start, end) character range within the base prompt. */
-interface Span {
-	start: number;
-	end: number;
-}
-
-/** Span of pi's complete project-context transport section. */
-function findContextSectionSpan(systemPrompt: string): Span | undefined {
-	return findDelimitedSpan(systemPrompt, "<project_context>", "</project_context>");
-}
 
 /** Extract one context file's final content without its project-instructions wrapper. */
 function findContextFileContent(systemPrompt: string, filePath: string): string | undefined {
@@ -784,13 +752,4 @@ function findDelimitedSpan(text: string, open: string, close: string): Span | un
 	if (start === -1) return undefined;
 	const closeStart = text.indexOf(close, start + open.length);
 	return closeStart === -1 ? undefined : { start, end: closeStart + close.length };
-}
-
-/** Include surrounding transport-only line breaks when carving a generated section. */
-function expandLineBreaks(text: string, span: Span): Span {
-	let start = span.start;
-	let end = span.end;
-	while (start > 0 && (text[start - 1] === "\n" || text[start - 1] === "\r")) start--;
-	while (end < text.length && (text[end] === "\n" || text[end] === "\r")) end++;
-	return { start, end };
 }

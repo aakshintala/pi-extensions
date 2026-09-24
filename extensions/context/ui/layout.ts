@@ -15,7 +15,7 @@ export const BODY_INDENT = "  ";
 export const DEFAULT_TERMINAL_ROWS = 24;
 
 /** How many content rows fit and whether an overflow indicator is needed. */
-export interface Viewport {
+interface Viewport {
 	visibleCount: number;
 	showScroll: boolean;
 }

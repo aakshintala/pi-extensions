@@ -5,7 +5,7 @@
 import { type ExtensionCommandContext, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 /** Identifies the `compaction.modelOverrides` entry pi would apply to a request. */
-export interface CompactionModel {
+interface CompactionModel {
 	readonly provider: string;
 	readonly id: string;
 }
@@ -32,7 +32,7 @@ export function readAutoCompactReserveTokens(context: ExtensionCommandContext): 
  * entry, else the ordinary `compaction.reserveTokens`, else pi's default.
  * Returns undefined when auto-compaction is disabled or a setting is invalid.
  */
-export function resolveAutoCompactReserveTokens(
+function resolveAutoCompactReserveTokens(
 	settings: SettingsManager,
 	model?: CompactionModel,
 ): number | undefined {

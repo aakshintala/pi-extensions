@@ -17,7 +17,6 @@ import {
 } from "./command.ts";
 import {
 	buildUsageSnapshot,
-	CompactionState,
 	InitialCaptureState,
 	parsePersistedIdentities,
 	PROBE_IDENTITIES_CUSTOM_TYPE,
@@ -27,24 +26,22 @@ import { readProbeToken } from "./probe-token.ts";
 import { readAutoCompactReserveTokens } from "./settings.ts";
 import { showInjectionsView } from "./ui/injections-view.ts";
 import { showUsageView } from "./ui/usage-view.ts";
-import { computeUsage, toReportedUsage } from "./usage.ts";
+import { computeUsage } from "./composition.ts";
 
 export default function (pi: ExtensionAPI) {
 	const capture = new InitialCaptureState();
 	const probe = new SilentProbeState();
-	const compaction = new CompactionState();
 	let persistedIdentityCount = 0;
 
-	/** Persist identities (role and timestamp only, never content) not yet written this runtime. */
+	/** Persist identities (role and timestamp only, never content) not yet written; restore unions every entry. */
 	function persistProbeIdentities(): void {
-		const identities = probe.syntheticMessages;
-		if (identities.length <= persistedIdentityCount) return;
-		pi.appendEntry(PROBE_IDENTITIES_CUSTOM_TYPE, { messages: identities });
-		persistedIdentityCount = identities.length;
+		const fresh = probe.syntheticMessages.slice(persistedIdentityCount);
+		if (fresh.length === 0) return;
+		pi.appendEntry(PROBE_IDENTITIES_CUSTOM_TYPE, { messages: fresh });
+		persistedIdentityCount += fresh.length;
 	}
 
 	pi.on("session_start", (_event, ctx) => {
-		compaction.finish();
 		// Rehydrate probe identities from all prior runtimes so persisted probe
 		// messages stay out of later model contexts and Usage after resume,
 		// reload, or fork. Restored identities are already persisted.
@@ -54,19 +51,6 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		persistedIdentityCount = probe.syntheticMessages.length;
-	});
-
-	pi.on("session_before_compact", (event) => {
-		compaction.begin(event.signal);
-	});
-
-	// Pi ends every observed compaction with exactly one of these two events.
-	pi.on("session_compact", () => {
-		compaction.finish();
-	});
-
-	pi.on("session_compact_failed", () => {
-		compaction.finish();
 	});
 
 	pi.on("input", (event) => {
@@ -127,7 +111,6 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
-		compaction.finish();
 		// A shutdown mid-probe can leave probe messages already persisted in the
 		// session; write their identities so the next runtime keeps filtering them.
 		persistProbeIdentities();
@@ -147,7 +130,7 @@ export default function (pi: ExtensionAPI) {
 				reportTuiOnly(ctx, command.view);
 				return;
 			}
-			const initial = await resolveInitialCapture(pi, capture, probe, compaction, ctx);
+			const initial = await resolveInitialCapture(pi, capture, probe, ctx);
 			if (command.view === "injections") {
 				await showInjectionsView(ctx, {
 					snapshot: initial.snapshot,
@@ -170,8 +153,9 @@ export default function (pi: ExtensionAPI) {
 			await showUsageView(ctx, {
 				usage: computeUsage({
 					snapshot: current,
+					initial: initial.snapshot,
 					messages,
-					reported: toReportedUsage(ctx.getContextUsage()),
+					reported: ctx.getContextUsage(),
 					modelLabel: ctx.model?.id,
 					autoCompactReserveTokens: readAutoCompactReserveTokens(ctx),
 				}),

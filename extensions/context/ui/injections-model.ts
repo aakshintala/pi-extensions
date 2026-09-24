@@ -118,10 +118,6 @@ export class ListNavigator {
 		return this.selectedIndex;
 	}
 
-	public get selectedOrdinal(): number {
-		return this.selectedIndex;
-	}
-
 	public get selectableCount(): number {
 		return this.selectableRowCount;
 	}

@@ -22,7 +22,7 @@ import {
 	type InitialSnapshot,
 	type InjectionItem,
 	type InjectionSource,
-	type JsonSpan,
+	type Span,
 } from "./model.ts";
 import { createProbeToken, type ProbeToken } from "./probe-token.ts";
 
@@ -42,7 +42,7 @@ export const PROBE_IDENTITIES_CUSTOM_TYPE = "pi-context-view:probe-identities";
 const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
 
 /** Everything available when the first context event finalizes a snapshot. */
-export interface CaptureFinalization {
+interface CaptureFinalization {
 	systemPrompt: string;
 	messages: ContextEvent["messages"];
 	baselineMessages: ContextEvent["messages"];
@@ -53,7 +53,7 @@ export interface CaptureFinalization {
 }
 
 /** Inputs for an on-demand pi-native prompt/tool snapshot. */
-export interface NativeSnapshotInput {
+interface NativeSnapshotInput {
 	systemPrompt: string;
 	options: BuildSystemPromptOptions;
 	allTools: readonly ToolInfo[];
@@ -62,12 +62,12 @@ export interface NativeSnapshotInput {
 }
 
 /** Result of the one allowed silent-probe attempt. */
-export type ProbeOutcome =
+type ProbeOutcome =
 	| { readonly status: "captured" }
 	| { readonly status: "failed"; readonly reason: string };
 
 /** A probe start request; concurrent callers share `token` and `completion`. */
-export interface ProbeAttempt {
+interface ProbeAttempt {
 	readonly started: boolean;
 	/** Correlation token to send the synthetic prompt under. */
 	readonly token: ProbeToken;
@@ -75,7 +75,7 @@ export interface ProbeAttempt {
 }
 
 /** Exact identity used to remove only synthetic probe messages. */
-export interface SyntheticMessageIdentity {
+interface SyntheticMessageIdentity {
 	readonly role: "user" | "assistant";
 	readonly timestamp: number;
 }
@@ -142,33 +142,6 @@ export class InitialCaptureState {
 	}
 }
 
-/** Tracks the observable compaction lifecycle that makes a silent probe unsafe. */
-export class CompactionState {
-	private currentSignal: AbortSignal | undefined;
-
-	/** Whether a compaction observed through `session_before_compact` is still active. */
-	public get isActive(): boolean {
-		return this.currentSignal !== undefined && !this.currentSignal.aborted;
-	}
-
-	/** Track the current compaction until success, abort, or agent settlement. */
-	public begin(signal: AbortSignal): void {
-		if (signal.aborted) {
-			this.currentSignal = undefined;
-			return;
-		}
-		this.currentSignal = signal;
-		signal.addEventListener("abort", () => {
-			if (this.currentSignal === signal) this.currentSignal = undefined;
-		}, { once: true });
-	}
-
-	/** Clear the current lifecycle after compaction can no longer reject prompts. */
-	public finish(): void {
-		this.currentSignal = undefined;
-	}
-}
-
 /**
  * State for one on-demand silent probe. It owns the correlation token, the
  * timeout, and the exact synthetic message identities, but leaves pi API calls
@@ -195,9 +168,9 @@ export class SilentProbeState {
 		return this.ownsToken(token);
 	}
 
-	/** Defensive copies of the recorded probe message identities. */
+	/** Recorded probe message identities, in recording order. */
 	public get syntheticMessages(): readonly SyntheticMessageIdentity[] {
-		return [...this.identities.values()].map((identity) => ({ ...identity }));
+		return [...this.identities.values()];
 	}
 
 	/**
@@ -282,10 +255,9 @@ export class SilentProbeState {
 	/** Remove only messages whose exact role+timestamp identity belongs to the probe. */
 	public filterMessages(messages: ContextEvent["messages"]): ContextEvent["messages"] {
 		if (this.identities.size === 0) return messages;
-		return messages.filter((message) => {
-			if (message.role !== "user" && message.role !== "assistant") return true;
-			return !this.identities.has(identityKey(message));
-		});
+		const kept = messages.filter((message) =>
+			(message.role !== "user" && message.role !== "assistant") || !this.identities.has(identityKey(message)));
+		return kept.length === messages.length ? messages : kept;
 	}
 
 	/** Resolve a running attempt from `agent_settled`. */
@@ -386,7 +358,7 @@ export function buildNativeSnapshot(input: NativeSnapshotInput): InitialSnapshot
 }
 
 /** Inputs for Usage's branch-local prompt/tool estimate and frozen request-only patches. */
-export interface UsageSnapshotInput extends NativeSnapshotInput {
+interface UsageSnapshotInput extends NativeSnapshotInput {
 	messages: ContextEvent["messages"];
 	initial: InitialSnapshot;
 }
@@ -402,7 +374,7 @@ export function buildUsageSnapshot(input: UsageSnapshotInput): InitialSnapshot {
 		.flatMap((item) => item.systemMessage === undefined ? [] : [item.systemMessage])
 		.sort((a, b) => a.index - b.index).map((entry) => entry.message);
 	const state = replaySystemMessages([...input.messages, ...patches]);
-	if (state === undefined) return mergeRequestOnlyMessages(buildNativeSnapshot(input), input.initial);
+	if (state === undefined) return buildNativeSnapshot(input);
 	const registered = new Map(input.allTools.map((tool) => [tool.name, tool]));
 	const tools: ToolSlice[] = state.tools.map((tool) => {
 		const metadata = registered.get(tool.name);
@@ -416,48 +388,17 @@ export function buildUsageSnapshot(input: UsageSnapshotInput): InitialSnapshot {
 			source: metadata?.sourceInfo.source ?? "unattributed",
 		};
 	});
-	const options = copyPromptOptions(input.options);
-	const items = analyzeSystemPrompt(systemMessageText(state), {
-		...options,
-		// Current loader overrides are not evidence of what this branch recorded.
-		customPrompt: undefined, appendSystemPrompt: undefined, sections: undefined,
-	}, tools);
-	const snapshot = buildSnapshot(items, "synthetic-probe", input.capturedAt ?? new Date());
-	return mergeRequestOnlyMessages(snapshot, input.initial);
+	// Current loader overrides are not evidence of what this branch recorded.
+	const items = analyzeSystemPrompt(systemMessageText(state), { homeDir: process.env.HOME }, tools);
+	return buildSnapshot(items, "synthetic-probe", input.capturedAt ?? new Date());
 }
 
-/** Add frozen non-system request-only messages to a current prompt/tool snapshot for Usage. */
-export function mergeRequestOnlyMessages(
-	snapshot: InitialSnapshot,
-	initial: InitialSnapshot,
-): InitialSnapshot {
-	const requestOnly = initial.groups.flatMap((group) =>
-		group.items.filter((item) => item.kind === "message" && item.requestOnly === true && item.systemMessage === undefined)
-	);
-	if (requestOnly.length === 0) return snapshot;
-	const items = [
-		...snapshot.groups.flatMap((group) => group.items),
-		...requestOnly,
-	];
-	return buildSnapshot(items, snapshot.origin, snapshot.capturedAt);
-}
-
-/** Copy the prompt-options slice used by measurement, without shared nested references. */
-export function copyPromptOptions(options: BuildSystemPromptOptions): PromptOptionsSlice {
+/** Copy the prompt-options slice used by measurement; later handlers may mutate the original. */
+function copyPromptOptions(options: BuildSystemPromptOptions): PromptOptionsSlice {
 	return {
-		cwd: options.cwd,
 		homeDir: process.env.HOME,
 		customPrompt: options.customPrompt,
-		appendSystemPrompt: options.appendSystemPrompt,
 		sections: options.sections === undefined ? undefined : { ...options.sections },
-		contextFilePaths: options.contextFiles?.map((file) => file.path),
-		skills: options.skills
-			?.filter((skill) => !skill.disableModelInvocation)
-			.map((skill) => ({
-				name: skill.name,
-				description: skill.description,
-				filePath: skill.filePath,
-			})),
 	};
 }
 
@@ -466,7 +407,7 @@ export function copyPromptOptions(options: BuildSystemPromptOptions): PromptOpti
  * Keep pi's active-tool order: it decides which tool owns a guideline bullet
  * that several tools declare.
  */
-export function captureActiveTools(
+function captureActiveTools(
 	allTools: readonly ToolInfo[],
 	activeToolNames: readonly string[],
 	options: { readonly toolSnippets?: Readonly<Record<string, string>> },
@@ -490,7 +431,7 @@ export function captureActiveTools(
  * messages remain attributable by customType; other roles are captured only
  * when they differ from the session-branch baseline.
  */
-export function measureInjectedMessages(
+function measureInjectedMessages(
 	messages: ContextEvent["messages"],
 	baselineMessages: ContextEvent["messages"],
 ): InjectionItem[] {
@@ -521,7 +462,6 @@ export function measureInjectedMessages(
 			id: message.role === "custom"
 				? `message:${message.customType}:${occurrence}`
 				: `message:context:${message.role}:${occurrence}`,
-			phase: "initial",
 			kind: "message",
 			source: message.role === "custom" ? messageSource(message.customType) : AGGREGATE_SOURCE,
 			label: message.role === "custom" ? "message" : `${message.role} message`,
@@ -589,7 +529,7 @@ function consumeMessageSignature(
 /** Provider-bound message content for raw preview, with any serialization marked as JSON. */
 interface MessagePreview {
 	readonly text: string;
-	readonly jsonSpan?: JsonSpan;
+	readonly jsonSpan?: Span;
 }
 
 /** Extract content-only previews without raw image payloads or opaque assistant signatures. */
@@ -655,8 +595,8 @@ function messageSource(customType: string): InjectionSource {
 	return { id: `message-type:${customType}`, label: customType, native: false };
 }
 
-/** Normalize the string-or-array promptGuidelines field to an owned array. */
+/** Normalize the string-or-array promptGuidelines field to an array. */
 function normalizeGuidelines(guidelines: string | string[] | undefined): string[] {
 	if (guidelines === undefined) return [];
-	return Array.isArray(guidelines) ? [...guidelines] : [guidelines];
+	return Array.isArray(guidelines) ? guidelines : [guidelines];
 }

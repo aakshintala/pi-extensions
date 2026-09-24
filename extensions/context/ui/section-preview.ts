@@ -7,8 +7,9 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
-import type { InjectedReference, InjectionSection, JsonSpan } from "../model.ts";
-import { normalizeInlineText, normalizePreviewText } from "../text.ts";
+import type { InjectedReference, InjectionSection, Span } from "../model.ts";
+import { oneLine } from "../../../shared/text/index.ts";
+import { normalizePreviewText } from "../text.ts";
 import { shiftJsonSpan } from "./json-preview.ts";
 import { BODY_INDENT, calculateViewport, descriptionBlockRows } from "./layout.ts";
 import {
@@ -28,9 +29,9 @@ const SOURCE_ARROW = "\u00A0<-\u00A0";
 const DESCRIPTION_MIN_CONTENT_ROWS = 22;
 
 /** Raw preview content plus the labeled parts it decomposes into, when known. */
-export interface SectionedContent {
+interface SectionedContent {
 	readonly text: string;
-	readonly jsonSpan?: JsonSpan;
+	readonly jsonSpan?: Span;
 	readonly sections?: readonly InjectionSection[];
 	readonly injectedReferences?: readonly InjectedReference[];
 	/** True when a `--system-prompt` replacement dropped this content; it reads 0 tokens. */
@@ -40,7 +41,7 @@ export interface SectionedContent {
 }
 
 /** Space shared by uncapped preview content, its counter, and the marker legend. */
-export interface PreviewDescriptionLayout {
+interface PreviewDescriptionLayout {
 	readonly width: number;
 	/** Rows left after the view's fixed frame, before the description and counter. */
 	readonly availableRows: number;
@@ -80,7 +81,7 @@ export function previewBodyLines(
 	theme: Theme,
 	content: SectionedContent,
 	wrapWidth: number,
-	wrapText: (text: string, jsonSpan: JsonSpan | undefined) => string[],
+	wrapText: (text: string, jsonSpan: Span | undefined) => string[],
 	heading?: string,
 ): string[] {
 	const sections = content.sections ?? [];
@@ -89,7 +90,7 @@ export function previewBodyLines(
 	for (const section of sections) {
 		if (lines.length > 0) {
 			// Captured trailing whitespace must not add to the subsection separator
-			while (lines.length > 0 && normalizeInlineText(lines[lines.length - 1] ?? "") === "") lines.pop();
+			while (lines.length > 0 && oneLine(lines[lines.length - 1] ?? "") === "") lines.pop();
 			lines.push("", "");
 		}
 		lines.push(...sectionHeaderLines(theme, section, wrapWidth));
@@ -127,7 +128,7 @@ function contentBodyLines(
 	theme: Theme,
 	content: SectionedContent,
 	wrapWidth: number,
-	wrapText: (text: string, jsonSpan: JsonSpan | undefined) => string[],
+	wrapText: (text: string, jsonSpan: Span | undefined) => string[],
 	heading: string | undefined,
 ): string[] {
 	const references = content.injectedReferences ?? [];
@@ -140,9 +141,9 @@ function contentBodyLines(
 		const line = text.length === 0 ? reference.text.replace(/^\n+/, "") : reference.text;
 		text += theme.fg("syntaxNumber", normalizePreviewText(line));
 		text += theme.fg("borderMuted", SOURCE_ARROW);
-		text += theme.fg("mdLink", normalizeInlineText(reference.source.label));
+		text += theme.fg("mdLink", oneLine(reference.source.label));
 		if (reference.tool !== undefined) {
-			text += theme.fg("mdLinkUrl", `:${normalizeInlineText(reference.tool)}`);
+			text += theme.fg("mdLinkUrl", `:${oneLine(reference.tool)}`);
 		}
 		offset = reference.offset;
 	}
@@ -159,9 +160,9 @@ function contentBodyLines(
  */
 function bodyLines(
 	text: string,
-	jsonSpan: JsonSpan | undefined,
+	jsonSpan: Span | undefined,
 	heading: string | undefined,
-	wrapText: (text: string, jsonSpan: JsonSpan | undefined) => string[],
+	wrapText: (text: string, jsonSpan: Span | undefined) => string[],
 ): string[] {
 	const body = withoutRepeatedHeading(text.replace(/^\n+/, ""), heading);
 	return wrapText(body, shiftJsonSpan(jsonSpan, text.length - body.length));
@@ -193,7 +194,7 @@ function headingKey(text: string): string {
  * nest under item and entry headings that already carry `mdHeading`.
  */
 function sectionHeaderLines(theme: Theme, section: InjectionSection, wrapWidth: number): string[] {
-	const label = theme.fg("syntaxKeyword", theme.bold(normalizeInlineText(section.label)));
+	const label = theme.fg("syntaxKeyword", theme.bold(oneLine(section.label)));
 	const tokens = theme.fg("muted", ` · ${section.tokens.toLocaleString("en-US")} tokens`);
 	const marker = section.dropped === true ? droppedMarker(theme) : section.moved === true ? movedMarker(theme) : "";
 	return wrapTextWithAnsi(`${label}${tokens}${marker}`, wrapWidth).map((line) => `${BODY_INDENT}${line}`);
