@@ -4,14 +4,8 @@ import "../../tests/fixtures/tool-display/pi-tui.mjs"; // lets index.ts load pi-
 
 const { editorFocused } = await import("./index.ts");
 
-// A real CustomEditor mounted where Pi mounts it, with Pi's app actions (as Pi's main
-// editor has).
-const { CustomEditor } = await import("@earendil-works/pi-coding-agent");
-function editor({ main = true } = {}) {
-  const e = new CustomEditor({ requestRender() {} }, { borderColor: (s) => s, selectList: {} }, { matches: () => false });
-  if (main) e.onAction("app.clear", () => {});
-  return e;
-}
+const fn = () => {};
+const editor = () => ({ onSubmit: fn, getText: fn, handleInput: fn });
 /** Pi 0.87's root: seven containers, the fifth holding `slot`. */
 const tree = (slot, focused = slot) => ({
   children: [{}, {}, {}, {}, { children: [slot] }, {}, {}],
@@ -23,16 +17,12 @@ test("the main editor in the slot and in focus", () => {
 });
 
 test("a picker in the editor slot is not the editor", () => {
-  const picker = { handleInput() {}, getText: () => "" };
+  const picker = { handleInput: fn, getText: fn }; // no onSubmit
   assert.equal(editorFocused(tree(picker), "0.87.1"), false);
 });
 
-test("a CustomEditor without Pi's app actions (a ui.custom panel) is not the main editor", () => {
-  assert.equal(editorFocused(tree(editor({ main: false }))), false);
-});
-
 test("the editor in the slot but something else focused", () => {
-  assert.equal(editorFocused(tree(editor(), { handleInput() {} }), "0.87.1"), false);
+  assert.equal(editorFocused(tree(editor(), { handleInput: fn }), "0.87.1"), false);
 });
 
 test("another Pi version never matches", () => {

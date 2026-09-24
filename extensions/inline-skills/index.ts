@@ -4,6 +4,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
+  CustomEditor,
   type ExtensionAPI,
   type ExtensionContext,
   type ParsedSkillBlock,
@@ -13,7 +14,6 @@ import {
   VERSION,
 } from "@earendil-works/pi-coding-agent";
 import { Container } from "@earendil-works/pi-tui";
-import { mainEditor } from "../../shared/tui/index.ts";
 
 // Same type as upstream, so skills loaded by it before the port still count as loaded.
 const MESSAGE_TYPE = "inline-skill";
@@ -170,6 +170,21 @@ export function skillProvider(skills: () => Skill[], current: any) {
 const INSTALL = Symbol.for("pi-rig.inline-skills.install");
 
 /**
+ * Pi's main editor: the default editor or one set by setEditorComponent. Pi gives
+ * either its app actions; a CustomEditor mounted by ui.custom() has none.
+ */
+function isMainEditor(editor: any, version: string): boolean {
+  return (
+    version.startsWith("0.87.") &&
+    editor instanceof CustomEditor &&
+    typeof (editor as any).tryTriggerAutocomplete === "function" &&
+    typeof (editor as any).isShowingAutocomplete === "function" &&
+    Array.isArray((editor as any).state?.lines) &&
+    (editor as any).actionHandlers?.has?.("app.clear") === true
+  );
+}
+
+/**
  * Guarded Pi patch (#1): wraps the handleInput of Pi's main editor instance so a
  * mid-message `/` plus two name characters opens the list. Pi's editor refuses `/`
  * as a provider trigger character and opens the list on typed letters only when
@@ -197,9 +212,9 @@ export function editorPatch(version = VERSION) {
     target = undefined;
   };
   const ensure = (tui: any): boolean => {
-    const editor = mainEditor(tui, version);
+    const editor = tui?.children?.[4]?.children?.[0];
     if (editor && editor === target) return true;
-    if (!editor || editor[INSTALL]) return false;
+    if (!isMainEditor(editor, version) || editor[INSTALL]) return false;
     restore();
     hadOwn = Object.hasOwn(editor, "handleInput");
     original = editor.handleInput;
