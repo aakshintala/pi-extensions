@@ -39,6 +39,12 @@ export function findChat(tui: TUI, version = VERSION) {
   if (kids?.length === 3 && kids.every((k) => k instanceof Container)) return { parent: doc as Container, chat: kids[2] };
 }
 
+/** "done ", "failed " or "stopped " for a finished status, else nothing. */
+export const endedAs = (status: Item["status"]) => (isFinished(status) ? (status === "completed" ? "done " : `${status} `) : "");
+/** An item's state for its row and header: queued, or how long it has run or ran. */
+export const stateOf = (item: Item) =>
+  item.status === "queued" ? "queued" : endedAs(item.status) + duration((item.endedAt ?? fleet().now()) - item.startedAt);
+
 /** The item's header line: kind, label, status, running time and the frame's keys. */
 function header(ctx: ExtensionContext, id: string): Component {
   return {
@@ -46,11 +52,7 @@ function header(ctx: ExtensionContext, id: string): Component {
       const item = fleet().get(id);
       if (!item) return [];
       const theme = ctx.ui.theme;
-      const state =
-        item.status === "queued"
-          ? "queued"
-          : (isFinished(item.status) ? (item.status === "completed" ? "done " : `${item.status} `) : "") +
-            duration((item.endedAt ?? fleet().now()) - item.startedAt);
+      const state = stateOf(item);
       const keys = `esc back${item.steer ? " · enter steers" : ""}`;
       return [truncateToWidth(` ${theme.fg("accent", `${oneLine(item.kind)} ${oneLine(item.label)}`)} · ${state} ${theme.fg("dim", `· ${keys}`)}`, width)];
     },
@@ -58,11 +60,20 @@ function header(ctx: ExtensionContext, id: string): Component {
   };
 }
 
-/** A log file's lines, wrapped to the width. */
+/** A log file's lines, wrapped to the width; rewrapped only when the lines or the width change. */
 function logView(lines: () => string[]): Component {
+  let from: string[] | undefined;
+  let at = 0;
+  let wrapped: string[] = [];
   return {
-    render: (width) => lines().flatMap((l) => (l ? wrapTextWithAnsi(" " + l, width) : [""])),
-    invalidate() {},
+    render(width) {
+      const now = lines(); // the same array until a read changes it
+      if (now !== from || width !== at) [from, at, wrapped] = [now, width, now.flatMap((l) => (l ? wrapTextWithAnsi(" " + l, width) : [""]))];
+      return wrapped;
+    },
+    invalidate() {
+      from = undefined;
+    },
   };
 }
 
@@ -146,8 +157,6 @@ export interface Viewer {
   handleKey(data: string): boolean;
   /** Editor text while an item is open: its steer, echoed in the viewer. */
   steer(text: string): void;
-  /** Reads new log output now; FleetView calls it when a producer updates an item. */
-  refresh(): void;
   /** Whether the viewer is an overlay, which owns the arrow keys. */
   overlay(): boolean;
 }
@@ -160,7 +169,6 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
         id: string;
         content: Container;
         release: () => void;
-        read?: () => void;
         frame?: OverlayFrame;
       }
     | undefined;
@@ -183,7 +191,6 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
 
   const viewer: Viewer = {
     active: () => open?.id,
-    refresh: () => open?.read?.(),
     overlay: () => !!open?.frame,
 
     open(item) {
@@ -193,13 +200,12 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
       const content = new Container();
       const head = header(ctx, item.id);
       let stopWatch = () => {};
-      let read: (() => void) | undefined;
       let body: Component;
       if ("log" in item.view) {
         const path = item.view.log;
         const source = logSource(path);
-        // Reads happen here, never in render: on open, when the file changes, and on producer updates.
-        read = () => void (source.read() && render());
+        // Reads happen here, never in render: on open and when the file changes.
+        const read = () => void (source.read() && render());
         source.read();
         watchFile(path, { interval: LOG_POLL_MS }, read);
         stopWatch = () => unwatchFile(path, read);
@@ -239,7 +245,6 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
         open = {
           id: item.id,
           content,
-          read,
           release: () => {
             stopWatch();
             // Put the chat back where the frame is now; if the frame is gone, into the chat's slot.
@@ -256,7 +261,7 @@ export function createViewer(ctx: ExtensionContext, tui: () => TUI | undefined):
         scrollToEnd(t);
       } else {
         let done: (() => void) | undefined;
-        const state: NonNullable<typeof open> = { id: item.id, content, read, release: () => (stopWatch(), done?.()) };
+        const state: NonNullable<typeof open> = { id: item.id, content, release: () => (stopWatch(), done?.()) };
         open = state;
         ctx.ui.custom<void>(
           (overlayTui, _theme, _keys, finish) => {

@@ -160,7 +160,7 @@ test("a log viewer follows new output, pauses when scrolled up, and End jumps ba
   const paused = screen([...top.slice(0, -1), " line 12                 ↓ Jump to latest message · End", ""], focused);
   await tui.waitForScreen(paused);
   appendFileSync(tui.log, "line 22\n");
-  // A new row redraws the screen, and each redraw reads the log first. Typing the command leaves FleetView.
+  // A new row redraws the screen; the log watcher has read line 22 by then or soon after.
   await tui.fx({ add: "c", kind: "monitor", label: "tick", status: "queued" });
   const withC = [...fleet, "   monitor tick · queued"];
   // The resized chat may preserve the header or scroll it off by one line.

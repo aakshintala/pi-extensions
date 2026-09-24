@@ -8,6 +8,8 @@ import { keepSgr, oneLine, unfinished } from "../../shared/text/index.ts";
 export const MAX_LINES = 2000;
 /** Most bytes one read takes; anything appended before them is skipped. */
 export const MAX_READ = 1 << 20;
+/** Most characters kept of an unended line; the rest of it is dropped. */
+export const PARTIAL_MAX = 16 * 1024;
 
 /** One log line for the screen: SGR kept, other sequences removed, tabs expanded, other control characters dropped. After a carriage return only the last write shows. */
 export function logLine(s: string) {
@@ -24,19 +26,22 @@ export function logLine(s: string) {
 export function logSource(path: string) {
   let offset = 0;
   let decoder = new StringDecoder("utf8");
-  let partial = ""; // text after the last newline
+  let partial = ""; // text after the last newline, from its last carriage-return write
+  let shown: string[] | undefined; // lines() until the next read
   let lines: string[] = [];
   let error = "";
   let skipped = 0; // bytes never read; shown above the lines, outside the MAX_LINES cap
   return {
     /** Complete lines, the unfinished last line up to any sequence cut off at its end, then a read error if any. */
     lines() {
+      if (shown) return shown;
       const out = partial ? [...lines, logLine(partial.slice(0, unfinished(partial)))] : lines;
-      return [...(skipped ? [`… ${skipped} bytes skipped`] : []), ...out, ...(error ? [error] : [])];
+      return (shown = [...(skipped ? [`… ${skipped} bytes skipped`] : []), ...out, ...(error ? [error] : [])]);
     },
     /** Reads what was appended, at most MAX_READ bytes. Returns whether anything changed. */
     read(): boolean {
       const before = error;
+      shown = undefined;
       let fd: number | undefined;
       try {
         fd = openSync(path, "r");
@@ -55,6 +60,14 @@ export function logSource(path: string) {
         offset += n;
         const split = (partial + decoder.write(buffer.subarray(0, n))).replace(/\r\n/g, "\n").split("\n");
         partial = split.pop()!;
+        // Only the last carriage-return write shows (logLine), so a progress bar that never ends its line stays small.
+        let end = partial.length;
+        while (partial[end - 1] === "\r") end--;
+        partial = partial.slice(partial.lastIndexOf("\r", end - 1) + 1);
+        if (partial.length > PARTIAL_MAX) {
+          const head = partial.slice(0, PARTIAL_MAX);
+          partial = head.slice(0, unfinished(head)); // never ends in a cut sequence
+        }
         if (cut) split.shift();
         lines.push(...split.slice(-MAX_LINES).map(logLine)); // a spread of every line in 1 MiB can overflow the stack
         if (lines.length > MAX_LINES) lines = lines.slice(-MAX_LINES);
