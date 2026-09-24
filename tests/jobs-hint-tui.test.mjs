@@ -2,7 +2,9 @@
 // can be backgrounded, its call shows outside the group summary with a dim hint
 // line, and folds back into the summary when it ends, is killed or moves to the background.
 // A running group shows its static ⏺ summary at once; the clock fixture makes Pi's own
-// working indicator still.
+// working indicator still. The hint line always carries the command's elapsed time (#162),
+// so it shows even with no Ctrl+B to offer; the last test runs without the frozen clock to
+// show that time ticking, off the same 250ms refresh that reveals the group summary.
 import { test } from "node:test";
 import assert from "node:assert";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -76,7 +78,7 @@ function watchUnderEditor(tui) {
   };
 }
 const RUNNING = screen(
-  [...GO, " ⏺ Ran 1 shell command", ` ⏺ Bash(${LONG})`, "   ⎿  ctrl+b to run in background", ""],
+  [...GO, " ⏺ Ran 1 shell command", ` ⏺ Bash(${LONG})`, "   ⎿  0s · ctrl+b to run in background", ""],
   WORKING, [], "↑2 ↓19 W2 CH0.0% 0.0%/128k (auto)",
 );
 
@@ -129,12 +131,34 @@ test("a fast command leaves no hint row", async (t) => {
   assert.deepEqual(await under(), [[]], "no rows under the editor at any point");
 });
 
-test("while Ctrl+B still moves the cursor left, a running call shows no hint", async (t) => {
+test("while Ctrl+B still moves the cursor left, a running call shows its elapsed time but no ctrl+b hint", async (t) => {
   const tui = await start(t, [bash(LONG), "finished"], null); // Pi's default keybindings
   await started(t, tui);
   // FleetView's warning about Ctrl+B names a temporary path, so match rows, not the screen.
-  await poll(() => tui.screen().includes(" ⏺ Ran 1 shell command\n\n── ● Working"), "the running summary");
+  await poll(() => tui.screen().includes(` ⏺ Ran 1 shell command\n ⏺ Bash(${LONG})\n   ⎿  0s\n\n── ● Working`), "the running call with its elapsed time");
   assert.ok(!tui.screen().includes("ctrl+b to run in background"), tui.screen());
+  writeFileSync(join(tui.cwd, "done"), "");
+  await tui.waitForEvent("agent_end");
+});
+
+test("the hint's elapsed time increases with real time, from the same 250ms refresh that reveals the summary", async (t) => {
+  const tui = await startTui(t, {
+    extensions: [path("../extensions/fleet/index.ts"), path("../extensions/jobs/index.ts"), path("../extensions/tool-display/index.ts")],
+    cols: COLS,
+    rows: ROWS,
+    args: ["--tools", "bash"],
+    replies: [bash(LONG), "finished"],
+  });
+  t.after(() => assert.deepEqual(liveGroup(tui.pid), []));
+  tui.type("go");
+  tui.keys("Enter");
+  await started(t, tui);
+  const elapsedOf = () => {
+    const m = /⎿  (\d+)s/.exec(tui.screen());
+    return m ? Number(m[1]) : undefined;
+  };
+  await poll(() => { const n = elapsedOf(); return n !== undefined && n >= 1 ? n : false; }, "the hint's elapsed time to reach 1s");
+  await poll(() => { const n = elapsedOf(); return n !== undefined && n >= 2 ? n : false; }, "the hint's elapsed time to reach 2s");
   writeFileSync(join(tui.cwd, "done"), "");
   await tui.waitForEvent("agent_end");
 });

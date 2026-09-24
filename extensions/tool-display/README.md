@@ -26,13 +26,14 @@ Collapses each run of tool calls into one summary line, and draws the built-in
   a call settles or runs for a second, so a quick read never appears and
   disappears. Genuinely slow calls get a static summary row.
 - **Running calls with a hint show** outside the summary, with a static mark and a
-  dim hint line, and fold back in when they end. A foreground `bash` shows
-  `ctrl+b to run in background` this way (#139):
+  dim hint line, and fold back in when they end. A foreground `bash` shows its
+  elapsed time this way (#162), with `ctrl+b to run in background` added while
+  Ctrl+B is free (#139):
 
   ```
    ⏺ Ran 1 shell command
    ⏺ Bash(npm test)
-     ⎿  ctrl+b to run in background
+     ⎿  12s · ctrl+b to run in background
   ```
 
 - **Cancelled.** When a turn is aborted (Esc), calls with no result and calls
