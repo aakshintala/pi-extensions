@@ -83,7 +83,8 @@ export default function (pi: ExtensionAPI) {
             const component = {
               invalidate() {},
               render(width: number) {
-                queueMicrotask(() => tui && pinAbove(component));
+                // Fullscreen layout can still be rendering here; move after its render completes.
+                setTimeout(() => tui && pinAbove(component), 0);
                 const lines: string[] = [];
                 for (const [lane, name, when] of [
                   ["steer", "Steering", "next turn"],

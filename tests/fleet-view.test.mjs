@@ -89,6 +89,7 @@ test("running shells share one row; Enter lists only running shells and opens a 
   await tui.fx({ finish: "a", status: "completed", result: "ok" });
   await waitForText(tui, "1 shell running in background");
   await tui.fx({ finish: "b", status: "completed", result: "ok" });
+  for (let i = 0; i < 100 && /shells? running in background/.test(tui.screen()); i++) await new Promise((r) => setTimeout(r, 20));
   assert.match(tui.screen(), /shell build · done 0s · esc back/); // log stays open after the last shell finishes
   assert.doesNotMatch(tui.screen(), /shells? running in background/);
   tui.keys("Escape");
