@@ -57,3 +57,22 @@ test("a session switch destroys the old index and opens one for the new cwd", as
   await settle();
   assert.equal(spy.finders[1].isDestroyed, true);
 });
+
+test("sessions on one root share a finder, destroyed when the last closes", async (t) => {
+  const spy = spyFFF();
+  const repo = tempRepo(t);
+  const parent = direct(t, spy.load);
+  const child = direct(t, spy.load); // a subagent child: its own extension instance, same process
+  parent.start(repo);
+  child.start(repo);
+  assert.equal(await child.run("find", { pattern: "*.js" }), "lib/util.js");
+  assert.equal(await parent.run("find", { pattern: "*.js" }), "lib/util.js");
+  assert.equal(spy.created, 1);
+  child.shutdown();
+  await settle();
+  assert.equal(spy.finders[0].isDestroyed, false);
+  assert.equal(await parent.run("find", { pattern: "*.js" }), "lib/util.js");
+  parent.shutdown();
+  await settle();
+  assert.equal(spy.finders[0].isDestroyed, true);
+});
