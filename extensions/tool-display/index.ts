@@ -123,9 +123,10 @@ export default function (pi: ExtensionAPI, piVersion: string = VERSION) {
   pi.on("message_update", (e) => groups.track(e.message, true));
   pi.on("message_end", (e) => groups.track(e.message));
   pi.on("tool_execution_end", (e) => groups.settle(e.toolCallId, e.isError, e.result));
-  pi.on("agent_start", () => {
+  pi.on("agent_start", (_e, ctx) => {
     // Keep the grace-period reveal and changing hints, without animating tool rows.
-    refresh ??= setInterval(() => groups.refreshPending(), 250);
+    // Without a UI (a subagent's own session) nothing draws the rows.
+    if (ctx.hasUI) refresh ??= setInterval(() => groups.refreshPending(), 250);
   });
   pi.on("agent_end", () => {
     stopRefresh();
