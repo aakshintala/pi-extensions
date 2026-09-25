@@ -170,12 +170,12 @@ Subagent 3fa9c1d2 (review auth) completed. STATUS: DONE
 - In FleetView each agent is one `agent` row with its latest tool call or
   message line. When it finishes, the row and the chat line show its `STATUS`.
 - The row shows the model and thinking level, a worktree agent's branch or
-  `worktree removed`, then its tokens (split as the status footer shows them)
+  `worktree removed`, then its tokens (`↑` input, `↓` output, cache-hit share)
   and cost once they are above zero. They count its session over every run
   plus each child once it finishes, as `Session total:` does. A finished row
-  adds the latest run's turns and tool uses. Its status and running time come
+  adds the latest run's turns and tools. Its status and running time come
   last. For example:
-  `agent scout · kid-1 · low · in 12k out 3.4k cache 81% · $0.31 · 12 turns · 34 tool uses · done 2m13s`.
+  `agent scout · kid-1 · low · ↑12k ↓3.4k 81% · $0.31 · 12 turns · 34 tools · done 2m13s`.
 - A resume turns the finished row back into a running one, with its own
   running time, so each agent keeps one row.
 

@@ -323,7 +323,7 @@ test("a message steers a running child, and resumes a finished one from its save
   assert.match(total, /^Session total: 3 turns · 1 tool use · [\d,]+ tokens · \$0\.00$/);
   // Its FleetView row: model and thinking while it runs (no tokens yet), then the latest run's counts and the session's tokens.
   assert.deepEqual(running, ["kid-1", "low"]);
-  assert.deepEqual(fleet().get(id).detail(), ["kid-1", "low", savedRow(agentDir, session.sessionId, id), "1 turn", "0 tool uses"]);
+  assert.deepEqual(fleet().get(id).detail(), ["kid-1", "low", savedRow(agentDir, session.sessionId, id), "1 turn", "0 tools"]);
 });
 
 test("stop ends a child waiting on its own work, with its partial output marked incomplete", { timeout: 20_000 }, async (t) => {
@@ -837,7 +837,7 @@ test("tokens and cost roll up across a resumed nested run, and Session total cou
   const replied = woken.context.messages.filter((m) => m.role === "assistant").map((m) => m.usage);
   const firstG = savedEntries(agentDir, session.sessionId, c).find((e) => e.customType === "rig.subagent.usage").data;
   assert.equal(woken.detail[2], usageText(sumUsage([...replied, firstG])));
-  assert.deepEqual(fleet().get(c).detail(), ["kid-1", "low", savedRow(agentDir, session.sessionId, c), cost(total), ...run.split(" · ").slice(0, 2)]);
+  assert.deepEqual(fleet().get(c).detail(), ["kid-1", "low", savedRow(agentDir, session.sessionId, c), cost(total), ...run.split(" · ").slice(0, 2).map((f) => f.replace(" use", ""))]);
 });
 
 test("a stopped agent leaves the tree's cap at once, even while it winds down", { timeout: 20_000 }, async (t) => {
