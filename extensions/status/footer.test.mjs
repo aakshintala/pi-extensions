@@ -59,6 +59,16 @@ function fakePi() {
     commands,
     thinking: "high",
     on: (name, fn) => (handlers[name] ??= []).push(fn),
+    events: {
+      bus: {},
+      on(channel, fn) {
+        const list = (this.bus[channel] ??= new Set()).add(fn);
+        return () => list.delete(fn);
+      },
+      emit(channel, data) {
+        for (const fn of this.bus[channel] ?? []) fn(data);
+      },
+    },
     getThinkingLevel() {
       return this.thinking;
     },
@@ -173,6 +183,26 @@ test("usage and context: counted at start, on compaction and per message, never 
   await s.emit("session_compact");
   assert.match(s.lines()[0], /in 1\.5k out 300/, "a recount replaces the running totals");
   assert.equal(s.getBranch, 2);
+});
+
+test("usage: a finished subagent's saved cost counts, and its end event recounts; shutdown stops listening", async () => {
+  const branch = [
+    { type: "message", message: { role: "assistant", usage: usage(1000, 200, 0, 0.5) } },
+    { type: "custom", customType: "rig.subagent.usage", data: { tokens: 9000, cost: 0.25 } },
+  ];
+  const { pi, s } = gitHarness({ branch, trusted: false });
+  await s.emit("session_start");
+  assert.match(s.lines()[0], /in 1\.0k out 200 cache 0% \$0\.750/);
+
+  branch.push({ type: "custom", customType: "rig.subagent.usage", data: { tokens: 10, cost: 0.125 } });
+  pi.events.emit("subagents:completed", { id: "a" });
+  assert.match(s.lines()[0], /\$0\.875/);
+  branch.push({ type: "custom", customType: "rig.subagent.usage", data: { tokens: 10, cost: 0.125 } });
+  pi.events.emit("subagents:failed", { id: "b" });
+  assert.match(s.lines()[0], /\$1\.000/);
+
+  await s.emit("session_shutdown");
+  assert.equal([...Object.values(pi.events.bus)].reduce((n, l) => n + l.size, 0), 0);
 });
 
 test("the per-width render cache never serves a stale line: model, thinking, branch, quota and usage each invalidate it", async () => {

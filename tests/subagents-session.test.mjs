@@ -86,6 +86,7 @@ async function freshInstance() {
     getActiveTools: () => ["read", "bash", ...SUBAGENT_TOOLS],
     setActiveTools() {},
     sendMessage() {},
+    appendEntry() {},
   };
   const { default: subagents } = await import("../extensions/subagents/index.ts");
   subagents(pi);
@@ -815,6 +816,10 @@ test("tokens and cost roll up across a resumed nested run, and Session total cou
   assert.equal(tokens(total), own(entries) + grand[0] + grand[1]);
   assert.equal(cost(run), money(tokens(run) * 1e-6));
   assert.equal(cost(total), money(tokens(total) * 1e-6));
+  // The root session saves each of C's runs, G's included, for its footer.
+  const first = notices().filter((n) => n.startsWith(`Subagent ${c} `))[0].split("\n")[1];
+  const saved = session.sessionManager.getEntries().filter((e) => e.type === "custom" && e.customType === "rig.subagent.usage").map((e) => e.data.tokens);
+  assert.deepEqual(saved, [tokens(first), tokens(run)]);
   // C's FleetView row: G's tokens join it once G finishes, while C still runs; its counts are the latest run's.
   const replied = woken.context.messages.filter((m) => m.role === "assistant").reduce((n, m) => n + m.usage.totalTokens, 0);
   assert.equal(woken.detail[2], `${short(replied + grand[0])} tokens`);

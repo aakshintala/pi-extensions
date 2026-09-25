@@ -50,7 +50,8 @@ any agent.
   one message listing them, then waits for each notice before it finishes
   (the fleet extension's session-end rule). Its own notice comes after theirs.
 - Tokens and cost roll up through the saved sessions. Each finished agent
-  saves its counts in its parent's session as a `rig.subagent.usage` entry.
+  saves its counts in its parent's session as a `rig.subagent.usage` entry,
+  the user's own session included, where the status footer counts its cost.
   Each notice saves a `rig.subagent.reported` entry in the agent's own
   session. An agent's notice counts its own replies plus the usage entries
   since its last notice, so a child resumed from FleetView after its parent

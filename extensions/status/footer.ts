@@ -58,10 +58,16 @@ function add(t: Totals, u: Usage | undefined) {
 const billed = (m: { role?: string; usage?: Usage } | undefined) =>
   m?.role === "assistant" || m?.role === "toolResult" ? m.usage : undefined;
 
-/** Totals over the current branch: model replies, tool results (subagents), compactions, summaries. */
+/** Saved by the subagents extension when a child finishes: its tokens and cost, its own children's included. */
+const SUBAGENT_USAGE = "rig.subagent.usage";
+
+/** Totals over the current branch: model replies, tool results, compactions, summaries, and finished subagents' cost. */
 function branchTotals(ctx: ExtensionContext): Totals {
   const t = zero();
-  for (const e of ctx.sessionManager.getBranch() as any[]) add(t, e.type === "message" ? billed(e.message) : e.usage);
+  for (const e of ctx.sessionManager.getBranch() as any[]) {
+    if (e.type === "custom" && e.customType === SUBAGENT_USAGE) t.cost += e.data?.cost || 0;
+    else add(t, e.type === "message" ? billed(e.message) : e.usage);
+  }
   return t;
 }
 
@@ -183,9 +189,16 @@ export function registerFooter(pi: ExtensionAPI, { timers = globalThis, now = Da
     contextPercent = ctx.getContextUsage()?.percent ?? null;
   };
 
+  let listeners: (() => void)[] = [];
+  const unlisten = () => listeners.splice(0).forEach((off) => off());
+
   pi.on("session_start", async (_event, ctx) => {
     stopGit();
+    unlisten();
     if (ctx.mode !== "tui") return;
+    // A finished subagent's usage lands in this session's branch just before this event.
+    const onSubagentEnd = () => recount(undefined, ctx);
+    listeners = [pi.events.on("subagents:completed", onSubagentEnd), pi.events.on("subagents:failed", onSubagentEnd)];
     totals = branchTotals(ctx);
     measure(ctx);
     perf = reqStart = firstToken = undefined;
@@ -240,7 +253,10 @@ export function registerFooter(pi: ExtensionAPI, { timers = globalThis, now = Da
       };
     });
   });
-  pi.on("session_shutdown", stopGit);
+  pi.on("session_shutdown", () => {
+    stopGit();
+    unlisten();
+  });
 
   const recount = (_e: unknown, ctx: ExtensionContext) => {
     totals = branchTotals(ctx);

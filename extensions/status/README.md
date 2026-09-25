@@ -16,7 +16,8 @@ model thinking  │  in 12k out 3.4k cache 81% $0.412  │  ctx [███░░
 ```
 
 - Usage totals cover the current branch (replies, tool results, compactions)
-  and update per message, not per draw.
+  and update per message, not per draw. The cost also counts every finished
+  subagent, its own children included; their tokens stay out of `in`/`out`.
 - Context turns amber at 70% and red at 90%; a provider's quota turns amber
   below 50% left and red below 20% in its lowest bucket.
 - `*` marks uncommitted changes. `git status` runs in the background at
