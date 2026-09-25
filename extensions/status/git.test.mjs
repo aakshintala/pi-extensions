@@ -127,7 +127,7 @@ test("a hung git releases the process-wide lock for the next footer", { timeout:
   const runs = hungGit(t);
   const footer = () => {
     const handlers = {};
-    registerFooter({ on: (n, f) => (handlers[n] ??= []).push(f), getThinkingLevel: () => "off" }, { gitDirty: (cwd, s) => gitDirty(cwd, s, LIMITS) });
+    registerFooter({ on: (n, f) => (handlers[n] ??= []).push(f), events: { on: () => () => {} }, getThinkingLevel: () => "off" }, { gitDirty: (cwd, s) => gitDirty(cwd, s, LIMITS) });
     const ctx = { mode: "tui", isProjectTrusted: () => true, getContextUsage: () => undefined, sessionManager: { getBranch: () => [], getCwd: () => tmpdir() }, ui: { setFooter() {} } };
     return async (n) => {
       for (const f of handlers[n] ?? []) await f({ type: n }, ctx);

@@ -460,7 +460,7 @@ export default function (pi: ExtensionAPI) {
       p.manager.appendCustomEntry(USAGE, { tokens: s.tokens, cost: s.cost });
       p.spent.tokens += s.tokens;
       p.spent.cost += s.cost;
-    }
+    } else pi.appendEntry(USAGE, { tokens: s.tokens, cost: s.cost }); // the root session: its footer counts it
     const status = a.stopped ? "stopped" : error ? "failed" : "completed";
     const lines = [`${statsLine(s)} · ${duration(s.ms)}`, ...(total ? [`Session total: ${statsLine(total)}`] : []), ...(note ? [note] : [])];
     const head = `Subagent ${a.id} (${oneLine(a.label)}) ${status}. STATUS: ${a.stopped ? "STOPPED" : error ? "FAILED" : statusOf(text)}\n${lines.join("\n")}`;
