@@ -168,7 +168,7 @@ test("control sequences are stripped from every row", async (t) => {
     " ● main",
     "   agent scout · 0s",
     "    └─ red next",
-    "   monitor ci · failed 0s · exit 1",
+    "   monitor ci · exit 1 · failed 0s",
     "   2 shells running in background",
   ]));
 });
@@ -258,10 +258,10 @@ test("an activity line that throws breaks only its own row", async (t) => {
     { add: "a", kind: "agent", label: "broken", throws: true, detail: ["kid-1"] },
     { add: "b", kind: "shell", label: "fine", activity: "PASS 3" },
   );
-  await tui.waitForScreen(idle([" ● main", "   agent broken · 0s · detail failed", "    └─ activity failed", "   1 shell running in background"]));
+  await tui.waitForScreen(idle([" ● main", "   agent broken · detail failed · 0s", "    └─ activity failed", "   1 shell running in background"]));
 });
 
-test("detail fields follow the status and drop from the right when the row is narrow; the label and status stay", async (t) => {
+test("detail fields come before the status and drop from the right when the row is narrow; the label and status stay", async (t) => {
   const detail = ["claude-sonnet-4-5", "high", "41.2k tokens", "$0.31", "12 turns", "34 tool uses"];
   const ops = [
     { add: "a", kind: "agent", label: "scout", activity: "reading", detail },
@@ -274,9 +274,9 @@ test("detail fields follow the status and drop from the right when the row is na
   await wide.fx(...ops);
   await wide.waitForScreen(idle([
     " ● main",
-    "   agent scout · done 2m13s · claude-sonnet-4-5 · high · 41.2k tokens · $0.31",
+    "   agent scout · claude-sonnet-4-5 · high · 41.2k tokens · $0.31 · done 2m13s",
     "    └─ STATUS: DONE",
-    "   agent a-very-long-agent-label-that-fills-the-row · 2m13s · claude-sonnet-4-5",
+    "   agent a-very-long-agent-label-that-fills-the-row · claude-sonnet-4-5 · 2m13s",
     "   1 shell running in background",
   ]));
 
@@ -286,7 +286,7 @@ test("detail fields follow the status and drop from the right when the row is na
   await narrow.waitForScreen(pad([
     "", border, "", border,
     " ● main",
-    "   agent scout · done 2m13s · claude-sonnet-4-5 · high",
+    "   agent scout · claude-sonnet-4-5 · high · done 2m13s",
     "    └─ STATUS: DONE",
     "   agent a-very-long-agent-label-that-fills-the-row · 2m13s",
     "   1 shell running in background",
@@ -413,17 +413,17 @@ test("x stops the selected running or queued row at once; on a finished row or m
     { finish: "c", status: "completed", result: "" },
   );
   const rows = (marks, a = "0s", b = "queued") =>
-    idle([`${marks[0]}● main`, `${marks[1]}  agent build · ${a.split(" · ")[0]}`, ...(a.startsWith("stopped") ? ["    └─ stopped by user"] : []), `${marks[2]}  monitor ci · ${b}`, `${marks[3]}  agent scout · done 0s`, KEYS]);
+    idle([`${marks[0]}● main`, `${marks[1]}  agent build · ${a.split(" · ").at(-1)}`, ...(a.startsWith("stopped") ? ["    └─ stopped by user"] : []), `${marks[2]}  monitor ci · ${b}`, `${marks[3]}  agent scout · done 0s`, KEYS]);
   tui.keys("Down", "x"); // main: nothing to stop, and x is not typed into the editor
   await tui.waitForScreen(rows("›   "));
   tui.keys("Down", "x");
-  await tui.waitForScreen(rows(" ›  ", "stopped 0s · stopped by user"));
+  await tui.waitForScreen(rows(" ›  ", "stopped by user · stopped 0s"));
   tui.keys("Down", "x");
-  await tui.waitForScreen(rows("  › ", "stopped 0s · stopped by user", "stopped 0s · stopped by user"));
+  await tui.waitForScreen(rows("  › ", "stopped by user · stopped 0s", "stopped by user · stopped 0s"));
   tui.keys("Down", "x", "Up"); // finished: x leaves its result alone
-  await tui.waitForScreen(rows("  › ", "stopped 0s · stopped by user", "stopped 0s · stopped by user"));
+  await tui.waitForScreen(rows("  › ", "stopped by user · stopped 0s", "stopped by user · stopped 0s"));
   tui.keys("Down");
-  await tui.waitForScreen(rows("   ›", "stopped 0s · stopped by user", "stopped 0s · stopped by user"));
+  await tui.waitForScreen(rows("   ›", "stopped by user · stopped 0s", "stopped by user · stopped 0s"));
 });
 
 test("Ctrl+X Ctrl+K in FleetView stops every running or queued agent and leaves jobs alone", async (t) => {

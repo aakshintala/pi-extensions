@@ -140,10 +140,10 @@ test("a log viewer follows new output, pauses when scrolled up, and End jumps ba
   const tui = await start(t, { lines });
   // Finished items: no running-time timer redraws the screen, so only the log watcher does.
   await tui.fx({ finish: "a", status: "completed", result: "ok" }, { finish: "b", status: "completed", result: "ok" });
-  const done = [" ● main", "   monitor build · done 0s · ok", "   agent scout · done 0s", "    └─ ok"];
+  const done = [" ● main", "   monitor build · ok · done 0s", "   agent scout · done 0s", "    └─ ok"];
   await tui.waitForScreen(screen([], done));
   tui.keys("Down", "Down", "Enter");
-  const fleet = [done[0].replace(" ●", "  "), " ● monitor build · done 0s · ok", ...done.slice(2)];
+  const fleet = [done[0].replace(" ●", "  "), " ● monitor build · ok · done 0s", ...done.slice(2)];
   const focused = [...fleet.map((r, i) => (i === 1 ? "›" + r.slice(1) : r)), KEYS]; // FleetView keeps focus on the opened row
   // The rows above the dock, the last one blank: the header and the first lines scrolled away.
   const tail = (all, rows = fleet) => screen([...all.slice(-(ROWS - 6 - rows.length)).map((l) => ` ${l}`), ""], rows);

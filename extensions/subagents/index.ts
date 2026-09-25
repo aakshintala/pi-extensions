@@ -57,7 +57,15 @@ const SETTINGS = [
   { key: "maxSessions", type: "integer", min: 2, max: 256, default: 32, description: "Sessions running in one tree of agents, root included" },
 ] as const;
 
-type Stats = { turns: number; tools: number; tokens: number; cost: number; ms: number };
+/** Tokens and cost; the split is zero in usage entries saved before it was kept. */
+type Usage = { tokens: number; cost: number; input: number; output: number; cacheRead: number; cacheWrite: number };
+type Stats = Usage & { turns: number; tools: number; ms: number };
+const USAGE_KEYS = ["tokens", "cost", "input", "output", "cacheRead", "cacheWrite"] as const;
+const noUsage = (): Usage => ({ tokens: 0, cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+const usageOf = (u: Usage): Usage => Object.fromEntries(USAGE_KEYS.map((k) => [k, u[k]])) as Usage;
+function addUsage(to: Usage, from: Partial<Usage>) {
+  for (const k of USAGE_KEYS) to[k] += from[k] ?? 0;
+}
 /** What a child inherits from its parent (#26 story 8), read when it starts. */
 type Inherit = { tools: string[]; prompt?: BuildSystemPromptOptions; models: ExtensionContext["scopedModels"] };
 
@@ -105,7 +113,7 @@ type Agent = Node & Source & {
   /** The latest run's counts, for its FleetView row. */
   stats: Omit<Stats, "ms">;
   /** Tokens and cost of its session over every run, plus its children's once they finish: the notice's `Session total`. */
-  spent: { tokens: number; cost: number };
+  spent: Usage;
 };
 
 /** Agents by id while anything holds them (such as the viewer), so a resume keeps their open transcript. */
@@ -185,14 +193,17 @@ const short = (n: number) => (n < 1000 ? String(n) : n < 1e6 ? `${(n / 1e3).toFi
 /** The notice's `Session total:`: the agent's session over every run, plus the usage its children saved in it. */
 function sessionTotal(session: AgentSession, manager: SessionManager): Omit<Stats, "ms"> {
   const s = session.getSessionStats();
-  const total = { turns: s.assistantMessages, tools: s.toolCalls, tokens: s.tokens.total, cost: s.cost };
-  for (const e of manager.getEntries() as any[]) {
-    if (e.type !== "custom" || e.customType !== USAGE) continue;
-    total.tokens += e.data.tokens;
-    total.cost += e.data.cost;
-  }
+  const { total: tokens, ...split } = s.tokens;
+  const total = { turns: s.assistantMessages, tools: s.toolCalls, tokens, cost: s.cost, ...split };
+  for (const e of manager.getEntries() as any[]) if (e.type === "custom" && e.customType === USAGE) addUsage(total, e.data);
   return total;
 }
+
+/** A FleetView row's tokens, as the status footer shows them: `in 12k out 3.4k cache 81%`. */
+export const usageText = (u: Usage) => {
+  const prompt = u.input + u.cacheRead + u.cacheWrite;
+  return `in ${short(u.input)} out ${short(u.output)} cache ${prompt ? `${Math.round((u.cacheRead / prompt) * 100)}%` : "--"}`;
+};
 
 const statsLine = (s: Omit<Stats, "ms">) => `${count(s.turns, "turn")} · ${count(s.tools, "tool use")} · ${count(s.tokens, "token")} · ${money(s.cost)}`;
 
@@ -280,10 +291,11 @@ export default function (pi: ExtensionAPI) {
       detail: () => [
         a.model.id,
         a.thinking,
-        ...(a.spent.tokens ? [`${short(a.spent.tokens)} tokens`] : []),
+        // Steady fields first; the counts that change go last.
+        ...(a.worktree ? [a.removed ? "worktree removed" : a.worktree.branch] : []),
+        ...(a.spent.tokens ? [usageText(a.spent)] : []),
         ...(a.spent.cost ? [money(a.spent.cost)] : []),
         ...(a.state === "done" ? [count(a.stats.turns, "turn"), count(a.stats.tools, "tool use")] : []),
-        ...(a.worktree ? [a.removed ? "worktree removed" : a.worktree.branch] : []),
       ],
       view: { transcript: (tui, ui) => transcript(a, tui as TUI, ui as ExtensionUIContext), showsSteers: true },
       stop: () => stop(a),
@@ -356,7 +368,7 @@ export default function (pi: ExtensionAPI) {
     lane("subagents:started", a);
     fleet().update(a.id, { status: "running" });
     const began = fleet().now();
-    const stats = (a.stats = { turns: 0, tools: 0, tokens: 0, cost: 0 });
+    const stats = (a.stats = { turns: 0, tools: 0, ...noUsage() });
     let error: string | undefined;
     let from = 0;
     let text = "";
@@ -382,10 +394,10 @@ export default function (pi: ExtensionAPI) {
             const arg = Object.values(e.args ?? {}).find((v) => typeof v === "string") as string | undefined;
             a.activity = `${e.toolName}${arg ? ` ${arg}` : ""}`;
           } else if (e.type === "message_end" && e.message.role === "assistant") {
-            stats.tokens += e.message.usage?.totalTokens ?? 0;
-            stats.cost += e.message.usage?.cost?.total ?? 0;
-            a.spent.tokens += e.message.usage?.totalTokens ?? 0;
-            a.spent.cost += e.message.usage?.cost?.total ?? 0;
+            const u = e.message.usage;
+            const reply = { tokens: u?.totalTokens, cost: u?.cost?.total, input: u?.input, output: u?.output, cacheRead: u?.cacheRead, cacheWrite: u?.cacheWrite };
+            addUsage(stats, reply);
+            addUsage(a.spent, reply);
             const last = textOf(e.message).trim().split("\n").at(-1);
             if (last) a.activity = last;
           }
@@ -449,18 +461,14 @@ export default function (pi: ExtensionAPI) {
     const entries = a.manager.getEntries() as any[];
     const last = entries.findLastIndex((e) => e.type === "custom" && e.customType === REPORTED);
     s = { ...s };
-    for (const e of entries.slice(last + 1)) {
-      if (e.type !== "custom" || e.customType !== USAGE) continue;
-      s.tokens += e.data.tokens;
-      s.cost += e.data.cost;
-    }
+    for (const e of entries.slice(last + 1)) if (e.type === "custom" && e.customType === USAGE) addUsage(s, e.data);
     a.manager.appendCustomEntry(REPORTED, {});
+    const usage = usageOf(s);
     if ("root" in a.parent) {
       const p = a.parent as Agent;
-      p.manager.appendCustomEntry(USAGE, { tokens: s.tokens, cost: s.cost });
-      p.spent.tokens += s.tokens;
-      p.spent.cost += s.cost;
-    } else pi.appendEntry(USAGE, { tokens: s.tokens, cost: s.cost }); // the root session: its footer counts it
+      p.manager.appendCustomEntry(USAGE, usage);
+      addUsage(p.spent, usage);
+    } else pi.appendEntry(USAGE, usage); // the root session: its footer counts it
     const status = a.stopped ? "stopped" : error ? "failed" : "completed";
     const lines = [`${statsLine(s)} · ${duration(s.ms)}`, ...(total ? [`Session total: ${statsLine(total)}`] : []), ...(note ? [note] : [])];
     const head = `Subagent ${a.id} (${oneLine(a.label)}) ${status}. STATUS: ${a.stopped ? "STOPPED" : error ? "FAILED" : statusOf(text)}\n${lines.join("\n")}`;
@@ -575,8 +583,8 @@ export default function (pi: ExtensionAPI) {
       activity: "",
       partial: new Map(),
       version: 0,
-      stats: { turns: 0, tools: 0, tokens: 0, cost: 0 },
-      spent: { tokens: 0, cost: 0 },
+      stats: { turns: 0, tools: 0, ...noUsage() },
+      spent: noUsage(),
     };
     remembered.set(a.id, new WeakRef(a));
     forget.register(a, a.id);

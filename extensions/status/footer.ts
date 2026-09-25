@@ -58,14 +58,14 @@ function add(t: Totals, u: Usage | undefined) {
 const billed = (m: { role?: string; usage?: Usage } | undefined) =>
   m?.role === "assistant" || m?.role === "toolResult" ? m.usage : undefined;
 
-/** Saved by the subagents extension when a child finishes: its tokens and cost, its own children's included. */
+/** Saved by the subagents extension when a child finishes: its tokens (split, if saved since the split was kept) and cost, its own children's included. */
 const SUBAGENT_USAGE = "rig.subagent.usage";
 
 /** Totals over the current branch: model replies, tool results, compactions, summaries, and finished subagents' cost. */
 function branchTotals(ctx: ExtensionContext): Totals {
   const t = zero();
   for (const e of ctx.sessionManager.getBranch() as any[]) {
-    if (e.type === "custom" && e.customType === SUBAGENT_USAGE) t.cost += e.data?.cost || 0;
+    if (e.type === "custom" && e.customType === SUBAGENT_USAGE) add(t, { ...e.data, input: e.data?.input ?? 0, cost: { total: e.data?.cost } });
     else add(t, e.type === "message" ? billed(e.message) : e.usage);
   }
   return t;
