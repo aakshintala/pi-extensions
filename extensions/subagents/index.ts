@@ -199,10 +199,10 @@ function sessionTotal(session: AgentSession, manager: SessionManager): Omit<Stat
   return total;
 }
 
-/** A FleetView row's tokens, as the status footer shows them: `in 12k out 3.4k cache 81%`. */
+/** A FleetView row's tokens: `↑12k ↓3.4k 81%`, input, output and the prompt's cache-hit share. */
 export const usageText = (u: Usage) => {
   const prompt = u.input + u.cacheRead + u.cacheWrite;
-  return `in ${short(u.input)} out ${short(u.output)} cache ${prompt ? `${Math.round((u.cacheRead / prompt) * 100)}%` : "--"}`;
+  return `↑${short(u.input)} ↓${short(u.output)}${prompt ? ` ${Math.round((u.cacheRead / prompt) * 100)}%` : ""}`;
 };
 
 const statsLine = (s: Omit<Stats, "ms">) => `${count(s.turns, "turn")} · ${count(s.tools, "tool use")} · ${count(s.tokens, "token")} · ${money(s.cost)}`;
@@ -295,7 +295,7 @@ export default function (pi: ExtensionAPI) {
         ...(a.worktree ? [a.removed ? "worktree removed" : a.worktree.branch] : []),
         ...(a.spent.tokens ? [usageText(a.spent)] : []),
         ...(a.spent.cost ? [money(a.spent.cost)] : []),
-        ...(a.state === "done" ? [count(a.stats.turns, "turn"), count(a.stats.tools, "tool use")] : []),
+        ...(a.state === "done" ? [count(a.stats.turns, "turn"), count(a.stats.tools, "tool")] : []),
       ],
       view: { transcript: (tui, ui) => transcript(a, tui as TUI, ui as ExtensionUIContext), showsSteers: true },
       stop: () => stop(a),
