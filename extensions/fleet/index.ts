@@ -246,13 +246,14 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
     const state = stateOf(item);
     const activity = activityOf(item);
     // The label and status always stay: the label is shortened to leave room for the status (#138).
+    // The status, with its ticking timer, goes last so the steadier fields keep their place.
     const name = oneLine(item.label);
     const head = `${"  ".repeat(row.depth)}${oneLine(item.kind)} `;
     const tail = ` · ${state}`;
     const room = Math.max(1, width - 3 - visibleWidth(head + tail));
-    let text = head + truncateToWidth(name, room, "…") + tail;
+    let text = head + truncateToWidth(name, room, "…");
     // Detail fields drop from the right when narrow. Agent activity has its own linked line.
-    const fits = (more: string) => 3 + visibleWidth(`${text} · ${more}`) <= width;
+    const fits = (more: string) => 3 + visibleWidth(`${text} · ${more}${tail}`) <= width;
     let dropped = false;
     for (const field of safeDetail(item).map(oneLine).filter(Boolean)) {
       if (!fits(field)) {
@@ -261,7 +262,9 @@ function mount(ctx: ExtensionContext): { viewer: Viewer; cleanup: () => void } {
       }
       text += ` · ${field}`;
     }
+    // A monitor's activity is cut to fit, before the status.
     if (item.kind !== "agent" && activity && !dropped && fits(activity.slice(0, 6))) text += ` · ${activity}`;
+    text = truncateToWidth(text, Math.max(1, width - 3 - visibleWidth(tail)), "…") + tail;
     const color = item.status === "failed" ? "error" : done ? "muted" : "text";
     const out = [theme.fg("accent", mark) + " " + theme.fg(color, text)];
     if (item.kind === "agent" && activity) out.push(theme.fg("muted", `${"  ".repeat(row.depth + 2)}└─ ${activity}`));

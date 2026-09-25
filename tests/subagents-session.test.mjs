@@ -151,10 +151,23 @@ const untilAborted = (options) => new Promise((resolve) => options.signal.addEve
 
 const tokens = (line) => Number(/ · ([\d,]+) tokens? · /.exec(line)[1].replace(/,/g, ""));
 const cost = (line) => /tokens? · (\$[\d.]+)/.exec(line)[1];
-const { money } = await import("../extensions/subagents/index.ts");
+const { money, usageText } = await import("../extensions/subagents/index.ts");
 
-/** FleetView's short token count. */
-const short = (n) => (n < 1000 ? String(n) : `${(n / 1e3).toFixed(1)}k`);
+/** A child's saved session entries. */
+function savedEntries(agentDir, sessionId, id) {
+  const dir = join(agentDir, "sessions", sessionId);
+  return readFileSync(join(dir, readdirSync(dir).find((f) => f.endsWith(`_${id}.jsonl`))), "utf8").trim().split("\n").map(JSON.parse);
+}
+/** Input/output/cache tokens summed over replies' usage and saved usage entries. */
+function sumUsage(list) {
+  const u = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const x of list) for (const k in u) u[k] += x[k] ?? 0;
+  return u;
+}
+/** A child's FleetView tokens from its saved session: its replies plus the usage entries its children saved. */
+const savedRow = (agentDir, sessionId, id) =>
+  usageText(sumUsage(savedEntries(agentDir, sessionId, id).flatMap((e) => (e.type === "message" && e.message.role === "assistant" ? [e.message.usage] : e.customType === "rig.subagent.usage" ? [e.data] : []))));
+
 
 const STATS = /^\d+ turns? · \d+ tool uses? · [\d,]+ tokens? · \$0\.00 · 0s$/;
 
@@ -257,7 +270,7 @@ test("a message steers a running child, and resumes a finished one from its save
   const release = gate();
   const seen = [];
   let id, running;
-  const { session, results, notices } = await start(
+  const { session, results, notices, agentDir } = await start(
     t,
     [
       calls(spawn("scout")),
@@ -310,7 +323,7 @@ test("a message steers a running child, and resumes a finished one from its save
   assert.match(total, /^Session total: 3 turns · 1 tool use · [\d,]+ tokens · \$0\.00$/);
   // Its FleetView row: model and thinking while it runs (no tokens yet), then the latest run's counts and the session's tokens.
   assert.deepEqual(running, ["kid-1", "low"]);
-  assert.deepEqual(fleet().get(id).detail(), ["kid-1", "low", `${short(tokens(total))} tokens`, "1 turn", "0 tool uses"]);
+  assert.deepEqual(fleet().get(id).detail(), ["kid-1", "low", savedRow(agentDir, session.sessionId, id), "1 turn", "0 tool uses"]);
 });
 
 test("stop ends a child waiting on its own work, with its partial output marked incomplete", { timeout: 20_000 }, async (t) => {
@@ -821,9 +834,10 @@ test("tokens and cost roll up across a resumed nested run, and Session total cou
   const saved = session.sessionManager.getEntries().filter((e) => e.type === "custom" && e.customType === "rig.subagent.usage").map((e) => e.data.tokens);
   assert.deepEqual(saved, [tokens(first), tokens(run)]);
   // C's FleetView row: G's tokens join it once G finishes, while C still runs; its counts are the latest run's.
-  const replied = woken.context.messages.filter((m) => m.role === "assistant").reduce((n, m) => n + m.usage.totalTokens, 0);
-  assert.equal(woken.detail[2], `${short(replied + grand[0])} tokens`);
-  assert.deepEqual(fleet().get(c).detail(), ["kid-1", "low", `${short(tokens(total))} tokens`, cost(total), ...run.split(" · ").slice(0, 2)]);
+  const replied = woken.context.messages.filter((m) => m.role === "assistant").map((m) => m.usage);
+  const firstG = savedEntries(agentDir, session.sessionId, c).find((e) => e.customType === "rig.subagent.usage").data;
+  assert.equal(woken.detail[2], usageText(sumUsage([...replied, firstG])));
+  assert.deepEqual(fleet().get(c).detail(), ["kid-1", "low", savedRow(agentDir, session.sessionId, c), cost(total), ...run.split(" · ").slice(0, 2)]);
 });
 
 test("a stopped agent leaves the tree's cap at once, even while it winds down", { timeout: 20_000 }, async (t) => {
@@ -1079,7 +1093,7 @@ test("a worktree child works in its own worktree: removed when clean, kept with 
   assert.equal(notices().at(-1).split("\n")[2], `${where}, removed: nothing uncommitted, ignored or unpushed.`);
   assert.equal(existsSync(path), false);
   assert.equal(git(cwd, "branch", "--list", `subagent/${id}`), "");
-  assert.equal(fleet().get(id).detail().at(-1), "worktree removed"); // its FleetView row
+  assert.equal(fleet().get(id).detail()[2], "worktree removed"); // its FleetView row
 
   // After a restart (no agents in memory), a resume recreates it at the same path, from its saved entry, and runs there.
   globalThis[Symbol.for("pi-rig.subagents.known")].clear();
@@ -1089,7 +1103,7 @@ test("a worktree child works in its own worktree: removed when clean, kept with 
   await session.waitForIdle();
   assert.deepEqual(pwds, [path, path]);
   assert.equal(notices().at(-1).split("\n")[3], `${where}, kept: it has unpushed commits.`);
-  assert.equal(fleet().get(id).detail().at(-1), `subagent/${id}`);
+  assert.equal(fleet().get(id).detail()[2], `subagent/${id}`);
   assert.equal(git(path, "log", "-1", "--format=%s"), "work");
 
   await fresh.call("subagent_message", { id, message: "change a file" }, ctx);

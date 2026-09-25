@@ -185,14 +185,16 @@ test("usage and context: counted at start, on compaction and per message, never 
   assert.equal(s.getBranch, 2);
 });
 
-test("usage: a finished subagent's saved cost counts, and its end event recounts; shutdown stops listening", async () => {
+test("usage: a finished subagent's saved tokens and cost count, and its end event recounts; shutdown stops listening", async () => {
   const branch = [
     { type: "message", message: { role: "assistant", usage: usage(1000, 200, 0, 0.5) } },
-    { type: "custom", customType: "rig.subagent.usage", data: { tokens: 9000, cost: 0.25 } },
+    { type: "custom", customType: "rig.subagent.usage", data: { tokens: 4200, cost: 0.25, input: 1000, output: 200, cacheRead: 3000, cacheWrite: 0 } },
+    // Saved before the split was kept: its cost still counts.
+    { type: "custom", customType: "rig.subagent.usage", data: { tokens: 9000, cost: 0 } },
   ];
   const { pi, s } = gitHarness({ branch, trusted: false });
   await s.emit("session_start");
-  assert.match(s.lines()[0], /in 1\.0k out 200 cache 0% \$0\.750/);
+  assert.match(s.lines()[0], /in 2\.0k out 400 cache 60% \$0\.750/);
 
   branch.push({ type: "custom", customType: "rig.subagent.usage", data: { tokens: 10, cost: 0.125 } });
   pi.events.emit("subagents:completed", { id: "a" });

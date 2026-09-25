@@ -50,8 +50,9 @@ any agent.
   one message listing them, then waits for each notice before it finishes
   (the fleet extension's session-end rule). Its own notice comes after theirs.
 - Tokens and cost roll up through the saved sessions. Each finished agent
-  saves its counts in its parent's session as a `rig.subagent.usage` entry,
-  the user's own session included, where the status footer counts its cost.
+  saves its counts (input, output and cache tokens, and cost) in its parent's
+  session as a `rig.subagent.usage` entry, the user's own session included,
+  where the status footer counts them.
   Each notice saves a `rig.subagent.reported` entry in the agent's own
   session. An agent's notice counts its own replies plus the usage entries
   since its last notice, so a child resumed from FleetView after its parent
@@ -168,12 +169,13 @@ Subagent 3fa9c1d2 (review auth) completed. STATUS: DONE
   partial output under `Partial output, incomplete:`.
 - In FleetView each agent is one `agent` row with its latest tool call or
   message line. When it finishes, the row and the chat line show its `STATUS`.
-- After its status the row shows the model and thinking level, then its tokens
+- The row shows the model and thinking level, a worktree agent's branch or
+  `worktree removed`, then its tokens (split as the status footer shows them)
   and cost once they are above zero. They count its session over every run
   plus each child once it finishes, as `Session total:` does. A finished row
-  adds the latest run's turns and tool uses. A worktree agent's row ends with
-  its branch, or `worktree removed`. For example:
-  `agent scout · done 2m13s · kid-1 · low · 41.2k tokens · $0.31 · 12 turns · 34 tool uses`.
+  adds the latest run's turns and tool uses. Its status and running time come
+  last. For example:
+  `agent scout · kid-1 · low · in 12k out 3.4k cache 81% · $0.31 · 12 turns · 34 tool uses · done 2m13s`.
 - A resume turns the finished row back into a running one, with its own
   running time, so each agent keeps one row.
 

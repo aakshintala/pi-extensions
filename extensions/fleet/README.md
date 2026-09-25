@@ -4,7 +4,7 @@ FleetView lists agents, monitors and running shells below the editor. Open an ag
 
 - The first row is the main session. Agents and monitors follow; nested items are indented under their parent. Each agent's activity or result sits on an indented `└─` line attached to its row.
 - Running background shells share one row: `N shells running in background`. Enter or click to choose a running shell, then view its log. The row disappears when the last shell finishes. An open log stays open until you go back.
-- Agent and monitor rows show kind, label, running time and status. Monitors show their latest activity or result on the same row. A finished agent shows its result on the linked line.
+- Agent and monitor rows show kind and label, then their details, with status and running time last so the steadier fields keep their place. Monitors show their latest activity or result before the status. A finished agent shows its result on the linked line.
 - An item's detail fields, such as an agent's model, thinking level, tokens and cost, follow its status. On a narrow row they drop from the right. The label is shortened with `…` so the status always shows. An agent's linked activity remains visible.
 - A finished agent or monitor leaves its row after 10 seconds. A finished shell leaves the shared shell row at once. Finished items stay in the registry while selected, open in the viewer or above running work; the 10 seconds start when that ends. Sending a prompt removes nothing.
 - FleetView shows at most 6 lines. A `… N more` line counts hidden items; the list scrolls by whole items, keeping an agent and its activity together.

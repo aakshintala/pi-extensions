@@ -36,16 +36,16 @@ test("a monitor is a FleetView row; its viewer follows the log, and x in FleetVi
   await tui.waitForEvent("agent_end", 2); // the call's turn, then the notice for "first"
 
   tui.keys("Down", "Down", "Enter");
-  await tui.waitForScreen(screen({ state: "0s", log: ["first"] }, ["   main", "›● monitor watch · 0s · first", KEYS], USAGE[0]));
+  await tui.waitForScreen(screen({ state: "0s", log: ["first"] }, ["   main", "›● monitor watch · first · 0s", KEYS], USAGE[0]));
   writeFileSync(join(tui.cwd, "go"), ""); // the viewer follows the new line
   await tui.waitForEvent("agent_end", 3); // its notice
-  await tui.waitForScreen(screen({ state: "0s", log: ["first", "second"] }, ["   main", "›● monitor watch · 0s · second", KEYS], USAGE[1]));
+  await tui.waitForScreen(screen({ state: "0s", log: ["first", "second"] }, ["   main", "›● monitor watch · second · 0s", KEYS], USAGE[1]));
 
   const pgid = Number(readFileSync(join(tui.cwd, "pgid"), "utf8"));
   t.after(() => assert.deepEqual(liveGroup(pgid), [], "the monitor's group is gone"));
   assert.notDeepEqual(liveGroup(pgid), []);
   tui.type("x");
   await tui.waitForEvent("agent_end", 4); // the stop's notice starts a turn
-  await tui.waitForScreen(screen({ state: "stopped 0s", log: ["first", "second"] }, ["   main", "›● monitor watch · stopped 0s · stopped", KEYS], USAGE[2]));
+  await tui.waitForScreen(screen({ state: "stopped 0s", log: ["first", "second"] }, ["   main", "›● monitor watch · stopped · stopped 0s", KEYS], USAGE[2]));
   assert.deepEqual(liveGroup(pgid), []);
 });
